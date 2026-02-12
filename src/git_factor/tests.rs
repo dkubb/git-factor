@@ -523,3 +523,15 @@ impl Io for DefaultLineIo {
 }
 
 #[test]
+fn io_default_outln_and_errln_append_newlines() {
+    let io = DefaultLineIo::default();
+
+    io.outln("hello").expect("outln ok");
+    io.errln("world").expect("errln ok");
+
+    assert_eq!(io.stdout(), "hello\n");
+    assert_eq!(io.stderr(), "world\n");
+}
+
+
+#[test]
