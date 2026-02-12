@@ -858,3 +858,191 @@ fn resolve_commit_refs_ignores_invalid_rev_list_lines() {
 }
 
 #[test]
+fn cmd_start_errors_when_no_commits_remain_after_sorting() {
+    let dir = TempDir::new().expect("tempdir");
+    let repo = dir.path();
+    let sha_a = "a".repeat(40);
+    let sha_b = "b".repeat(40);
+    let runner = ScriptedRunner::default()
+        .with_output("git", &["rev-parse", "--git-dir"], repo, ".git\n")
+        .with_output(
+            "git",
+            &["rev-parse", "--verify", "HEAD"],
+            repo,
+            &format!("{sha_a}\n"),
+        )
+        .with_output(
+            "git",
+            &["rev-list", "--reverse", "--topo-order", &sha_a],
+            repo,
+            &format!("{sha_b}\n"),
+        );
+    let io = TestIo::default();
+    let env = TestEnv {
+        cwd: repo.to_path_buf(),
+    };
+    let ctx = Ctx {
+        runner: &runner,
+        cwd: repo.to_path_buf(),
+        io: &io,
+        env: &env,
+        fs: &REAL_FS,
+    };
+
+    let err = run_with_args_vec(
+        &ctx,
+        vec![
+            OsString::from("git-factor"),
+            OsString::from("--exec"),
+            OsString::from("true"),
+            OsString::from("HEAD"),
+        ],
+    )
+    .expect_err("expected sorting to error");
+    assert_eq!(
+        err.to_string(),
+        "git command failed: no commits after sorting"
+    );
+}
+
+#[test]
+fn print_session_started_single_commit_without_untracked_or_claude_hints() {
+    let dir = TempDir::new().expect("tempdir");
+    let repo = dir.path();
+    let runner = ScriptedRunner::default()
+        .with_output(
+            "git",
+            &["diff", "--stat"],
+            repo,
+            "a.txt | 1 +\n1 file changed, 1 insertion(+)\n",
+        )
+        .with_output(
+            "git",
+            &["ls-files", "--others", "--exclude-standard"],
+            repo,
+            "",
+        )
+        .with_output(
+            "git",
+            &["rev-parse", "--show-toplevel"],
+            repo,
+            &format!("{}\n", repo.display()),
+        );
+    let io = TestIo::default();
+    let env = TestEnv {
+        cwd: repo.to_path_buf(),
+    };
+    let ctx = Ctx {
+        runner: &runner,
+        cwd: repo.to_path_buf(),
+        io: &io,
+        env: &env,
+        fs: &REAL_FS,
+    };
+    let commit = CommitSha::new("a".repeat(40)).expect("sha");
+    let commits = NonEmpty::new(commit);
+    let short = NonEmptyString::try_from("aaaaaaa".to_owned()).expect("short sha");
+
+    print_session_started(&ctx, &commits, &short, "subject").expect("print should succeed");
+
+    let expected = concat!(
+        "FACTOR: Split session started for aaaaaaa.\n",
+        "ORIGINAL MESSAGE: subject\n",
+        "UNSTAGED:\n",
+        "  a.txt | 1 +\n",
+        "  1 file changed, 1 insertion(+)\n",
+        "\n",
+        "NEXT: Stage changes for the first atomic commit, then run:\n",
+        "  git factor --continue --message \"type: description\"\n",
+        "\n",
+        "Run git factor --help for the full workflow guide.\n",
+        "\n",
+        "HINTS:\n",
+        "  - Find the ONE smallest addition nothing depends on\n",
+        "  - Target 15-30 lines (50 max)\n",
+        "  - Message: single concrete action, no \"and\"/\"or\"\n",
+        "  - Verify: git log --oneline | wc -l\n",
+        "  - NEVER use git commit. ONLY use git factor --continue.\n",
+        "  REMAINING: 1 file changed, 1 insertion(+)\n",
+        "  RECOVERY: git factor --abort\n"
+    );
+    assert_eq!(io.stdout(), expected);
+    assert!(io.stderr().is_empty());
+}
+
+#[test]
+fn print_session_started_multi_commit_with_untracked_and_claude_hints() {
+    let dir = TempDir::new().expect("tempdir");
+    let repo = dir.path();
+    let reference_dir = repo.join("references");
+    fs::create_dir_all(&reference_dir).expect("create references dir");
+    let rust_ref = reference_dir.join("rust.md");
+    fs::write(&rust_ref, "# rust\n").expect("write rust reference");
+
+    let runner = ScriptedRunner::default()
+        .with_output(
+            "git",
+            &["diff", "--stat"],
+            repo,
+            "a.txt | 1 +\n1 file changed, 1 insertion(+)\n",
+        )
+        .with_output(
+            "git",
+            &["ls-files", "--others", "--exclude-standard"],
+            repo,
+            "tmp.txt\n",
+        )
+        .with_output(
+            "git",
+            &["rev-parse", "--show-toplevel"],
+            repo,
+            &format!("{}\n", repo.display()),
+        );
+    let io = TestIo::default();
+    let env = ClaudeCodeEnv {
+        cwd: repo.to_path_buf(),
+    };
+    assert_eq!(env.current_dir().expect("cwd"), repo);
+    assert_eq!(env.current_exe().expect("exe"), repo.join("git-factor"));
+    assert_eq!(env.var_os("CLAUDECODE"), Some(OsString::from("1")));
+    assert_eq!(env.var_os("ANY"), None);
+    let ctx = Ctx {
+        runner: &runner,
+        cwd: repo.to_path_buf(),
+        io: &io,
+        env: &env,
+        fs: &REAL_FS,
+    };
+    let commit_a = CommitSha::new("a".repeat(40)).expect("sha a");
+    let commit_b = CommitSha::new("b".repeat(40)).expect("sha b");
+    let commits = NonEmpty {
+        head: commit_a,
+        tail: vec![commit_b],
+    };
+    let short = NonEmptyString::try_from("aaaaaaa".to_owned()).expect("short sha");
+
+    print_session_started(&ctx, &commits, &short, "subject").expect("print should succeed");
+
+    let expected = format!(
+        concat!(
+            "FACTOR: Split session started for 2 commits (first: aaaaaaa).\n",
+            "ORIGINAL MESSAGE: subject\n",
+            "UNSTAGED:\n",
+            "  a.txt | 1 +\n",
+            "  1 file changed, 1 insertion(+)\n",
+            "UNTRACKED:\n",
+            "  tmp.txt\n",
+            "\n",
+            "NEXT: Stage changes for the first atomic commit, then run:\n",
+            "  git factor --continue --message \"type: description\"\n",
+            "\n",
+            "Run git factor --help for the full workflow guide.\n",
+            "\n",
+            "HINTS:\n",
+            "  - Find the ONE smallest addition nothing depends on\n",
+            "  - Target 15-30 lines (50 max)\n",
+            "  - Message: single concrete action, no \"and\"/\"or\"\n",
+            "  - Verify: git log --oneline | wc -l\n",
+            "  - NEVER use git commit. ONLY use git factor --continue.\n",
+            "  REMAINING: 1 file changed, 1 insertion(+)\n",
+            "  REFERENCE: {}\n",
