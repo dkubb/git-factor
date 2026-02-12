@@ -1046,3 +1046,192 @@ fn print_session_started_multi_commit_with_untracked_and_claude_hints() {
             "  - NEVER use git commit. ONLY use git factor --continue.\n",
             "  REMAINING: 1 file changed, 1 insertion(+)\n",
             "  REFERENCE: {}\n",
+            "  RECOVERY: git factor --abort\n",
+            "<claude>\n",
+            "- If context is above 50%, pause and ask the user to /compact.\n",
+            "- Do NOT stop early. Keep committing until \"Complete\".\n",
+            "- Do NOT use git commit directly. ONLY use git-factor --continue.\n",
+            "- Each commit MUST pass the exec gate. No shortcuts.\n",
+            "</claude>\n"
+        ),
+        rust_ref.display()
+    );
+    assert_eq!(io.stdout(), expected);
+    assert!(io.stderr().is_empty());
+}
+
+#[test]
+fn cmd_start_errors_when_merge_base_spawn_fails() {
+    let dir = TempDir::new().expect("tempdir");
+    let repo = dir.path();
+    let sha = "a".repeat(40);
+    let runner = ScriptedRunner::default()
+        .with_output("git", &["rev-parse", "--git-dir"], repo, ".git\n")
+        .with_output(
+            "git",
+            &["rev-parse", "--verify", "HEAD"],
+            repo,
+            &format!("{sha}\n"),
+        )
+        .with_output(
+            "git",
+            &["rev-list", "--reverse", "--topo-order", &sha],
+            repo,
+            &format!("{sha}\n"),
+        );
+    let io = TestIo::default();
+    let env = TestEnv {
+        cwd: repo.to_path_buf(),
+    };
+    let ctx = Ctx {
+        runner: &runner,
+        cwd: repo.to_path_buf(),
+        io: &io,
+        env: &env,
+        fs: &REAL_FS,
+    };
+
+    let err = run_with_args_vec(
+        &ctx,
+        vec![
+            OsString::from("git-factor"),
+            OsString::from("--exec"),
+            OsString::from("true"),
+            OsString::from("HEAD"),
+        ],
+    )
+    .expect_err("expected merge-base spawn to fail");
+
+    assert!(
+        err.to_string().contains("merge-base"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn cmd_start_errors_when_short_sha_is_empty() {
+    let dir = TempDir::new().expect("tempdir");
+    let repo = dir.path();
+    let sha = "a".repeat(40);
+    let runner = ScriptedRunner::default()
+        .with_output("git", &["rev-parse", "--git-dir"], repo, ".git\n")
+        .with_output(
+            "git",
+            &["rev-parse", "--verify", "HEAD"],
+            repo,
+            &format!("{sha}\n"),
+        )
+        .with_output(
+            "git",
+            &["rev-list", "--reverse", "--topo-order", &sha],
+            repo,
+            &format!("{sha}\n"),
+        )
+        .with_status(
+            "git",
+            &["merge-base", "--is-ancestor", &sha, "HEAD"],
+            &[],
+            true,
+            repo,
+            0,
+        )
+        .with_status(
+            "git",
+            &["rev-parse", "--verify", "--quiet", &format!("{sha}^2")],
+            &[],
+            true,
+            repo,
+            1,
+        )
+        .with_output("git", &["rev-parse", "--short", &sha], repo, "\n");
+    let io = TestIo::default();
+    let env = TestEnv {
+        cwd: repo.to_path_buf(),
+    };
+    let ctx = Ctx {
+        runner: &runner,
+        cwd: repo.to_path_buf(),
+        io: &io,
+        env: &env,
+        fs: &REAL_FS,
+    };
+
+    let err = run_with_args_vec(
+        &ctx,
+        vec![
+            OsString::from("git-factor"),
+            OsString::from("--exec"),
+            OsString::from("true"),
+            OsString::from("HEAD"),
+        ],
+    )
+    .expect_err("expected short SHA to be empty");
+
+    assert_eq!(err.to_string(), "git command failed: empty short SHA");
+}
+
+#[test]
+fn cmd_start_propagates_rev_parse_short_sha_output_error() {
+    let dir = TempDir::new().expect("tempdir");
+    let repo = dir.path();
+    let sha = "a".repeat(40);
+    let runner = ScriptedRunner::default()
+        .with_output("git", &["rev-parse", "--git-dir"], repo, ".git\n")
+        .with_output(
+            "git",
+            &["rev-parse", "--verify", "HEAD"],
+            repo,
+            &format!("{sha}\n"),
+        )
+        .with_output(
+            "git",
+            &["rev-list", "--reverse", "--topo-order", &sha],
+            repo,
+            &format!("{sha}\n"),
+        )
+        .with_status(
+            "git",
+            &["merge-base", "--is-ancestor", &sha, "HEAD"],
+            &[],
+            true,
+            repo,
+            0,
+        )
+        .with_status(
+            "git",
+            &["rev-parse", "--verify", "--quiet", &format!("{sha}^2")],
+            &[],
+            true,
+            repo,
+            1,
+        );
+    let io = TestIo::default();
+    let env = TestEnv {
+        cwd: repo.to_path_buf(),
+    };
+    let ctx = Ctx {
+        runner: &runner,
+        cwd: repo.to_path_buf(),
+        io: &io,
+        env: &env,
+        fs: &REAL_FS,
+    };
+
+    let err = run_with_args_vec(
+        &ctx,
+        vec![
+            OsString::from("git-factor"),
+            OsString::from("--exec"),
+            OsString::from("true"),
+            OsString::from("HEAD"),
+        ],
+    )
+    .expect_err("expected rev-parse --short to fail");
+
+    assert!(
+        err.to_string().contains("git rev-parse:")
+            && err.to_string().contains("unexpected output call"),
+        "unexpected error: {err}"
+    );
+}
+
