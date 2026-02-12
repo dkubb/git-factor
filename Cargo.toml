@@ -1,0 +1,97 @@
+[package]
+name = "git-factor"
+description = "Split a large git commit into smaller atomic commits using interactive rebase."
+version = "0.1.0"
+authors = ["Dan Kubb <github@dan.kubb.ca>"]
+edition = "2024"
+license = "LicenseRef-Private"
+publish = false
+categories = ["command-line-utilities"]
+keywords = ["git", "cli"]
+
+[[bin]]
+name = "git-factor"
+path = "src/bin/git-factor.rs"
+
+[[bin]]
+name = "git-sequence-editor"
+path = "src/bin/git-sequence-editor.rs"
+
+[lints]
+workspace = true
+
+[workspace]
+members = [".", "expect-fail-macro"]
+
+[workspace.package]
+edition = "2024"
+publish = false
+license = "LicenseRef-Private"
+
+[workspace.dependencies]
+clap = { version = "4.5.56", features = ["derive"] }
+nonempty = "0.12.0"
+thiserror = "2.0.18"
+
+[dependencies]
+clap = { workspace = true }
+non-empty-string = "0.2.6"
+nonempty = { workspace = true }
+tempfile = "3.24.0"
+thiserror = { workspace = true }
+
+[dev-dependencies]
+assert_cmd = "2.1.2"
+expect-fail-macro = { path = "expect-fail-macro" }
+predicates = "3.1.3"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+warnings = "deny"
+future_incompatible = { level = "deny", priority = -1 }
+unexpected_cfgs = { level = "deny", check-cfg = [
+  'cfg(coverage)',
+  'cfg(coverage_nightly)',
+] }
+missing_docs = "deny"
+let_underscore_drop = "deny"
+unreachable_pub = "deny"
+unused = { level = "deny", priority = -1 }
+rust_2018_idioms = { level = "deny", priority = -1 }
+rust_2024_compatibility = { level = "deny", priority = -1 }
+missing_debug_implementations = "deny"
+missing_copy_implementations = "deny"
+
+unused_crate_dependencies = "allow"
+
+[workspace.lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "deny", priority = -1 }
+nursery = { level = "deny", priority = -1 }
+cargo = { level = "deny", priority = -1 }
+complexity = { level = "deny", priority = -1 }
+correctness = { level = "deny", priority = -1 }
+perf = { level = "deny", priority = -1 }
+style = { level = "deny", priority = -1 }
+suspicious = { level = "deny", priority = -1 }
+
+blanket_clippy_restriction_lints = "allow"
+restriction = { level = "deny", priority = -1 }
+
+assertions_on_result_states = "allow"
+error_impl_error = "allow"
+expect_used = "allow"
+implicit_return = "allow"
+min_ident_chars = "allow"
+multiple_crate_versions = "allow"
+pub_with_shorthand = "allow"
+question_mark_used = "allow"
+self_named_module_files = "allow"
+std_instead_of_alloc = "allow"
+single_call_fn = "allow"
+
+[workspace.lints.rustdoc]
+all = { level = "deny", priority = -1 }
+missing_crate_level_docs = "deny"
+private_doc_tests = "deny"
+unescaped_backticks = "deny"

@@ -1,0 +1,57 @@
+set shell := ["bash", "--noprofile", "--norc", "-o", "errexit", "-o", "errtrace", "-o", "nounset", "-o", "pipefail", "-c"]
+
+# Default recipe shows available commands
+default:
+    just --list
+
+# Build the project
+build:
+    cargo build --quiet
+
+# Check code compiles
+check:
+    cargo check --quiet
+
+# Full CI validation pipeline
+ci: fmt-check lint test coverage deny
+
+# Clean build artifacts
+clean:
+    cargo clean --quiet
+
+# Run cargo deny security audit
+deny:
+    cargo --config .cargo/deny.toml --quiet deny check >/dev/null
+
+# Format code (fix in place)
+fmt *args:
+    cargo fmt-all --quiet {{ args }}
+
+# Check formatting without changes
+fmt-check:
+    just fmt --check
+
+# Lint with auto-fix
+fix: fmt
+    just lint-rust --allow-dirty --allow-staged --fix
+
+# Lint (check only)
+lint: lint-rust
+
+# Lint Rust (check only, pass args for --fix)
+lint-rust *args:
+    cargo clippy-all --quiet {{ args }}
+
+# Run tests
+test:
+    cargo --quiet test-all
+    cargo --quiet test-doc
+
+# Run coverage (quiet on success)
+coverage:
+    cargo coverage --no-report
+
+# Install into ~/.local/bin (requires ~/.local/bin on PATH)
+install-local:
+    mkdir -p "${HOME}/.local/bin"
+    cargo install --force --path . --root ~/.local
