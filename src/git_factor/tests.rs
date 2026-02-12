@@ -1456,3 +1456,273 @@ fn cmd_start_propagates_rebase_status_error_in_multi_commit_session() {
 }
 
 #[test]
+fn cmd_start_propagates_requires_rebase_state_write_failure() {
+    let dir = TempDir::new().expect("tempdir");
+    let repo = dir.path();
+    let fs = FailingRequiresRebaseWriteFs;
+
+    let mkdir = repo.join("mkdir");
+    fs.create_dir_all(&mkdir).expect("mkdir");
+    assert!(fs.is_dir(&mkdir));
+    assert!(fs.exists(&mkdir));
+
+    let write_read = repo.join("write-read.txt");
+    fs.write_string(&write_read, "hello").expect("write hello");
+    let content = fs.read_to_string(&write_read).expect("read hello");
+    assert_eq!(content, "hello");
+
+    let canonical = fs.canonicalize(&mkdir).expect("canonicalize mkdir");
+    assert!(canonical.exists());
+
+    let rm_file = repo.join("rm-file.txt");
+    fs.write_string(&rm_file, "x").expect("write rm file");
+    fs.remove_file(&rm_file).expect("remove rm file");
+    assert!(!fs.exists(&rm_file));
+
+    let rm_dir = repo.join("rm-dir");
+    fs.create_dir_all(&rm_dir).expect("create rm dir");
+    fs.remove_dir_all(&rm_dir).expect("remove rm dir");
+    assert!(!fs.exists(&rm_dir));
+
+    let sha = "a".repeat(40);
+    let runner = ScriptedRunner::default()
+        .with_output("git", &["rev-parse", "--git-dir"], repo, ".git\n")
+        .with_output(
+            "git",
+            &["rev-parse", "--verify", "HEAD"],
+            repo,
+            &format!("{sha}\n"),
+        )
+        .with_output(
+            "git",
+            &["rev-list", "--reverse", "--topo-order", &sha],
+            repo,
+            &format!("{sha}\n"),
+        )
+        .with_status(
+            "git",
+            &["merge-base", "--is-ancestor", &sha, "HEAD"],
+            &[],
+            true,
+            repo,
+            0,
+        )
+        .with_status(
+            "git",
+            &["rev-parse", "--verify", "--quiet", &format!("{sha}^2")],
+            &[],
+            true,
+            repo,
+            1,
+        )
+        .with_output("git", &["rev-parse", "--short", &sha], repo, "aaaaaaa\n")
+        .with_output(
+            "git",
+            &["show", "--format=%B", "--no-patch", &sha],
+            repo,
+            "msg\n",
+        )
+        .with_status(
+            "bash",
+            &["--norc", "--noprofile", "-n", "-c", "true"],
+            &[],
+            true,
+            repo,
+            0,
+        )
+        .with_status(
+            "git",
+            &["rev-parse", "--verify", "--quiet", &format!("{sha}^")],
+            &[],
+            true,
+            repo,
+            0,
+        );
+    let io = TestIo::default();
+    let env = TestEnv {
+        cwd: repo.to_path_buf(),
+    };
+    let ctx = Ctx {
+        runner: &runner,
+        cwd: repo.to_path_buf(),
+        io: &io,
+        env: &env,
+        fs: &fs,
+    };
+
+    let err = run_with_args_vec(
+        &ctx,
+        vec![
+            OsString::from("git-factor"),
+            OsString::from("--exec"),
+            OsString::from("true"),
+            OsString::from("HEAD"),
+        ],
+    )
+    .expect_err("expected requires_rebase write failure");
+
+    assert_eq!(
+        err.to_string(),
+        "failed to write state: requires_rebase write failed"
+    );
+}
+
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "Full cmd_start scripted runner setup; splitting further would reduce readability"
+)]
+fn cmd_start_range_ref_inserts_shas_and_propagates_io_error_on_multi_commit_banner() {
+    let dir = TempDir::new().expect("tempdir");
+    let repo = dir.path();
+    fs::write(repo.join("git-factor"), "").expect("write fake exe");
+
+    let sha_a = "a".repeat(40);
+    let sha_b = "b".repeat(40);
+
+    // Match the production `editor_path()` behavior, which canonicalizes the exe path.
+    let exe = fs::canonicalize(repo.join("git-factor")).expect("canonicalize exe");
+    let editor = exe
+        .parent()
+        .expect("exe parent")
+        .join("git-sequence-editor");
+    let seq_editor = format!(
+        "{} {} {} {} {}",
+        shell_quote(editor.to_string_lossy().as_ref()),
+        shell_quote("--edit"),
+        shell_quote("aaaaaaa"),
+        shell_quote("--edit"),
+        shell_quote("bbbbbbb"),
+    );
+
+    let runner = ScriptedRunner::default()
+        .with_output("git", &["rev-parse", "--git-dir"], repo, ".git\n")
+        .with_output(
+            "git",
+            &["rev-parse", "--verify", "HEAD"],
+            repo,
+            &format!("{sha_b}\n"),
+        )
+        .with_output(
+            "git",
+            &["rev-list", "a..b"],
+            repo,
+            &format!("{sha_a}\n{sha_b}\n"),
+        )
+        .with_output(
+            "git",
+            &["rev-list", "--reverse", "--topo-order", &sha_a, &sha_b],
+            repo,
+            &format!("{sha_a}\n{sha_b}\n"),
+        )
+        .with_status(
+            "git",
+            &["merge-base", "--is-ancestor", &sha_a, "HEAD"],
+            &[],
+            true,
+            repo,
+            0,
+        )
+        .with_status(
+            "git",
+            &["merge-base", "--is-ancestor", &sha_b, "HEAD"],
+            &[],
+            true,
+            repo,
+            0,
+        )
+        .with_status(
+            "git",
+            &["rev-parse", "--verify", "--quiet", &format!("{sha_a}^2")],
+            &[],
+            true,
+            repo,
+            1,
+        )
+        .with_status(
+            "git",
+            &["rev-parse", "--verify", "--quiet", &format!("{sha_b}^2")],
+            &[],
+            true,
+            repo,
+            1,
+        )
+        .with_output("git", &["rev-parse", "--short", &sha_a], repo, "aaaaaaa\n")
+        .with_output("git", &["rev-parse", "--short", &sha_b], repo, "bbbbbbb\n")
+        .with_output(
+            "git",
+            &["show", "--format=%B", "--no-patch", &sha_a],
+            repo,
+            "msg\n",
+        )
+        .with_status(
+            "bash",
+            &["--norc", "--noprofile", "-n", "-c", "true"],
+            &[],
+            true,
+            repo,
+            0,
+        )
+        .with_status(
+            "git",
+            &["rev-parse", "--verify", "--quiet", &format!("{sha_a}^")],
+            &[],
+            true,
+            repo,
+            0,
+        )
+        .with_status(
+            "git",
+            &[
+                "rebase",
+                "--autostash",
+                "--no-stat",
+                "--reschedule-failed-exec",
+                "--interactive",
+                "--exec",
+                "true",
+                &format!("{sha_a}^"),
+            ],
+            &[("GIT_SEQUENCE_EDITOR", &seq_editor)],
+            false,
+            repo,
+            0,
+        )
+        .with_status("git", &["reset", "--mixed", "HEAD~1"], &[], false, repo, 0)
+        .with_output("git", &["diff", "--stat"], repo, "")
+        .with_output(
+            "git",
+            &["ls-files", "--others", "--exclude-standard"],
+            repo,
+            "",
+        );
+
+    let io = FailingIo;
+    let env = TestEnv {
+        cwd: repo.to_path_buf(),
+    };
+    let ctx = Ctx {
+        runner: &runner,
+        cwd: repo.to_path_buf(),
+        io: &io,
+        env: &env,
+        fs: &REAL_FS,
+    };
+
+    let err = run_with_args_vec(
+        &ctx,
+        vec![
+            OsString::from("git-factor"),
+            OsString::from("--exec"),
+            OsString::from("true"),
+            OsString::from("a..b"),
+        ],
+    )
+    .expect_err("expected io failure");
+
+    assert!(
+        matches!(&err, FactorError::Io(inner) if inner.to_string().contains("io fail")),
+        "err was: {err:?}"
+    );
+}
+
