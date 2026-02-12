@@ -395,3 +395,131 @@ impl Io for TestIo {
     }
 }
 
+struct FailingIo;
+
+impl Io for FailingIo {
+    fn out(&self, _text: &str) -> io::Result<()> {
+        Err(io::Error::other("io fail"))
+    }
+
+    fn err(&self, _text: &str) -> io::Result<()> {
+        Err(io::Error::other("io fail"))
+    }
+
+    fn outln(&self, _line: &str) -> io::Result<()> {
+        Err(io::Error::other("io fail"))
+    }
+
+    fn errln(&self, _line: &str) -> io::Result<()> {
+        Err(io::Error::other("io fail"))
+    }
+}
+
+#[test]
+fn failing_io_out_is_reachable_for_coverage() {
+    let io = FailingIo;
+    let err = io.out("io fail").expect_err("expected io failure");
+    assert!(err.to_string().contains("io fail"), "err was: {err:?}");
+}
+
+#[test]
+fn failing_io_err_is_reachable_for_coverage() {
+    let io = FailingIo;
+    let err = io.err("io fail").expect_err("expected io failure");
+    assert!(err.to_string().contains("io fail"), "err was: {err:?}");
+}
+
+#[test]
+fn failing_io_errln_is_reachable_for_coverage() {
+    let io = FailingIo;
+    let err = io.errln("io fail").expect_err("expected io failure");
+    assert!(err.to_string().contains("io fail"), "err was: {err:?}");
+}
+
+struct DefaultOutlnFailingIo;
+
+#[expect(
+    clippy::missing_trait_methods,
+    reason = "Test helper intentionally relies on Io default outln to cover the default implementation"
+)]
+impl Io for DefaultOutlnFailingIo {
+    fn out(&self, _text: &str) -> io::Result<()> {
+        Err(io::Error::other("io fail"))
+    }
+
+    fn err(&self, _text: &str) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+#[test]
+fn default_outln_error_path_is_reachable_for_coverage() {
+    let io = DefaultOutlnFailingIo;
+    let err = io.outln("io fail").expect_err("expected io failure");
+    assert!(err.to_string().contains("io fail"), "err was: {err:?}");
+    io.err("").expect("err ok");
+}
+
+struct DefaultErrlnFailingIo;
+
+#[expect(
+    clippy::missing_trait_methods,
+    reason = "Test helper intentionally relies on Io default errln to cover the default implementation"
+)]
+impl Io for DefaultErrlnFailingIo {
+    fn out(&self, _text: &str) -> io::Result<()> {
+        Ok(())
+    }
+
+    fn err(&self, _text: &str) -> io::Result<()> {
+        Err(io::Error::other("io fail"))
+    }
+}
+
+#[test]
+fn default_errln_error_path_is_reachable_for_coverage() {
+    let io = DefaultErrlnFailingIo;
+    let err = io.errln("io fail").expect_err("expected io failure");
+    assert!(err.to_string().contains("io fail"), "err was: {err:?}");
+    io.out("").expect("out ok");
+}
+
+#[derive(Default)]
+struct DefaultLineIo {
+    stdout: Mutex<String>,
+    stderr: Mutex<String>,
+}
+
+impl DefaultLineIo {
+    fn stdout(&self) -> String {
+        self.stdout.lock().expect("stdout lock").clone()
+    }
+
+    fn stderr(&self) -> String {
+        self.stderr.lock().expect("stderr lock").clone()
+    }
+}
+
+#[expect(
+    clippy::missing_trait_methods,
+    reason = "Test helper intentionally relies on Io default outln/errln to cover default implementations"
+)]
+impl Io for DefaultLineIo {
+    fn out(&self, text: &str) -> io::Result<()> {
+        self.stdout
+            .lock()
+            .map_err(|_err| io::Error::other("stdout lock poisoned"))?
+            .push_str(text);
+        Ok(())
+    }
+
+    fn err(&self, text: &str) -> io::Result<()> {
+        self.stderr
+            .lock()
+            .map_err(|_err| io::Error::other("stderr lock poisoned"))?
+            .push_str(text);
+        Ok(())
+    }
+}
+
+#[test]
