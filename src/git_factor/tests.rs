@@ -629,3 +629,64 @@ fn io_err_errors_when_stderr_lock_is_poisoned() {
 }
 
 #[derive(Default)]
+struct FailingEnv {
+    message: &'static str,
+}
+
+impl Env for FailingEnv {
+    fn current_dir(&self) -> io::Result<PathBuf> {
+        Err(io::Error::other(self.message))
+    }
+
+    fn current_exe(&self) -> io::Result<PathBuf> {
+        Err(io::Error::other(self.message))
+    }
+
+    fn var_os(&self, _key: &str) -> Option<OsString> {
+        None
+    }
+}
+
+struct ExeFailingEnv {
+    cwd: PathBuf,
+}
+
+impl Env for ExeFailingEnv {
+    fn current_dir(&self) -> io::Result<PathBuf> {
+        Ok(self.cwd.clone())
+    }
+
+    fn current_exe(&self) -> io::Result<PathBuf> {
+        Err(io::Error::other("no exe"))
+    }
+
+    fn var_os(&self, _key: &str) -> Option<OsString> {
+        None
+    }
+}
+
+struct RootExeEnv {
+    cwd: PathBuf,
+}
+
+impl Env for RootExeEnv {
+    fn current_dir(&self) -> io::Result<PathBuf> {
+        Ok(self.cwd.clone())
+    }
+
+    fn current_exe(&self) -> io::Result<PathBuf> {
+        Ok(PathBuf::from("/"))
+    }
+
+    fn var_os(&self, _key: &str) -> Option<OsString> {
+        None
+    }
+}
+
+#[test]
+fn failing_env_returns_errors_and_no_vars() {
+    let env = FailingEnv { message: "nope" };
+
+    assert_eq!(env.current_dir().expect_err("cwd err").to_string(), "nope");
+    assert_eq!(env.current_exe().expect_err("exe err").to_string(), "nope");
+    assert_eq!(env.var_os("ANY"), None);
