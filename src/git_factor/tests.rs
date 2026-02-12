@@ -576,3 +576,15 @@ fn io_default_err_errors_when_stderr_lock_is_poisoned() {
 }
 
 #[test]
+fn io_outln_and_errln_append_newlines() {
+    let io = TestIo::default();
+
+    io.outln("hello").expect("outln ok");
+    io.errln("world").expect("errln ok");
+
+    assert_eq!(io.stdout(), "hello\n");
+    assert_eq!(io.stderr(), "world\n");
+}
+
+
+#[derive(Default)]
