@@ -1726,3 +1726,20 @@ fn cmd_start_range_ref_inserts_shas_and_propagates_io_error_on_multi_commit_bann
     );
 }
 
+#[test]
+fn main_entry_with_prints_error_when_ctx_cannot_be_built() {
+    let io = TestIo::default();
+    let env = FailingEnv { message: "no cwd" };
+    let ctx = ctx_from_parts(&env, &REAL_RUNNER, &io, &REAL_FS);
+
+    let code = main_entry_with_vec(&io, ctx, vec![OsString::from("git-factor")]);
+
+    assert_eq!(code, EXIT_SOFTWARE);
+    assert_eq!(
+        io.stderr(),
+        "git command failed: cannot resolve cwd: no cwd\n"
+    );
+    assert_eq!(io.stdout(), "");
+}
+
+#[test]
