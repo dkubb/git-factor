@@ -1,0 +1,17 @@
+[package]
+name = "expect-fail-macro"
+version = "0.1.0"
+edition = "2024"
+publish = false
+license = "LicenseRef-Private"
+
+[lib]
+proc-macro = true
+
+[lints]
+workspace = true
+
+[dependencies]
+proc-macro2 = "1.0.103"
+quote = "1.0.41"
+syn = { version = "2.0.108", features = ["full"] }
