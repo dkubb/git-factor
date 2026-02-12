@@ -586,5 +586,26 @@ fn io_outln_and_errln_append_newlines() {
     assert_eq!(io.stderr(), "world\n");
 }
 
+#[test]
+#[expect(
+    clippy::panic,
+    reason = "Poisoning a mutex requires panicking while holding the lock"
+)]
+fn io_out_errors_when_stdout_lock_is_poisoned() {
+    let io = TestIo::default();
+    thread::scope(|scope| {
+        let handle = scope.spawn(|| {
+            let _guard = io.stdout.lock().expect("stdout lock");
+            panic!("poison stdout lock");
+        });
+        drop(handle.join());
+    });
+
+    let err = io
+        .out("hello")
+        .expect_err("expected out to fail on poisoned lock");
+    assert_eq!(err.to_string(), "stdout lock poisoned");
+}
+
 
 #[derive(Default)]
