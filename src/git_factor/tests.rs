@@ -1235,3 +1235,224 @@ fn cmd_start_propagates_rev_parse_short_sha_output_error() {
     );
 }
 
+#[test]
+fn cmd_start_propagates_status_error_when_start_sequence_fails() {
+    let dir = TempDir::new().expect("tempdir");
+    let repo = dir.path();
+    fs::write(repo.join("git-factor"), "").expect("write fake exe");
+
+    let sha = "a".repeat(40);
+    let runner = ScriptedRunner::default()
+        .with_output("git", &["rev-parse", "--git-dir"], repo, ".git\n")
+        .with_output(
+            "git",
+            &["rev-parse", "--verify", "HEAD"],
+            repo,
+            &format!("{sha}\n"),
+        )
+        .with_output(
+            "git",
+            &["rev-list", "--reverse", "--topo-order", &sha],
+            repo,
+            &format!("{sha}\n"),
+        )
+        .with_status(
+            "git",
+            &["merge-base", "--is-ancestor", &sha, "HEAD"],
+            &[],
+            true,
+            repo,
+            0,
+        )
+        .with_status(
+            "git",
+            &["rev-parse", "--verify", "--quiet", &format!("{sha}^2")],
+            &[],
+            true,
+            repo,
+            1,
+        )
+        .with_output("git", &["rev-parse", "--short", &sha], repo, "aaaaaaa\n")
+        .with_output(
+            "git",
+            &["show", "--format=%B", "--no-patch", &sha],
+            repo,
+            "msg\n",
+        )
+        .with_status(
+            "bash",
+            &["--norc", "--noprofile", "-n", "-c", "true"],
+            &[],
+            true,
+            repo,
+            0,
+        )
+        .with_status(
+            "git",
+            &["rev-parse", "--verify", "--quiet", &format!("{sha}^")],
+            &[],
+            true,
+            repo,
+            0,
+        );
+
+    let io = TestIo::default();
+    let env = TestEnv {
+        cwd: repo.to_path_buf(),
+    };
+    let ctx = Ctx {
+        runner: &runner,
+        cwd: repo.to_path_buf(),
+        io: &io,
+        env: &env,
+        fs: &REAL_FS,
+    };
+
+    let err = run_with_args_vec(
+        &ctx,
+        vec![
+            OsString::from("git-factor"),
+            OsString::from("--exec"),
+            OsString::from("true"),
+            OsString::from("HEAD"),
+        ],
+    )
+    .expect_err("expected startup status lookup to fail");
+
+    assert!(
+        matches!(
+            &err,
+            FactorError::GitCommand(msg)
+                if msg.contains("git reset:") && msg.contains("unexpected status call")
+        ),
+        "err was: {err:?}"
+    );
+}
+
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "Full cmd_start scripted runner setup for rebase-status failure path"
+)]
+fn cmd_start_propagates_rebase_status_error_in_multi_commit_session() {
+    let dir = TempDir::new().expect("tempdir");
+    let repo = dir.path();
+    fs::write(repo.join("git-factor"), "").expect("write fake exe");
+
+    let sha_a = "a".repeat(40);
+    let sha_b = "b".repeat(40);
+    let runner = ScriptedRunner::default()
+        .with_output("git", &["rev-parse", "--git-dir"], repo, ".git\n")
+        .with_output(
+            "git",
+            &["rev-parse", "--verify", &sha_a],
+            repo,
+            &format!("{sha_a}\n"),
+        )
+        .with_output(
+            "git",
+            &["rev-parse", "--verify", &sha_b],
+            repo,
+            &format!("{sha_b}\n"),
+        )
+        .with_output(
+            "git",
+            &["rev-list", "--reverse", "--topo-order", &sha_a, &sha_b],
+            repo,
+            &format!("{sha_a}\n{sha_b}\n"),
+        )
+        .with_output(
+            "git",
+            &["rev-parse", "--verify", "HEAD"],
+            repo,
+            &format!("{sha_b}\n"),
+        )
+        .with_status(
+            "git",
+            &["merge-base", "--is-ancestor", &sha_a, "HEAD"],
+            &[],
+            true,
+            repo,
+            0,
+        )
+        .with_status(
+            "git",
+            &["rev-parse", "--verify", "--quiet", &format!("{sha_a}^2")],
+            &[],
+            true,
+            repo,
+            1,
+        )
+        .with_status(
+            "git",
+            &["merge-base", "--is-ancestor", &sha_b, "HEAD"],
+            &[],
+            true,
+            repo,
+            0,
+        )
+        .with_status(
+            "git",
+            &["rev-parse", "--verify", "--quiet", &format!("{sha_b}^2")],
+            &[],
+            true,
+            repo,
+            1,
+        )
+        .with_output("git", &["rev-parse", "--short", &sha_a], repo, "aaaaaaa\n")
+        .with_output(
+            "git",
+            &["show", "--format=%B", "--no-patch", &sha_a],
+            repo,
+            "msg\n",
+        )
+        .with_status(
+            "bash",
+            &["--norc", "--noprofile", "-n", "-c", "true"],
+            &[],
+            true,
+            repo,
+            0,
+        )
+        .with_status(
+            "git",
+            &["rev-parse", "--verify", "--quiet", &format!("{sha_a}^")],
+            &[],
+            true,
+            repo,
+            0,
+        )
+        .with_output("git", &["rev-parse", "--short", &sha_a], repo, "aaaaaaa\n")
+        .with_output("git", &["rev-parse", "--short", &sha_b], repo, "bbbbbbb\n");
+
+    let io = TestIo::default();
+    let env = TestEnv {
+        cwd: repo.to_path_buf(),
+    };
+    let ctx = Ctx {
+        runner: &runner,
+        cwd: repo.to_path_buf(),
+        io: &io,
+        env: &env,
+        fs: &REAL_FS,
+    };
+
+    let err = run_with_args_vec(
+        &ctx,
+        vec![
+            OsString::from("git-factor"),
+            OsString::from("--exec"),
+            OsString::from("true"),
+            OsString::from(&sha_a),
+            OsString::from(&sha_b),
+        ],
+    )
+    .expect_err("expected rebase status call to fail");
+
+    assert!(
+        matches!(&err, FactorError::GitCommand(msg) if msg.contains("git rebase:") && msg.contains("unexpected status call")),
+        "err was: {err:?}"
+    );
+}
+
+#[test]
