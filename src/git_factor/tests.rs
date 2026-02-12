@@ -554,5 +554,25 @@ fn io_default_out_errors_when_stdout_lock_is_poisoned() {
     assert_eq!(err.to_string(), "stdout lock poisoned");
 }
 
+#[test]
+#[expect(
+    clippy::panic,
+    reason = "Poisoning a mutex requires panicking while holding the lock"
+)]
+fn io_default_err_errors_when_stderr_lock_is_poisoned() {
+    let io = DefaultLineIo::default();
+    thread::scope(|scope| {
+        let handle = scope.spawn(|| {
+            let _guard = io.stderr.lock().expect("stderr lock");
+            panic!("poison stderr lock");
+        });
+        drop(handle.join());
+    });
+
+    let err = io
+        .err("hello")
+        .expect_err("expected err to fail on poisoned lock");
+    assert_eq!(err.to_string(), "stderr lock poisoned");
+}
 
 #[test]
