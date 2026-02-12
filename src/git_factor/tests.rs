@@ -249,3 +249,149 @@ fn scripted_runner_status_includes_env_key() {
 }
 
 #[test]
+fn git_commit_preserving_metadata_propagates_git_output_error() {
+    let dir = TempDir::new().expect("tempdir");
+    let repo = dir.path();
+    let runner =
+        ScriptedRunner::default().with_output("git", &["rev-parse", "--git-dir"], repo, ".git\n");
+    let io = TestIo::default();
+    let env = TestEnv {
+        cwd: repo.to_path_buf(),
+    };
+    let ctx = Ctx {
+        runner: &runner,
+        cwd: repo.to_path_buf(),
+        io: &io,
+        env: &env,
+        fs: &REAL_FS,
+    };
+
+    let commit = CommitSha::new("a".repeat(40)).expect("commit sha");
+    let msg = NonEmptyString::try_from("feat: msg".to_owned()).expect("msg");
+    let messages = NonEmpty::new(msg);
+
+    let err = git_commit_preserving_metadata(&ctx, &commit, &messages, false)
+        .expect_err("expected git output error");
+
+    assert!(
+        err.to_string().contains("unexpected output call"),
+        "unexpected error: {err}"
+    );
+}
+
+struct TestEnv {
+    cwd: PathBuf,
+}
+
+impl Env for TestEnv {
+    fn current_dir(&self) -> io::Result<PathBuf> {
+        Ok(self.cwd.clone())
+    }
+
+    fn current_exe(&self) -> io::Result<PathBuf> {
+        Ok(self.cwd.join("git-factor"))
+    }
+
+    fn var_os(&self, _key: &str) -> Option<OsString> {
+        None
+    }
+}
+
+struct ClaudeCodeEnv {
+    cwd: PathBuf,
+}
+
+impl Env for ClaudeCodeEnv {
+    fn current_dir(&self) -> io::Result<PathBuf> {
+        Ok(self.cwd.clone())
+    }
+
+    fn current_exe(&self) -> io::Result<PathBuf> {
+        Ok(self.cwd.join("git-factor"))
+    }
+
+    fn var_os(&self, key: &str) -> Option<OsString> {
+        (key == "CLAUDECODE").then(|| OsString::from("1"))
+    }
+}
+
+#[test]
+fn env_returns_configured_cwd_and_exe() {
+    let dir = TempDir::new().expect("tempdir");
+    let env = TestEnv {
+        cwd: dir.path().to_path_buf(),
+    };
+
+    assert_eq!(env.current_dir().expect("cwd"), dir.path());
+    assert_eq!(
+        env.current_exe().expect("exe"),
+        dir.path().join("git-factor")
+    );
+    assert_eq!(env.var_os("ANY"), None);
+}
+
+#[test]
+fn real_env_delegates_to_std_env() {
+    let cwd = env::current_dir().expect("cwd");
+    assert_eq!(REAL_ENV.current_dir().expect("real cwd"), cwd);
+
+    let exe = env::current_exe().expect("exe");
+    assert_eq!(REAL_ENV.current_exe().expect("real exe"), exe);
+
+    // Cargo sets this for tests; it avoids env mutation (tests run in parallel).
+    assert!(REAL_ENV.var_os("CARGO_MANIFEST_DIR").is_some());
+}
+
+#[test]
+fn real_io_writes_to_stdout_and_stderr() {
+    // Nextest captures test output; keep it minimal while exercising RealIo.
+    REAL_IO.out("").expect("out");
+    REAL_IO.err("").expect("err");
+    REAL_IO.outln("").expect("outln");
+    REAL_IO.errln("").expect("errln");
+}
+
+#[derive(Default)]
+struct TestIo {
+    stdout: Mutex<String>,
+    stderr: Mutex<String>,
+}
+
+impl TestIo {
+    fn stdout(&self) -> String {
+        self.stdout.lock().expect("stdout lock").clone()
+    }
+
+    fn stderr(&self) -> String {
+        self.stderr.lock().expect("stderr lock").clone()
+    }
+}
+
+impl Io for TestIo {
+    fn out(&self, text: &str) -> io::Result<()> {
+        self.stdout
+            .lock()
+            .map_err(|_err| io::Error::other("stdout lock poisoned"))?
+            .push_str(text);
+        Ok(())
+    }
+
+    fn err(&self, text: &str) -> io::Result<()> {
+        self.stderr
+            .lock()
+            .map_err(|_err| io::Error::other("stderr lock poisoned"))?
+            .push_str(text);
+        Ok(())
+    }
+
+    fn outln(&self, line: &str) -> io::Result<()> {
+        self.out(line)?;
+        self.out("\n")
+    }
+
+    fn errln(&self, line: &str) -> io::Result<()> {
+        self.err(line)?;
+        self.err("\n")
+    }
+}
+
