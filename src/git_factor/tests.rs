@@ -690,3 +690,171 @@ fn failing_env_returns_errors_and_no_vars() {
     assert_eq!(env.current_dir().expect_err("cwd err").to_string(), "nope");
     assert_eq!(env.current_exe().expect_err("exe err").to_string(), "nope");
     assert_eq!(env.var_os("ANY"), None);
+}
+
+#[test]
+fn editor_path_errors_when_current_exe_fails() {
+    let dir = TempDir::new().expect("tempdir");
+    let env = ExeFailingEnv {
+        cwd: dir.path().to_path_buf(),
+    };
+    let io = TestIo::default();
+    let ctx = ctx_from_parts(&env, &REAL_RUNNER, &io, &REAL_FS).expect("ctx ok");
+
+    let err = editor_path(&ctx).expect_err("expected editor_path to error");
+
+    assert_eq!(env.var_os("ANY"), None);
+    assert_eq!(
+        err.to_string(),
+        "git command failed: cannot resolve current exe: no exe"
+    );
+}
+
+#[test]
+fn editor_path_errors_when_exe_cannot_be_canonicalized() {
+    let dir = TempDir::new().expect("tempdir");
+    let env = TestEnv {
+        cwd: dir.path().to_path_buf(),
+    };
+    let io = TestIo::default();
+    let ctx = ctx_from_parts(&env, &REAL_RUNNER, &io, &REAL_FS).expect("ctx ok");
+
+    let err = editor_path(&ctx).expect_err("expected editor_path to error");
+
+    assert!(
+        err.to_string()
+            .starts_with("git command failed: cannot canonicalize exe: "),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn editor_path_errors_when_executable_has_no_parent_dir() {
+    let dir = TempDir::new().expect("tempdir");
+    let env = RootExeEnv {
+        cwd: dir.path().to_path_buf(),
+    };
+    let io = TestIo::default();
+    let ctx = ctx_from_parts(&env, &REAL_RUNNER, &io, &REAL_FS).expect("ctx ok");
+
+    let err = editor_path(&ctx).expect_err("expected editor_path to error");
+
+    assert_eq!(env.var_os("ANY"), None);
+    assert_eq!(
+        err.to_string(),
+        "git command failed: executable has no parent directory"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn editor_path_errors_when_path_is_not_valid_utf8() {
+    let dir = TempDir::new().expect("tempdir");
+    let env = TestEnv {
+        cwd: dir.path().to_path_buf(),
+    };
+    let io = TestIo::default();
+    let fs = NonUtf8Fs;
+    let ctx = ctx_from_parts(&env, &REAL_RUNNER, &io, &fs).expect("ctx ok");
+
+    let mkdir = dir.path().join("mkdir");
+    fs.create_dir_all(&mkdir).expect("mkdir ok");
+    assert!(mkdir.is_dir());
+
+    let rm_dir = dir.path().join("rm_dir");
+    fs.create_dir_all(&rm_dir).expect("rm_dir create");
+    fs.remove_dir_all(&rm_dir).expect("rm_dir remove");
+    assert!(!rm_dir.exists());
+
+    let rm_file = dir.path().join("rm_file");
+    fs::write(&rm_file, "x").expect("rm_file write");
+    fs.remove_file(&rm_file).expect("rm_file remove");
+    assert!(!rm_file.exists());
+
+    let read_file = dir.path().join("read_to_string");
+    fs::write(&read_file, "hello").expect("read_file write");
+    let content = fs.read_to_string(&read_file).expect("read_to_string ok");
+    assert_eq!(content, "hello");
+
+    let write_file = dir.path().join("write_string");
+    fs.write_string(&write_file, "world")
+        .expect("write_string ok");
+    let written = fs.read_to_string(&write_file).expect("read back ok");
+    assert_eq!(written, "world");
+
+    let is_dir = fs.is_dir(&mkdir);
+    assert!(is_dir);
+
+    let exists = fs.exists(&mkdir);
+    assert!(exists);
+
+    let err = editor_path(&ctx).expect_err("expected editor_path to error");
+    assert_eq!(
+        err.to_string(),
+        "git command failed: editor path is not valid UTF-8"
+    );
+}
+
+#[test]
+fn resolve_commit_refs_errors_on_invalid_rev_list_range() {
+    let dir = TempDir::new().expect("tempdir");
+    let repo = dir.path();
+    let runner =
+        ScriptedRunner::default().with_output("git", &["rev-parse", "--git-dir"], repo, ".git\n");
+    let io = TestIo::default();
+    let env = TestEnv {
+        cwd: repo.to_path_buf(),
+    };
+    let ctx = Ctx {
+        runner: &runner,
+        cwd: repo.to_path_buf(),
+        io: &io,
+        env: &env,
+        fs: &REAL_FS,
+    };
+
+    let err = run_with_args_vec(
+        &ctx,
+        vec![
+            OsString::from("git-factor"),
+            OsString::from("--exec"),
+            OsString::from("true"),
+            OsString::from("bad..range"),
+        ],
+    )
+    .expect_err("expected invalid commit");
+    assert_eq!(err.to_string(), "invalid commit: bad..range");
+}
+
+#[test]
+fn resolve_commit_refs_ignores_invalid_rev_list_lines() {
+    let dir = TempDir::new().expect("tempdir");
+    let repo = dir.path();
+    let valid_sha = "a".repeat(40);
+    let runner = ScriptedRunner::default().with_output(
+        "git",
+        &["rev-list", "HEAD~1..HEAD"],
+        repo,
+        &format!("bad\n{valid_sha}\n"),
+    );
+    let io = TestIo::default();
+    let env = TestEnv {
+        cwd: repo.to_path_buf(),
+    };
+    let ctx = Ctx {
+        runner: &runner,
+        cwd: repo.to_path_buf(),
+        io: &io,
+        env: &env,
+        fs: &REAL_FS,
+    };
+
+    let refs = NonEmpty::new(
+        NonEmptyString::try_from("HEAD~1..HEAD".to_owned()).expect("range ref is non-empty"),
+    );
+    let commits = resolve_commit_refs(&ctx, &refs).expect("resolve_commit_refs should succeed");
+    let collected: Vec<&str> = commits.iter().map(CommitSha::as_str).collect();
+    assert_eq!(collected, vec![valid_sha.as_str()]);
+}
+
+#[test]
