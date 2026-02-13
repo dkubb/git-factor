@@ -783,3 +783,54 @@ exec echo hi\n\
     }
 
     #[test]
+    fn warns_when_pick_request_is_idempotent() {
+        let dir = TempDir::new().expect("tempdir");
+        let path = dir.path().join("todo");
+        fs::write(&path, "pick abc1234 first\n").expect("write todo file");
+
+        run_editor(
+            &["--pick", "abc1234"],
+            GitSequenceEditorExpectation {
+                stderr: "WARN: abc1234: requested 'pick', but todo already had 'pick'\n".to_owned(),
+                todo_content: Some("pick abc1234 first\n".to_owned()),
+                ..Default::default()
+            },
+            &path,
+        );
+    }
+
+    #[test]
+    fn warns_when_edit_request_is_idempotent() {
+        let dir = TempDir::new().expect("tempdir");
+        let path = dir.path().join("todo");
+        fs::write(&path, "edit abc1234 first\n").expect("write todo file");
+
+        run_editor(
+            &["--edit", "abc1234"],
+            GitSequenceEditorExpectation {
+                stderr: "WARN: abc1234: requested 'edit', but todo already had 'edit'\n".to_owned(),
+                todo_content: Some("edit abc1234 first\n".to_owned()),
+                ..Default::default()
+            },
+            &path,
+        );
+    }
+
+    #[test]
+    fn warns_when_drop_request_is_idempotent() {
+        let dir = TempDir::new().expect("tempdir");
+        let path = dir.path().join("todo");
+        fs::write(&path, "drop abc1234 first\n").expect("write todo file");
+
+        run_editor(
+            &["--drop", "abc1234"],
+            GitSequenceEditorExpectation {
+                stderr: "WARN: abc1234: requested 'drop', but todo already had 'drop'\n".to_owned(),
+                todo_content: Some("drop abc1234 first\n".to_owned()),
+                ..Default::default()
+            },
+            &path,
+        );
+    }
+
+    #[test]
