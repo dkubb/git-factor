@@ -130,3 +130,131 @@ mod tests {
         expectation.todo_path = todo_path.to_path_buf();
         expectation.assert();
     }
+
+    #[test]
+    fn updates_todo_for_drop_and_edit_requests() {
+        let dir = TempDir::new().expect("tempdir");
+        let path = dir.path().join("todo");
+
+        let original = "\
+pick abc1234 first\n\
+pick def5678 second\n\
+exec echo hi\n\
+";
+        fs::write(&path, original).expect("write todo file");
+
+        run_editor(
+            &["--drop", "abc1234", "--edit", "def5678"],
+            GitSequenceEditorExpectation {
+                todo_content: Some(
+                    "\
+drop abc1234 first\n\
+edit def5678 second\n\
+exec echo hi\n\
+"
+                    .to_owned(),
+                ),
+                ..Default::default()
+            },
+            &path,
+        );
+    }
+
+    #[test]
+    fn rejects_duplicate_drop_flags() {
+        let dir = TempDir::new().expect("tempdir");
+        let path = dir.path().join("todo");
+        fs::write(&path, "pick abc1234 first\n").expect("write todo file");
+
+        run_editor(
+            &["--drop", "abc1234", "--drop", "abc1234"],
+            GitSequenceEditorExpectation {
+                code: EXIT_FAILURE,
+                stderr: "duplicate drop sha: abc1234\n".to_owned(),
+                ..Default::default()
+            },
+            &path,
+        );
+    }
+
+    #[test]
+    fn rejects_duplicate_pick_flags() {
+        let dir = TempDir::new().expect("tempdir");
+        let path = dir.path().join("todo");
+        fs::write(&path, "pick abc1234 first\n").expect("write todo file");
+
+        run_editor(
+            &["--pick", "abc1234", "--pick", "abc1234"],
+            GitSequenceEditorExpectation {
+                code: EXIT_FAILURE,
+                stderr: "duplicate pick sha: abc1234\n".to_owned(),
+                ..Default::default()
+            },
+            &path,
+        );
+    }
+
+    #[test]
+    fn rejects_duplicate_pick_flags_after_sha_normalization() {
+        let dir = TempDir::new().expect("tempdir");
+        let path = dir.path().join("todo");
+        fs::write(&path, "pick abc1234 first\n").expect("write todo file");
+
+        let long_sha = "a".repeat(40);
+        let resolved = format!("abc1234{}", "0".repeat(33));
+        let steps = vec![GitWrapperStep {
+            args: vec![
+                "rev-parse".to_owned(),
+                "--verify".to_owned(),
+                long_sha.clone(),
+            ],
+            stdout: format!("{resolved}\n"),
+            stderr: String::new(),
+            exit_code: 0,
+        }];
+        let (wrap_dir, wrap_bin, count_file) = make_ordered_git_wrapper(&steps);
+
+        let original_path = env::var_os("PATH").expect("PATH");
+        let prefixed_path = {
+            let mut joined = OsString::new();
+            joined.push(wrap_bin.as_os_str());
+            joined.push(OsStr::new(":"));
+            joined.push(original_path);
+            joined
+        };
+
+        run_editor_with_prefixed_path(
+            &["--pick", "abc1234", "--pick", long_sha.as_str()],
+            GitSequenceEditorExpectation {
+                code: EXIT_FAILURE,
+                ordered_git_replay: Some(OrderedGitReplayExpectation::from_count_file(
+                    count_file,
+                    steps.len(),
+                )),
+                stderr: "sha specified multiple times: abc1234\n".to_owned(),
+                todo_content: Some("pick abc1234 first\n".to_owned()),
+                ..Default::default()
+            },
+            prefixed_path,
+            &path,
+        );
+        let _keep_alive = wrap_dir;
+    }
+
+    #[test]
+    fn rejects_duplicate_edit_flags() {
+        let dir = TempDir::new().expect("tempdir");
+        let path = dir.path().join("todo");
+        fs::write(&path, "pick abc1234 first\n").expect("write todo file");
+
+        run_editor(
+            &["--edit", "abc1234", "--edit", "abc1234"],
+            GitSequenceEditorExpectation {
+                code: EXIT_FAILURE,
+                stderr: "duplicate edit sha: abc1234\n".to_owned(),
+                ..Default::default()
+            },
+            &path,
+        );
+    }
+
