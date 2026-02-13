@@ -3424,3 +3424,42 @@ fi
         );
     }
 
+    #[test]
+    fn finish_reports_error_when_expected_tree_lookup_fails() {
+        let dir = init_repo();
+        let repo = dir.path();
+
+        commit_file(repo, "file.txt", "one\n", "chore: base");
+        commit_file(repo, "file.txt", "one\ntwo\n", "feat: change");
+
+        start_session(repo);
+
+        let (wrap_dir, wrap_bin) = make_git_wrapper_named(
+            "git",
+            #[expect(
+                clippy::literal_string_with_formatting_args,
+                reason = "shell script contains braces like ${1:-}"
+            )]
+            r#"if [ "${1:-}" = "rev-parse" ]; then
+  case "${2:-}" in
+    *"^{tree}")
+      echo "fatal: expected tree failed in finish" >&2
+      exit 1
+      ;;
+  esac
+fi
+"#,
+        );
+        let _keep_alive = wrap_dir;
+
+        run_git_factor_with_env(
+            repo,
+            &["--finish", "--message", "test: finish"],
+            GitFactorExpectation::default()
+                .code(EXIT_SOFTWARE)
+                .stderr("git command failed: fatal: expected tree failed in finish\n"),
+            "PATH",
+            format!("{}:{}", wrap_bin.display(), env::var("PATH").expect("PATH")),
+        );
+    }
+
