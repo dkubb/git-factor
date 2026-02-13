@@ -2509,3 +2509,244 @@ fn cmd_continue_propagates_cherry_pick_status_error() {
     );
 }
 
+#[test]
+fn cmd_finish_errors_on_split_count_overflow() {
+    let dir = TempDir::new().expect("tempdir");
+    let repo = dir.path();
+    let git_dir = repo.join(".git");
+    fs::create_dir_all(git_dir.join("rebase-merge")).expect("create rebase-merge");
+
+    let state_dir = git_dir.join("factor");
+    fs::create_dir_all(&state_dir).expect("create factor dir");
+    fs::write(state_dir.join("commits"), format!("{}\n", "a".repeat(40))).expect("write commits");
+    fs::write(state_dir.join("current_index"), "0\n").expect("write current_index");
+    fs::write(state_dir.join("split_count"), format!("{}\n", u32::MAX)).expect("write split_count");
+    fs::write(state_dir.join("exec"), "true\n").expect("write exec");
+
+    let original = "a".repeat(40);
+    let commit_meta = "a\0b\0c\0d\0e\0f";
+
+    let message = NonEmptyString::try_from("test: message".to_owned()).expect("non-empty");
+    let messages = [message];
+
+    let envs = [
+        ("GIT_AUTHOR_NAME", "a"),
+        ("GIT_AUTHOR_EMAIL", "b"),
+        ("GIT_AUTHOR_DATE", "c"),
+        ("GIT_COMMITTER_NAME", "d"),
+        ("GIT_COMMITTER_EMAIL", "e"),
+        ("GIT_COMMITTER_DATE", "f"),
+    ];
+
+    let expected_tree_output = "tree\n";
+    let runner = ScriptedRunner::default()
+        .with_output("git", &["rev-parse", "--git-dir"], repo, ".git\n")
+        .with_output(
+            "git",
+            &["rev-parse", &format!("{original}^{{tree}}")],
+            repo,
+            expected_tree_output,
+        )
+        .with_status("git", &["checkout", "--", "."], &[], false, repo, 0)
+        .with_status(
+            "git",
+            &["clean", "--force", "--quiet", "-d"],
+            &[],
+            false,
+            repo,
+            0,
+        )
+        .with_status(
+            "git",
+            &[
+                "cherry-pick",
+                "--no-commit",
+                "--strategy-option",
+                "theirs",
+                original.as_str(),
+            ],
+            &[],
+            false,
+            repo,
+            0,
+        )
+        .with_status("git", &["cherry-pick", "--quit"], &[], false, repo, 0)
+        .with_output("git", &["write-tree"], repo, expected_tree_output)
+        .with_status("git", &["diff", "--cached", "--quiet"], &[], false, repo, 1)
+        .with_status("bash", &["-c", "true"], &[], false, repo, 0)
+        .with_output(
+            "git",
+            &[
+                "show",
+                "--format=%an%x00%ae%x00%aI%x00%cn%x00%ce%x00%cI",
+                "--no-patch",
+                original.as_str(),
+            ],
+            repo,
+            commit_meta,
+        )
+        .with_status(
+            "git",
+            &["commit", "--message", "test: message"],
+            &envs,
+            false,
+            repo,
+            0,
+        );
+
+    let io = TestIo::default();
+    let env = TestEnv {
+        cwd: repo.to_path_buf(),
+    };
+    let ctx = Ctx {
+        runner: &runner,
+        cwd: repo.to_path_buf(),
+        io: &io,
+        env: &env,
+        fs: &REAL_FS,
+    };
+
+    let err = cmd_finish_in(&ctx, &messages).expect_err("expected overflow");
+    assert!(
+        matches!(&err, FactorError::GitCommand(err_msg) if err_msg == "split_count overflow"),
+        "err was: {err:?}"
+    );
+}
+
+#[test]
+fn cmd_finish_propagates_final_cherry_pick_status_error() {
+    let dir = TempDir::new().expect("tempdir");
+    let repo = dir.path();
+    let git_dir = repo.join(".git");
+    fs::create_dir_all(git_dir.join("rebase-merge")).expect("create rebase-merge");
+
+    let state_dir = git_dir.join("factor");
+    fs::create_dir_all(&state_dir).expect("create factor dir");
+    fs::write(state_dir.join("commits"), format!("{}\n", "a".repeat(40))).expect("write commits");
+    fs::write(state_dir.join("current_index"), "0\n").expect("write current_index");
+    fs::write(state_dir.join("split_count"), "0\n").expect("write split_count");
+    fs::write(state_dir.join("exec"), "true\n").expect("write exec");
+
+    let original = "a".repeat(40);
+    let message = NonEmptyString::try_from("test: message".to_owned()).expect("non-empty");
+    let messages = [message];
+
+    let expected_tree_output = "tree\n";
+    let runner = ScriptedRunner::default()
+        .with_output("git", &["rev-parse", "--git-dir"], repo, ".git\n")
+        .with_output(
+            "git",
+            &["rev-parse", &format!("{original}^{{tree}}")],
+            repo,
+            expected_tree_output,
+        )
+        .with_status("git", &["checkout", "--", "."], &[], false, repo, 0)
+        .with_status(
+            "git",
+            &["clean", "--force", "--quiet", "-d"],
+            &[],
+            false,
+            repo,
+            0,
+        );
+
+    let io = TestIo::default();
+    let env = TestEnv {
+        cwd: repo.to_path_buf(),
+    };
+    let ctx = Ctx {
+        runner: &runner,
+        cwd: repo.to_path_buf(),
+        io: &io,
+        env: &env,
+        fs: &REAL_FS,
+    };
+
+    let err = cmd_finish_in(&ctx, &messages).expect_err("expected cherry-pick status error");
+    assert!(
+        matches!(
+            &err,
+            FactorError::GitCommand(msg)
+                if msg.contains("git cherry-pick:") && msg.contains("unexpected status call")
+        ),
+        "err was: {err:?}"
+    );
+}
+
+#[test]
+fn cmd_finish_propagates_git_commit_preserving_metadata_error() {
+    let dir = TempDir::new().expect("tempdir");
+    let repo = dir.path();
+    let git_dir = repo.join(".git");
+    fs::create_dir_all(git_dir.join("rebase-merge")).expect("create rebase-merge");
+
+    let state_dir = git_dir.join("factor");
+    fs::create_dir_all(&state_dir).expect("create factor dir");
+    fs::write(state_dir.join("commits"), format!("{}\n", "a".repeat(40))).expect("write commits");
+    fs::write(state_dir.join("current_index"), "0\n").expect("write current_index");
+    fs::write(state_dir.join("split_count"), "0\n").expect("write split_count");
+    fs::write(state_dir.join("exec"), "true\n").expect("write exec");
+
+    let original = "a".repeat(40);
+    let message = NonEmptyString::try_from("test: message".to_owned()).expect("non-empty");
+    let messages = [message];
+
+    let expected_tree_output = "tree\n";
+    let runner = ScriptedRunner::default()
+        .with_output("git", &["rev-parse", "--git-dir"], repo, ".git\n")
+        .with_output(
+            "git",
+            &["rev-parse", &format!("{original}^{{tree}}")],
+            repo,
+            expected_tree_output,
+        )
+        .with_status("git", &["checkout", "--", "."], &[], false, repo, 0)
+        .with_status(
+            "git",
+            &["clean", "--force", "--quiet", "-d"],
+            &[],
+            false,
+            repo,
+            0,
+        )
+        .with_status(
+            "git",
+            &[
+                "cherry-pick",
+                "--no-commit",
+                "--strategy-option",
+                "theirs",
+                original.as_str(),
+            ],
+            &[],
+            false,
+            repo,
+            0,
+        )
+        .with_status("git", &["cherry-pick", "--quit"], &[], false, repo, 0)
+        .with_output("git", &["write-tree"], repo, expected_tree_output)
+        .with_status("git", &["diff", "--cached", "--quiet"], &[], false, repo, 1)
+        .with_status("bash", &["-c", "true"], &[], false, repo, 0);
+
+    let io = TestIo::default();
+    let env = TestEnv {
+        cwd: repo.to_path_buf(),
+    };
+    let ctx = Ctx {
+        runner: &runner,
+        cwd: repo.to_path_buf(),
+        io: &io,
+        env: &env,
+        fs: &REAL_FS,
+    };
+
+    let err = cmd_finish_in(&ctx, &messages).expect_err("expected metadata lookup to fail");
+    assert!(
+        matches!(
+            &err,
+            FactorError::GitCommand(msg)
+                if msg.contains("git show:") && msg.contains("unexpected output call")
+        ),
+        "err was: {err:?}"
+    );
+}
