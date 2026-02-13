@@ -1114,3 +1114,155 @@ fi
     }
 
     #[test]
+    fn rejects_finish_when_combined_with_exec_or_commit() {
+        let dir = init_repo();
+        let repo = dir.path();
+
+        run_git_factor(
+            repo,
+            &["--finish", "--exec", "true", "HEAD"],
+            GitFactorExpectation::default()
+                .code(EXIT_USAGE)
+                .stderr("--finish cannot be combined with --continue, --exec, or COMMIT\n"),
+        );
+    }
+
+    #[test]
+    fn rejects_finish_when_combined_with_continue() {
+        let dir = init_repo();
+        let repo = dir.path();
+
+        run_git_factor(
+            repo,
+            &["--finish", "--continue", "--message", "test: msg"],
+            GitFactorExpectation::default()
+                .code(EXIT_USAGE)
+                .stderr("--finish cannot be combined with --continue, --exec, or COMMIT\n"),
+        );
+    }
+
+    #[test]
+    fn rejects_finish_when_combined_with_commit() {
+        let dir = init_repo();
+        let repo = dir.path();
+        commit_file(repo, "file.txt", "one\n", "chore: base");
+
+        run_git_factor(
+            repo,
+            &["--finish", "HEAD"],
+            GitFactorExpectation::default()
+                .code(EXIT_USAGE)
+                .stderr("--finish cannot be combined with --continue, --exec, or COMMIT\n"),
+        );
+    }
+
+    #[test]
+    fn rejects_continue_when_combined_with_exec_or_commit() {
+        let dir = init_repo();
+        let repo = dir.path();
+
+        run_git_factor(
+            repo,
+            &["--continue", "--exec", "true", "--message", "test: msg"],
+            GitFactorExpectation::default()
+                .code(EXIT_USAGE)
+                .stderr("--continue cannot be combined with --exec or COMMIT\n"),
+        );
+    }
+
+    #[test]
+    fn rejects_continue_when_combined_with_commit() {
+        let dir = init_repo();
+        let repo = dir.path();
+        commit_file(repo, "file.txt", "one\n", "chore: base");
+
+        run_git_factor(
+            repo,
+            &["--continue", "--message", "test: msg", "HEAD"],
+            GitFactorExpectation::default()
+                .code(EXIT_USAGE)
+                .stderr("--continue cannot be combined with --exec or COMMIT\n"),
+        );
+    }
+
+    #[test]
+    fn rejects_start_when_message_is_provided() {
+        let dir = init_repo();
+        let repo = dir.path();
+
+        commit_file(repo, "file.txt", "one\n", "chore: base");
+
+        run_git_factor(
+            repo,
+            &["--exec", "true", "--message", "test: msg", "HEAD"],
+            GitFactorExpectation::default()
+                .code(EXIT_USAGE)
+                .stderr("--message can only be used with --continue or --finish\n"),
+        );
+    }
+
+    #[test]
+    fn rejects_continue_without_message() {
+        let dir = init_repo();
+        let repo = dir.path();
+
+        commit_file(repo, "file.txt", "one\n", "chore: base");
+        commit_file(repo, "file.txt", "one\ntwo\n", "feat: change");
+        run_git_factor(
+            repo,
+            &["--exec", "true", "HEAD~1"],
+            GitFactorExpectation::default(),
+        );
+
+        run_git_factor(
+            repo,
+            &["--continue"],
+            GitFactorExpectation::default()
+                .code(EXIT_USAGE)
+                .stderr("--continue requires --message <MSG>\n"),
+        );
+    }
+
+    #[test]
+    fn cli_rejects_running_outside_a_git_repo() {
+        let dir = TempDir::new().expect("tempdir");
+        run_git_factor_in_dir(
+            dir.path(),
+            &["--exec", "true", "HEAD"],
+            GitFactorExpectation::default()
+                .code(EXIT_DATAERR)
+                .stderr("not a git repository\n"),
+        );
+    }
+
+    #[test]
+    fn abort_rejects_without_active_session() {
+        let dir = init_repo();
+        run_git_factor_in_dir(
+            dir.path(),
+            &["--abort"],
+            GitFactorExpectation::default()
+                .code(EXIT_USAGE)
+                .stderr("no active factor session\n"),
+        );
+    }
+
+    #[test]
+    fn abort_succeeds_when_session_dir_exists_but_no_rebase_is_active() {
+        let dir = init_repo();
+        let repo = dir.path();
+
+        commit_file(repo, "file.txt", "one\n", "chore: base");
+
+        let factor_dir = git_dir(repo).join("factor");
+        fs::create_dir_all(&factor_dir).expect("create factor dir");
+        fs::write(factor_dir.join("commits"), "deadbeef\n").expect("write commits");
+
+        run_git_factor(
+            repo,
+            &["--abort"],
+            GitFactorExpectation::default()
+                .stdout("FACTOR: Session aborted. Repository restored to original state.\n"),
+        );
+    }
+
