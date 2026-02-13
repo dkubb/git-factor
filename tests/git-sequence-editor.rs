@@ -834,3 +834,202 @@ exec echo hi\n\
     }
 
     #[test]
+    fn rejects_unsupported_todo_actions() {
+        let dir = TempDir::new().expect("tempdir");
+        let path = dir.path().join("todo");
+        let original = "foo abc1234 first\n";
+        fs::write(&path, original).expect("write todo file");
+
+        run_editor(
+            &["--drop", "abc1234"],
+            GitSequenceEditorExpectation {
+                code: EXIT_FAILURE,
+                stderr: "unsupported todo action: foo\n".to_owned(),
+                todo_content: Some(original.to_owned()),
+                ..Default::default()
+            },
+            &path,
+        );
+    }
+
+    #[test]
+    fn rejects_uppercase_todo_action() {
+        let dir = TempDir::new().expect("tempdir");
+        let path = dir.path().join("todo");
+        let original = "Pick abc1234 first\n";
+        fs::write(&path, original).expect("write todo file");
+
+        run_editor(
+            &["--drop", "abc1234"],
+            GitSequenceEditorExpectation {
+                code: EXIT_FAILURE,
+                stderr: "unsupported todo action: Pick\n".to_owned(),
+                todo_content: Some(original.to_owned()),
+                ..Default::default()
+            },
+            &path,
+        );
+    }
+
+    #[test]
+    fn preserves_comments_and_blank_lines() {
+        let dir = TempDir::new().expect("tempdir");
+        let path = dir.path().join("todo");
+        let original = "\
+# comment
+
+pick abc1234 first # trailing comment
+exec echo hi
+";
+        fs::write(&path, original).expect("write todo file");
+
+        run_editor(
+            &["--drop", "abc1234"],
+            GitSequenceEditorExpectation {
+                todo_content: Some(
+                    "\
+# comment
+
+drop abc1234 first # trailing comment
+exec echo hi
+"
+                    .to_owned(),
+                ),
+                ..Default::default()
+            },
+            &path,
+        );
+    }
+
+    #[test]
+    fn accepts_all_supported_non_commit_actions() {
+        let dir = TempDir::new().expect("tempdir");
+        let path = dir.path().join("todo");
+        let original = "\
+pick abc1234 first
+exec echo hi
+break
+label topic
+reset topic
+merge -C deadbeef topic
+noop
+update-ref refs/heads/main
+";
+        fs::write(&path, original).expect("write todo file");
+
+        run_editor(
+            &["--drop", "abc1234"],
+            GitSequenceEditorExpectation {
+                todo_content: Some(
+                    "\
+drop abc1234 first
+exec echo hi
+break
+label topic
+reset topic
+merge -C deadbeef topic
+noop
+update-ref refs/heads/main
+"
+                    .to_owned(),
+                ),
+                ..Default::default()
+            },
+            &path,
+        );
+    }
+
+    #[test]
+    fn accepts_indented_comments_and_blank_lines() {
+        let dir = TempDir::new().expect("tempdir");
+        let path = dir.path().join("todo");
+        let original = "\
+   # comment with indentation
+
+pick abc1234 first
+";
+        fs::write(&path, original).expect("write todo file");
+
+        run_editor(
+            &["--edit", "abc1234"],
+            GitSequenceEditorExpectation {
+                todo_content: Some(
+                    "\
+   # comment with indentation
+
+edit abc1234 first
+"
+                    .to_owned(),
+                ),
+                ..Default::default()
+            },
+            &path,
+        );
+    }
+
+    #[test]
+    fn preserves_malformed_pick_line_without_sha_when_no_actions_requested() {
+        let dir = TempDir::new().expect("tempdir");
+        let path = dir.path().join("todo");
+        fs::write(&path, "pick\n").expect("write todo file");
+
+        run_editor(
+            &[],
+            GitSequenceEditorExpectation {
+                todo_content: Some("pick\n".to_owned()),
+                ..Default::default()
+            },
+            &path,
+        );
+    }
+
+    #[test]
+    fn rejects_resolved_long_sha_when_not_present_in_todo() {
+        let dir = TempDir::new().expect("tempdir");
+        let path = dir.path().join("todo");
+        fs::write(&path, "pick abc1234 first\n").expect("write todo file");
+
+        let requested = "a".repeat(40);
+        let resolved = format!("deadbeef{}", "0".repeat(32));
+
+        let steps = vec![GitWrapperStep {
+            args: vec![
+                "rev-parse".to_owned(),
+                "--verify".to_owned(),
+                requested.clone(),
+            ],
+            stdout: format!("{resolved}\n"),
+            stderr: String::new(),
+            exit_code: 0,
+        }];
+
+        let (wrap_dir, wrap_bin, count_file) = make_ordered_git_wrapper(&steps);
+
+        let original_path = env::var_os("PATH").expect("PATH");
+        let prefixed_path = {
+            let mut joined = OsString::new();
+            joined.push(wrap_bin.as_os_str());
+            joined.push(OsStr::new(":"));
+            joined.push(original_path);
+            joined
+        };
+
+        run_editor_with_prefixed_path(
+            &["--drop", requested.as_str()],
+            GitSequenceEditorExpectation {
+                code: EXIT_FAILURE,
+                ordered_git_replay: Some(OrderedGitReplayExpectation::from_count_file(
+                    count_file,
+                    steps.len(),
+                )),
+                stderr: format!("sha not present in todo: {resolved}\n"),
+                todo_content: Some("pick abc1234 first\n".to_owned()),
+                ..Default::default()
+            },
+            prefixed_path,
+            &path,
+        );
+        let _keep_alive = wrap_dir;
+    }
+
+    #[test]
