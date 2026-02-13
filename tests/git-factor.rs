@@ -2994,3 +2994,272 @@ fi
     }
 
     #[test]
+    fn continue_reports_rehydrate_quit_failure() {
+        let dir = init_repo();
+        let repo = dir.path();
+
+        commit_file(repo, "file.txt", "base\n", "chore: base");
+        commit_file(repo, "file.txt", "base\nchange\n", "feat: change");
+
+        // Wrapper that fails only for `git cherry-pick --quit`.
+        let (wrap_dir, wrap_bin) = make_git_wrapper_named(
+            "git",
+            #[expect(
+                clippy::literal_string_with_formatting_args,
+                reason = "shell script contains braces like ${1:-}"
+            )]
+            r#"if [ "${1:-}" = "cherry-pick" ] && [ "${2:-}" = "--quit" ]; then
+  exit 1
+fi
+"#,
+        );
+        let _keep_alive = wrap_dir;
+
+        let wrapped_path = format!("{}:{}", wrap_bin.display(), env::var("PATH").expect("PATH"));
+        run_git_factor_with_env(
+            repo,
+            &["--exec", "false", "HEAD"],
+            GitFactorExpectation::default(),
+            "PATH",
+            wrapped_path.clone(),
+        );
+
+        // Stage a slice so --continue proceeds into rehydrate.
+        write_file(repo, "file.txt", "base\nslice\n");
+        git(repo, &["add", "file.txt"]);
+
+        run_git_factor_with_env(
+            repo,
+            &["--continue", "--message", "test: slice"],
+            GitFactorExpectation::default()
+                .code(EXIT_SOFTWARE)
+                .stderr("git command failed: git cherry-pick --quit failed (exit 1)\n"),
+            "PATH",
+            wrapped_path,
+        );
+    }
+
+    #[test]
+    fn continue_reports_rehydrate_read_tree_failure() {
+        let dir = init_repo();
+        let repo = dir.path();
+
+        commit_file(repo, "file.txt", "base\n", "chore: base");
+        commit_file(repo, "file.txt", "base\nchange\n", "feat: change");
+
+        // Wrapper that fails only for `git read-tree`.
+        let (wrap_dir, wrap_bin) = make_git_wrapper_named(
+            "git",
+            #[expect(
+                clippy::literal_string_with_formatting_args,
+                reason = "shell script contains braces like ${1:-}"
+            )]
+            r#"if [ "${1:-}" = "read-tree" ]; then
+  exit 1
+fi
+"#,
+        );
+        let _keep_alive = wrap_dir;
+
+        let wrapped_path = format!("{}:{}", wrap_bin.display(), env::var("PATH").expect("PATH"));
+        run_git_factor_with_env(
+            repo,
+            &["--exec", "false", "HEAD"],
+            GitFactorExpectation::default(),
+            "PATH",
+            wrapped_path.clone(),
+        );
+
+        // Stage a slice so --continue proceeds into rehydrate.
+        write_file(repo, "file.txt", "base\nslice\n");
+        git(repo, &["add", "file.txt"]);
+
+        run_git_factor_with_env(
+            repo,
+            &["--continue", "--message", "test: slice"],
+            GitFactorExpectation::default()
+                .code(EXIT_SOFTWARE)
+                .stderr("git command failed: git read-tree failed (exit 1)\n"),
+            "PATH",
+            wrapped_path,
+        );
+    }
+
+    #[test]
+    fn continue_handles_rehydrate_cherry_pick_failure_without_conflicts() {
+        let dir = init_repo();
+        let repo = dir.path();
+
+        commit_file(repo, "file.txt", "base\n", "chore: base");
+        commit_file(repo, "file.txt", "base\nchange\n", "feat: change");
+
+        start_session_with_exec(repo, "false");
+
+        // Stage a slice so --continue proceeds into rehydrate.
+        write_file(repo, "file.txt", "base\nslice\n");
+        git(repo, &["add", "file.txt"]);
+
+        // Wrapper: make `git cherry-pick --no-commit` fail, but report no unmerged files.
+        let (wrap_dir, wrap_bin) = make_git_wrapper_named(
+            "git",
+            #[expect(
+                clippy::literal_string_with_formatting_args,
+                reason = "shell script contains braces like ${1:-}"
+            )]
+            r#"if [ "${1:-}" = "cherry-pick" ] && [ "${2:-}" = "--no-commit" ]; then
+  exit 1
+fi
+if [ "${1:-}" = "diff" ] && [ "${2:-}" = "--name-only" ] && [ "${3:-}" = "--diff-filter=U" ]; then
+  exit 0
+fi
+"#,
+        );
+        let _keep_alive = wrap_dir;
+
+        run_git_factor_with_env(
+            repo,
+            &["--continue", "--message", "test: slice"],
+            GitFactorExpectation::default()
+                .code(EXIT_TEMPFAIL)
+                .stderr("exec gate failed: false (exit code 1)\n"),
+            "PATH",
+            format!("{}:{}", wrap_bin.display(), env::var("PATH").expect("PATH")),
+        );
+    }
+
+    #[test]
+    fn finish_handles_cherry_pick_failure_without_conflicts() {
+        let dir = init_repo();
+        let repo = dir.path();
+
+        commit_file(repo, "file.txt", "one\n", "chore: base");
+        commit_file(repo, "file.txt", "one\ntwo\n", "feat: change");
+
+        start_session(repo);
+
+        // Wrapper: fail `cherry-pick --no-commit`, report no conflicts, and force
+        // `cherry-pick --quit` to "succeed" so cmd_finish continues into tree checks.
+        let (wrap_dir, wrap_bin) = make_git_wrapper_named(
+            "git",
+            #[expect(
+                clippy::literal_string_with_formatting_args,
+                reason = "shell script contains braces like ${1:-}"
+            )]
+            r#"if [ "${1:-}" = "cherry-pick" ] && [ "${2:-}" = "--no-commit" ]; then
+  exit 1
+fi
+if [ "${1:-}" = "diff" ] && [ "${2:-}" = "--name-only" ] && [ "${3:-}" = "--diff-filter=U" ]; then
+  exit 0
+fi
+if [ "${1:-}" = "cherry-pick" ] && [ "${2:-}" = "--quit" ]; then
+  exit 0
+fi
+"#,
+        );
+        let _keep_alive = wrap_dir;
+        let original_commit = fs::read_to_string(git_dir(repo).join("factor/commits"))
+            .expect("read commits")
+            .lines()
+            .next()
+            .expect("first commit in session state")
+            .to_owned();
+        let expected_tree = git(repo, &["rev-parse", &format!("{original_commit}^{{tree}}")]);
+        let actual_tree = git(repo, &["write-tree"]);
+
+        run_git_factor_with_env(
+            repo,
+            &["--finish", "--message", "test: finish"],
+            GitFactorExpectation::default()
+                .code(EXIT_TEMPFAIL)
+                .stderr(format!(
+                    "tree hash mismatch: expected {expected_tree}, got {actual_tree}\n"
+                )),
+            "PATH",
+            format!("{}:{}", wrap_bin.display(), env::var("PATH").expect("PATH")),
+        );
+    }
+
+    #[test]
+    fn finish_accepts_multi_paragraph_messages() {
+        let dir = init_repo();
+        let repo = dir.path();
+
+        commit_file(repo, "file.txt", "one\n", "chore: base");
+        commit_file(repo, "file.txt", "one\ntwo\n", "feat: change");
+
+        start_session(repo);
+        git(repo, &["add", "--all"]);
+
+        run_git_factor(
+            repo,
+            &[
+                "--finish",
+                "--message",
+                "test: first paragraph",
+                "--message",
+                "second paragraph",
+            ],
+            GitFactorExpectation::default(),
+        );
+    }
+
+    #[test]
+    fn finish_reports_conflicts_from_wrapper_injection() {
+        let dir = init_repo();
+        let repo = dir.path();
+
+        commit_file(repo, "file.txt", "one\n", "chore: base");
+
+        // Create an "empty message" commit we can later finish.
+        git(
+            repo,
+            &[
+                "commit",
+                "--allow-empty",
+                "--allow-empty-message",
+                "--message",
+                "",
+            ],
+        );
+
+        // Wrapper: force cherry-pick --no-commit to fail, and make the unmerged query
+        // return a non-empty list so cmd_finish takes the conflict error path.
+        let (wrap_dir, wrap_bin) = make_git_wrapper_named(
+            "git",
+            #[expect(
+                clippy::literal_string_with_formatting_args,
+                reason = "shell script contains braces like ${1:-}"
+            )]
+            r#"if [ "${1:-}" = "cherry-pick" ] && [ "${2:-}" = "--no-commit" ]; then
+  exit 1
+fi
+if [ "${1:-}" = "diff" ] && [ "${2:-}" = "--name-only" ] && [ "${3:-}" = "--diff-filter=U" ]; then
+  echo "conflict.txt"
+  exit 0
+fi
+"#,
+        );
+        let _keep_alive = wrap_dir;
+
+        let wrapped_path = format!("{}:{}", wrap_bin.display(), env::var("PATH").expect("PATH"));
+        run_git_factor_with_env(
+            repo,
+            &["--exec", "true", "HEAD"],
+            GitFactorExpectation::default(),
+            "PATH",
+            wrapped_path.clone(),
+        );
+
+        // Finish with the wrapper-enabled PATH so the conflict path triggers.
+        run_git_factor_with_env(
+            repo,
+            &["--finish"],
+            GitFactorExpectation::default()
+                .code(EXIT_SOFTWARE)
+                .stderr("git command failed: final cherry-pick left conflicts:\nconflict.txt\n"),
+            "PATH",
+            wrapped_path,
+        );
+    }
+
+    #[test]
