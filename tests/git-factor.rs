@@ -1301,3 +1301,34 @@ fi
     }
 
     #[test]
+    fn rejects_symmetric_diff_ranges() {
+        let dir = init_repo();
+        let repo = dir.path();
+        commit_file(repo, "file.txt", "one\n", "chore: base");
+        commit_file(repo, "file.txt", "one\ntwo\n", "feat: change");
+
+        run_git_factor(
+            repo,
+            &["--exec", "true", "HEAD~1...HEAD"],
+            GitFactorExpectation::default().code(EXIT_DATAERR).stderr(
+                "invalid commit: HEAD~1...HEAD (symmetric diff '...' is not supported, use '..')\n",
+            ),
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_commit_ref() {
+        let dir = init_repo();
+        let repo = dir.path();
+        commit_file(repo, "file.txt", "one\n", "chore: base");
+
+        run_git_factor(
+            repo,
+            &["--exec", "true", "definitely-not-a-commit"],
+            GitFactorExpectation::default()
+                .code(EXIT_DATAERR)
+                .stderr("invalid commit: definitely-not-a-commit\n"),
+        );
+    }
+
+    #[test]
