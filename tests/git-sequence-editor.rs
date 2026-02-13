@@ -1059,15 +1059,18 @@ edit abc1234 first
         let path = dir.path().join("todo");
         fs::write(&path, "pick abc1234 first\n").expect("write todo file");
 
-        let mut perms = fs::metadata(&path).expect("metadata").permissions();
-        perms.set_mode(0o444);
-        fs::set_permissions(&path, perms).expect("set permissions");
+        let mut perms = fs::metadata(dir.path()).expect("metadata").permissions();
+        perms.set_mode(0o555);
+        fs::set_permissions(dir.path(), perms).expect("set permissions");
 
         run_editor(
             &["--drop", "abc1234"],
             GitSequenceEditorExpectation {
                 code: EXIT_FAILURE,
-                stderr: "failed to write todo file: Permission denied (os error 13)\n".to_owned(),
+                stderr: format!(
+                    "failed to create temporary todo file for {}: Permission denied (os error 13)\n",
+                    path.display()
+                ),
                 todo_content: Some("pick abc1234 first\n".to_owned()),
                 ..Default::default()
             },

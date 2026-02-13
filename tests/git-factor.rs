@@ -779,6 +779,11 @@ EXAMPLES:
         execute_expectation(expectation);
     }
 
+    fn overwrite_session_exec(repo: &Path, exec: &str) {
+        let factor_dir = git_dir(repo).join("factor");
+        fs::write(factor_dir.join("exec"), format!("{exec}\n")).expect("write exec state");
+    }
+
     #[test]
     fn rejects_commit_ref_when_git_returns_non_hex_40_char_sha() {
         let dir = init_repo();
@@ -908,6 +913,27 @@ fi
             GitFactorExpectation::default()
                 .code(EXIT_USAGE)
                 .stderr("--exec <COMMAND> is required when starting a factor session\n"),
+        );
+    }
+
+    #[test]
+    fn start_head_runs_exec_gate_before_session_starts() {
+        let dir = init_repo();
+        let repo = dir.path();
+
+        commit_file(repo, "file.txt", "one\n", "chore: base");
+        commit_file(repo, "file.txt", "one\ntwo\n", "feat: change");
+        let head_before = git(repo, &["rev-parse", "HEAD"]);
+
+        run_git_factor(
+            repo,
+            &["--exec", "false", "HEAD"],
+            GitFactorExpectation::default()
+                .code(EXIT_TEMPFAIL)
+                .stderr("exec gate failed: false (exit code 1)\n")
+                .head_sha(head_before)
+                .git_status_porcelain("")
+                .factor_state_exists(false),
         );
     }
 
@@ -1254,15 +1280,13 @@ fi
 
         commit_file(repo, "file.txt", "one\n", "chore: base");
 
-        let factor_dir = git_dir(repo).join("factor");
-        fs::create_dir_all(&factor_dir).expect("create factor dir");
-        fs::write(factor_dir.join("commits"), "deadbeef\n").expect("write commits");
+        start_session(repo);
 
         run_git_factor(
             repo,
             &["--abort"],
             GitFactorExpectation::default()
-                .stdout("FACTOR: Session aborted. Repository restored to original state.\n"),
+                .stdout("FACTOR: Session aborted for current commit step.\n"),
         );
     }
 
@@ -1275,47 +1299,6 @@ fi
             GitFactorExpectation::default()
                 .code(EXIT_USAGE)
                 .stderr("no active factor session\n"),
-        );
-    }
-
-    #[test]
-    fn continue_delegates_to_rebase_when_no_factor_session_is_active() {
-        let dir = init_repo();
-        let repo = dir.path();
-
-        commit_file(repo, "file.txt", "one\n", "chore: base");
-        let rebase_merge = git_dir(repo).join("rebase-merge");
-        fs::create_dir_all(&rebase_merge).expect("create rebase-merge dir");
-
-        let (wrap_dir, wrap_bin) = make_git_wrapper_named(
-            "git",
-            #[expect(
-                clippy::literal_string_with_formatting_args,
-                reason = "shell script contains ${VAR:-default} expansions"
-            )]
-            r#"if [ "${1:-}" = "rebase" ] && [ "${2:-}" = "--continue" ]; then
-  exit 0
-fi
-"#,
-        );
-
-        let original_path = env::var_os("PATH").expect("PATH");
-        let prefixed_path = {
-            let mut joined = OsString::new();
-            joined.push(wrap_bin.as_os_str());
-            joined.push(OsStr::new(":"));
-            joined.push(original_path);
-            joined
-        };
-
-        let _keep_alive = wrap_dir;
-        run_git_factor_with_prefixed_path(
-            repo,
-            &["--continue"],
-            GitFactorExpectation::default().stdout(
-                "FACTOR: No active factor session found; delegating to `git rebase --continue`.\n",
-            ),
-            prefixed_path,
         );
     }
 
@@ -1716,66 +1699,33 @@ fi
     }
 
     #[test]
-    fn starts_head_session_during_an_existing_rebase() {
+    fn rejects_start_during_an_existing_rebase() {
         let dir = init_repo();
         let repo = dir.path();
         commit_file(repo, "file.txt", "one\n", "chore: base");
-        commit_file(repo, "file.txt", "one\ntwo\n", "feat: change");
 
         // Simulate an in-progress rebase (is_mid_rebase checks for these dirs).
         let rebase_merge = git_dir(repo).join("rebase-merge");
         fs::create_dir_all(&rebase_merge).expect("create rebase-merge dir");
 
-        let head_short_sha = git(repo, &["rev-parse", "--short", "HEAD"]);
         run_git_factor(
             repo,
             &["--exec", "true", "HEAD"],
             GitFactorExpectation::default()
-                .factor_state_exists(true)
-                .rebase_merge_exists(true)
-                .requires_rebase(true)
-                .stdout(expected_single_commit_start_stdout(
-                    head_short_sha.as_str(),
-                    "feat: change",
-                )),
+                .code(EXIT_USAGE)
+                .stderr("a rebase is already in progress\n"),
         );
     }
 
     #[test]
-    fn reports_on_enter_exec_gate_failure_during_existing_rebase() {
-        let dir = init_repo();
-        let repo = dir.path();
-        commit_file(repo, "file.txt", "one\n", "chore: base");
-        commit_file(repo, "file.txt", "one\ntwo\n", "feat: change");
-
-        // Simulate an in-progress rebase (is_mid_rebase checks for these dirs).
-        let rebase_merge = git_dir(repo).join("rebase-merge");
-        fs::create_dir_all(&rebase_merge).expect("create rebase-merge dir");
-
-        run_git_factor(
-        repo,
-        &["--exec", "false", "HEAD"],
-        GitFactorExpectation::default()
-            .code(EXIT_TEMPFAIL)
-            .factor_state_exists(false)
-            .rebase_merge_exists(true)
-            .stdout(
-                "FACTOR: On-enter exec gate failed for current commit.\nEXEC: false\nCODE: 1\n\nNEXT: Fix the commit and amend it.\nTHEN: Run `git rebase --continue`, then run `git factor` again.\n",
-            )
-            .stderr("exec gate failed: false (exit code 1)\n"),
-    );
-    }
-
-    #[test]
-    fn abort_restores_repo_state_after_start() {
+    fn abort_resets_repo_to_current_target_commit() {
         let dir = init_repo();
         let repo = dir.path();
 
         commit_file(repo, "file.txt", "one\n", "chore: base");
         commit_file(repo, "file.txt", "one\ntwo\n", "feat: change");
         commit_file(repo, "file.txt", "one\ntwo\nthree\n", "feat: latest");
-
-        let head_before = git(repo, &["rev-parse", "HEAD"]);
+        let target_commit = git(repo, &["rev-parse", "HEAD~1"]);
 
         run_git_factor(
             repo,
@@ -1787,7 +1737,7 @@ fi
             repo,
             &["--abort"],
             GitFactorExpectation::default()
-                .head_sha(head_before)
+                .head_sha(target_commit)
                 .git_status_porcelain("")
                 .factor_state_exists(false),
         );
@@ -1846,7 +1796,6 @@ fi
 
         commit_file(repo, "file.txt", "one\n", "chore: base");
         commit_file(repo, "file.txt", "one\ntwo\n", "feat: change");
-        let base_sha = git(repo, &["rev-parse", "HEAD~1"]);
 
         run_git_factor(
             repo,
@@ -1856,14 +1805,12 @@ fi
 
         git(repo, &["add", "--all"]);
         run_git_factor(
-        repo,
-        &["--continue", "--message", "test: split"],
-        GitFactorExpectation::default()
-            .code(EXIT_SOFTWARE)
-            .stderr(format!(
-                "dropping {base_sha} chore: base -- patch contents already upstream\ngit command failed: no rebase in progress\n"
-            )),
-    );
+            repo,
+            &["--continue", "--message", "test: split"],
+            GitFactorExpectation::default()
+                .code(EXIT_SOFTWARE)
+                .stderr("git command failed: no rebase in progress\n"),
+        );
     }
 
     #[test]
@@ -1879,8 +1826,9 @@ fi
         git(repo, &["add", "--all"]);
         git(repo, &["commit", "--message", "feat: original"]);
 
-        // Split the commit with a failing exec gate.
-        start_session_with_exec(repo, "false");
+        // Start session, then force a failing exec gate for continue.
+        start_session(repo);
+        overwrite_session_exec(repo, "false");
 
         // Stage only tracked.txt from the pool; leave new.txt unstaged.
         git(repo, &["add", "tracked.txt"]);
@@ -2062,7 +2010,8 @@ fi
         commit_file(repo, "file.txt", "one\n", "chore: base");
         commit_file(repo, "file.txt", "one\ntwo\n", "feat: original");
 
-        start_session_with_exec(repo, "false");
+        start_session(repo);
+        overwrite_session_exec(repo, "false");
 
         run_git_factor(
             repo,
@@ -2303,27 +2252,15 @@ fi
         fs::remove_dir_all(git_dir_path.join("rebase-merge")).expect("remove rebase-merge");
         fs::create_dir_all(git_dir_path.join("rebase-apply")).expect("create rebase-apply");
 
-        let (wrap_dir, wrap_bin) = make_git_wrapper_named(
-            "git",
-            #[expect(
-                clippy::literal_string_with_formatting_args,
-                reason = "shell script contains ${1:-} expansions"
-            )]
-            r#"if [ "${1:-}" = "rebase" ] && [ "${2:-}" = "--abort" ]; then
-  exit 0
-fi
-"#,
-        );
-        let _keep_alive = wrap_dir;
-
-        run_git_factor_with_env(
+        run_git_factor(
             repo,
             &["--abort"],
             GitFactorExpectation::default()
+                .stdout(
+                    "FACTOR: Session aborted for current commit step.\nFACTOR: Rebase still active. To abort full rebase, run: git rebase --abort\n",
+                )
                 .rebase_apply_exists(true)
                 .rebase_merge_exists(false),
-            "PATH",
-            format!("{}:{}", wrap_bin.display(), env::var("PATH").expect("PATH")),
         );
     }
 
@@ -2342,35 +2279,14 @@ fi
             GitFactorExpectation::default(),
         );
 
-        let (wrap_dir, wrap_bin) = make_git_wrapper_named(
-            "git",
-            #[expect(
-                clippy::literal_string_with_formatting_args,
-                reason = "shell script contains ${1:-} expansions"
-            )]
-            r#"if [ "${1:-}" = "rebase" ] && [ "${2:-}" = "--abort" ]; then
-  exit 19
-fi
-"#,
-        );
-        let _keep_alive = wrap_dir;
-
-        let original_path = env::var_os("PATH").expect("PATH");
-        let prefixed_path = {
-            let mut joined = OsString::new();
-            joined.push(wrap_bin.as_os_str());
-            joined.push(OsStr::new(":"));
-            joined.push(original_path);
-            joined
-        };
-
-        run_git_factor_with_prefixed_path(
+        run_git_factor(
             repo,
             &["--abort"],
             GitFactorExpectation::default()
-                .code(EXIT_SOFTWARE)
-                .stderr("git command failed: git rebase failed (exit 19)\n"),
-            prefixed_path,
+                .stdout_suffix(
+                    "FACTOR: Rebase still active. To abort full rebase, run: git rebase --abort\n",
+                )
+                .factor_state_exists(false),
         );
     }
 
@@ -2833,8 +2749,10 @@ fi
         commit_file(repo, "file.txt", "bad\n", "chore: base");
         commit_file(repo, "file.txt", "bad\nstill bad\n", "feat: change");
 
+        // Start session, then set a gate that validates staged-index materialization.
         // Note: command substitution strips trailing newlines, so compare to "good".
-        start_session_with_exec(repo, "test \"$(cat file.txt)\" = \"good\"");
+        start_session(repo);
+        overwrite_session_exec(repo, "test \"$(cat file.txt)\" = \"good\"");
 
         // Stage the gated content; the worktree will be cleaned back to HEAD
         // inside --continue, so the tool must materialize the index into the
@@ -3002,7 +2920,7 @@ fi
     }
 
     #[test]
-    fn continue_reports_tree_hash_mismatch_when_cherry_pick_cannot_apply() {
+    fn continue_restore_handles_file_directory_replacement() {
         let dir = init_repo();
         let repo = dir.path();
 
@@ -3011,8 +2929,6 @@ fi
 
         // Original commit adds `conflict` file.
         commit_file(repo, "conflict", "theirs\n", "feat: add conflict file");
-        let expected_tree_hash = git(repo, &["rev-parse", "HEAD^{tree}"]);
-
         start_session(repo);
 
         // Stage a slice that introduces a directory where the original commit has a file.
@@ -3020,28 +2936,27 @@ fi
         fs::create_dir_all(repo.join("conflict")).expect("create conflict dir");
         write_file(repo, "conflict/nested.txt", "ours\n");
         git(repo, &["add", "--all"]);
-        let actual_tree_hash = git(repo, &["write-tree"]);
 
         run_git_factor(
             repo,
             &["--continue", "--message", "test: dir conflict"],
             GitFactorExpectation::default()
-                .code(EXIT_TEMPFAIL)
-                .stderr_suffix(format!(
-                    "tree hash mismatch: expected {expected_tree_hash}, got {actual_tree_hash}\n"
-                )),
+                .git_output(&["ls-files", "--others", "--exclude-standard"], "conflict"),
         );
     }
 
     #[test]
-    fn continue_reports_exec_failure_when_exec_gate_fails() {
+    fn continue_reports_rehydrate_conflicts_when_exec_gate_fails() {
         let dir = init_repo();
         let repo = dir.path();
 
         commit_file(repo, "file.txt", "base\n", "chore: base");
         commit_file(repo, "conflict", "theirs\n", "feat: add conflict file");
+        let commit_short_sha = git(repo, &["rev-parse", "--short", "HEAD"]);
 
-        start_session_with_exec(repo, "false");
+        // Start session, then force exec failure so rehydrate runs.
+        start_session(repo);
+        overwrite_session_exec(repo, "false");
 
         fs::remove_file(repo.join("conflict")).expect("remove conflict file");
         fs::create_dir_all(repo.join("conflict")).expect("create conflict dir");
@@ -3052,21 +2967,22 @@ fi
             repo,
             &["--continue", "--message", "test: slice"],
             GitFactorExpectation::default()
-                .code(EXIT_TEMPFAIL)
-                .stderr("exec gate failed: false (exit code 1)\n"),
+                .code(EXIT_SOFTWARE)
+                .stderr_suffix(format!(
+                    "git command failed: rehydrate cherry-pick left conflicts:\nconflict~{commit_short_sha} (feat: add conflict file)\n"
+                )),
         );
     }
 
     #[test]
-    fn continue_reports_exec_failure_when_wrapper_overrides_cherry_pick() {
+    fn continue_reports_rehydrate_quit_failure() {
         let dir = init_repo();
         let repo = dir.path();
 
         commit_file(repo, "file.txt", "base\n", "chore: base");
         commit_file(repo, "file.txt", "base\nchange\n", "feat: change");
 
-        // Wrapper modifies cherry-pick behavior, but continue now fails before
-        // any cherry-pick path when the exec gate returns non-zero.
+        // Wrapper that fails only for `git cherry-pick --quit`.
         let (wrap_dir, wrap_bin) = make_git_wrapper_named(
             "git",
             #[expect(
@@ -3083,12 +2999,14 @@ fi
         let wrapped_path = format!("{}:{}", wrap_bin.display(), env::var("PATH").expect("PATH"));
         run_git_factor_with_env(
             repo,
-            &["--exec", "false", "HEAD"],
+            &["--exec", "true", "HEAD"],
             GitFactorExpectation::default(),
             "PATH",
             wrapped_path.clone(),
         );
+        overwrite_session_exec(repo, "false");
 
+        // Stage a slice so --continue proceeds into rehydrate.
         write_file(repo, "file.txt", "base\nslice\n");
         git(repo, &["add", "file.txt"]);
 
@@ -3096,8 +3014,8 @@ fi
             repo,
             &["--continue", "--message", "test: slice"],
             GitFactorExpectation::default()
-                .code(EXIT_TEMPFAIL)
-                .stderr("exec gate failed: false (exit code 1)\n"),
+                .code(EXIT_SOFTWARE)
+                .stderr("git command failed: git cherry-pick --quit failed (exit 1)\n"),
             "PATH",
             wrapped_path,
         );
@@ -3128,11 +3046,12 @@ fi
         let wrapped_path = format!("{}:{}", wrap_bin.display(), env::var("PATH").expect("PATH"));
         run_git_factor_with_env(
             repo,
-            &["--exec", "false", "HEAD"],
+            &["--exec", "true", "HEAD"],
             GitFactorExpectation::default(),
             "PATH",
             wrapped_path.clone(),
         );
+        overwrite_session_exec(repo, "false");
 
         // Stage a slice so --continue proceeds into rehydrate.
         write_file(repo, "file.txt", "base\nslice\n");
@@ -3157,7 +3076,8 @@ fi
         commit_file(repo, "file.txt", "base\n", "chore: base");
         commit_file(repo, "file.txt", "base\nchange\n", "feat: change");
 
-        start_session_with_exec(repo, "false");
+        start_session(repo);
+        overwrite_session_exec(repo, "false");
 
         // Stage a slice so --continue proceeds into rehydrate.
         write_file(repo, "file.txt", "base\nslice\n");
@@ -3170,12 +3090,8 @@ fi
                 clippy::literal_string_with_formatting_args,
                 reason = "shell script contains braces like ${1:-}"
             )]
-            r#"if [ "${1:-}" = "cherry-pick" ]; then
-  for arg in "$@"; do
-    if [ "$arg" = "--no-commit" ]; then
-      exit 1
-    fi
-  done
+            r#"if [ "${1:-}" = "cherry-pick" ] && [ "${2:-}" = "--no-commit" ]; then
+  exit 1
 fi
 if [ "${1:-}" = "diff" ] && [ "${2:-}" = "--name-only" ] && [ "${3:-}" = "--diff-filter=U" ]; then
   exit 0
@@ -3196,7 +3112,7 @@ fi
     }
 
     #[test]
-    fn finish_reports_restore_failure_without_tree_hash_check() {
+    fn finish_handles_cherry_pick_failure_without_conflicts() {
         let dir = init_repo();
         let repo = dir.path();
 
@@ -3205,26 +3121,43 @@ fi
 
         start_session(repo);
 
-        // Wrapper: fail `git restore` during finish before tree validation.
+        // Wrapper: fail `cherry-pick --no-commit`, report no conflicts, and force
+        // `cherry-pick --quit` to "succeed" so cmd_finish continues into tree checks.
         let (wrap_dir, wrap_bin) = make_git_wrapper_named(
             "git",
             #[expect(
                 clippy::literal_string_with_formatting_args,
                 reason = "shell script contains braces like ${1:-}"
             )]
-            r#"if [ "${1:-}" = "restore" ]; then
+            r#"if [ "${1:-}" = "cherry-pick" ] && [ "${2:-}" = "--no-commit" ]; then
   exit 1
+fi
+if [ "${1:-}" = "diff" ] && [ "${2:-}" = "--name-only" ] && [ "${3:-}" = "--diff-filter=U" ]; then
+  exit 0
+fi
+if [ "${1:-}" = "cherry-pick" ] && [ "${2:-}" = "--quit" ]; then
+  exit 0
 fi
 "#,
         );
         let _keep_alive = wrap_dir;
+        let original_commit = fs::read_to_string(git_dir(repo).join("factor/commits"))
+            .expect("read commits")
+            .lines()
+            .next()
+            .expect("first commit in session state")
+            .to_owned();
+        let expected_tree = git(repo, &["rev-parse", &format!("{original_commit}^{{tree}}")]);
+        let actual_tree = git(repo, &["write-tree"]);
 
         run_git_factor_with_env(
             repo,
             &["--finish", "--message", "test: finish"],
             GitFactorExpectation::default()
-                .code(EXIT_SOFTWARE)
-                .stderr("git command failed: git restore failed (exit 1)\n"),
+                .code(EXIT_TEMPFAIL)
+                .stderr(format!(
+                    "tree hash mismatch: expected {expected_tree}, got {actual_tree}\n"
+                )),
             "PATH",
             format!("{}:{}", wrap_bin.display(), env::var("PATH").expect("PATH")),
         );
@@ -3255,23 +3188,38 @@ fi
     }
 
     #[test]
-    fn finish_reports_restore_failure_from_wrapper_injection() {
+    fn finish_reports_conflicts_from_wrapper_injection() {
         let dir = init_repo();
         let repo = dir.path();
 
         commit_file(repo, "file.txt", "one\n", "chore: base");
-        commit_file(repo, "file.txt", "one\ntwo\n", "feat: change");
 
-        // Wrapper: fail restore when finish attempts to pin index/worktree.
+        // Create an "empty message" commit we can later finish.
+        git(
+            repo,
+            &[
+                "commit",
+                "--allow-empty",
+                "--allow-empty-message",
+                "--message",
+                "",
+            ],
+        );
+
+        // Wrapper: force cherry-pick --no-commit to fail, and make the unmerged query
+        // return a non-empty list so cmd_finish takes the conflict error path.
         let (wrap_dir, wrap_bin) = make_git_wrapper_named(
             "git",
             #[expect(
                 clippy::literal_string_with_formatting_args,
                 reason = "shell script contains braces like ${1:-}"
             )]
-            r#"if [ "${1:-}" = "restore" ]; then
-  echo "fatal: restore injection" >&2
+            r#"if [ "${1:-}" = "cherry-pick" ] && [ "${2:-}" = "--no-commit" ]; then
   exit 1
+fi
+if [ "${1:-}" = "diff" ] && [ "${2:-}" = "--name-only" ] && [ "${3:-}" = "--diff-filter=U" ]; then
+  echo "conflict.txt"
+  exit 0
 fi
 "#,
         );
@@ -3286,12 +3234,13 @@ fi
             wrapped_path.clone(),
         );
 
+        // Finish with the wrapper-enabled PATH so the conflict path triggers.
         run_git_factor_with_env(
             repo,
-            &["--finish", "--message", "test: finish"],
-            GitFactorExpectation::default().code(EXIT_SOFTWARE).stderr(
-                "fatal: restore injection\ngit command failed: git restore failed (exit 1)\n",
-            ),
+            &["--finish"],
+            GitFactorExpectation::default()
+                .code(EXIT_SOFTWARE)
+                .stderr("git command failed: final cherry-pick left conflicts:\nconflict.txt\n"),
             "PATH",
             wrapped_path,
         );
@@ -3314,13 +3263,9 @@ fi
             ],
         );
 
-        run_git_factor(
-            repo,
-            &["--exec", "true", "HEAD"],
-            GitFactorExpectation::default(),
-        );
+        start_session(repo);
 
-        // No --message provided on finish: must use original commit message and
+        // Stage everything and attempt to finish with no message; tool should
         // refuse to reuse an empty original message.
         git(repo, &["add", "--all"]);
         run_git_factor(
@@ -3331,6 +3276,7 @@ fi
                 .stderr("git command failed: original commit has empty message\n"),
         );
     }
+
     #[test]
     fn finish_reports_tree_hash_mismatch_via_write_tree_wrapper() {
         let dir = init_repo();
@@ -3502,21 +3448,20 @@ fi
     }
 
     #[test]
-    fn abort_reports_failed_git_rebase_abort_status() {
+    fn abort_does_not_attempt_git_rebase_abort() {
         let dir = init_repo();
         let repo = dir.path();
 
         commit_file(repo, "file.txt", "one\n", "chore: base");
+        commit_file(repo, "file.txt", "one\ntwo\n", "feat: change");
+        commit_file(repo, "file.txt", "one\ntwo\nthree\n", "feat: latest");
+        run_git_factor(
+            repo,
+            &["--exec", "true", "HEAD~1"],
+            GitFactorExpectation::default().factor_state_exists(true),
+        );
 
-        // Create an active session directory so --abort proceeds to the rebase check.
-        let factor_dir = git_dir(repo).join("factor");
-        fs::create_dir_all(&factor_dir).expect("create factor dir");
-
-        // Force `is_mid_rebase()` so cmd_abort attempts `git rebase --abort`.
-        let rebase_merge_dir = git_dir(repo).join("rebase-merge");
-        fs::create_dir_all(&rebase_merge_dir).expect("create rebase-merge dir");
-
-        // Wrapper: force `git rebase --abort` to fail with a non-zero status.
+        // If git-factor calls `git rebase --abort`, this wrapper forces a failure.
         let (wrap_dir, wrap_bin) = make_git_wrapper_named(
             "git",
             #[expect(
@@ -3534,8 +3479,10 @@ fi
             repo,
             &["--abort"],
             GitFactorExpectation::default()
-                .code(EXIT_SOFTWARE)
-                .stderr("git command failed: git rebase failed (exit 1)\n"),
+                .stdout_suffix(
+                    "FACTOR: Rebase still active. To abort full rebase, run: git rebase --abort\n",
+                )
+                .factor_state_exists(false),
             "PATH",
             format!("{}:{}", wrap_bin.display(), env::var("PATH").expect("PATH")),
         );

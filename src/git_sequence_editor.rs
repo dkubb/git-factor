@@ -13,12 +13,81 @@ mod cli;
 #[path = "git_sequence_editor/todo.rs"]
 mod todo;
 
-use std::fs;
+use std::fs::{self, OpenOptions};
+use std::io::Write as _;
+use std::path::Path;
+use std::process;
 
 use clap::Parser as _;
 
 use self::cli::Cli;
 use self::todo::{build_requested_actions, rewrite_todo, todo_shas_in, validate_todo_format};
+
+/// Writes `content` to `path` atomically via a same-directory temp file and rename.
+fn write_file_atomic(path: &Path, content: &str) -> Result<(), String> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| format!("failed to determine parent directory for: {}", path.display()))?;
+    let file_name = path
+        .file_name()
+        .ok_or_else(|| format!("failed to determine file name for: {}", path.display()))?;
+    let pid = process::id();
+
+    for attempt in 0_u32..1024 {
+        let mut temp_name = file_name.to_os_string();
+        temp_name.push(format!(".tmp{pid}.{attempt}"));
+        let temp_path = parent.join(temp_name);
+
+        let mut file = match OpenOptions::new()
+            .create_new(true)
+            .truncate(false)
+            .write(true)
+            .open(&temp_path)
+        {
+            Ok(file) => file,
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(err) => {
+                return Err(format!(
+                    "failed to create temporary todo file for {}: {err}",
+                    path.display()
+                ));
+            }
+        };
+
+        if let Err(err) = file.write_all(content.as_bytes()) {
+            let _ignored = fs::remove_file(&temp_path);
+            return Err(format!(
+                "failed to write temporary todo file for {}: {err}",
+                path.display()
+            ));
+        }
+
+        if let Err(err) = file.sync_all() {
+            let _ignored = fs::remove_file(&temp_path);
+            return Err(format!(
+                "failed to sync temporary todo file for {}: {err}",
+                path.display()
+            ));
+        }
+
+        drop(file);
+
+        if let Err(err) = fs::rename(&temp_path, path) {
+            let _ignored = fs::remove_file(&temp_path);
+            return Err(format!(
+                "failed to atomically replace todo file {}: {err}",
+                path.display()
+            ));
+        }
+
+        return Ok(());
+    }
+
+    Err(format!(
+        "failed to create a unique temporary file for {}",
+        path.display()
+    ))
+}
 
 /// Runs the editor logic.
 fn run_for(cli: &Cli) -> Result<(), String> {
@@ -31,7 +100,7 @@ fn run_for(cli: &Cli) -> Result<(), String> {
 
     let (output, warnings) = rewrite_todo(&content, &requested);
 
-    fs::write(cli.file(), &output).map_err(|err| format!("failed to write todo file: {err}"))?;
+    write_file_atomic(cli.file(), &output)?;
 
     for warning in warnings {
         eprintln!("{warning}");
