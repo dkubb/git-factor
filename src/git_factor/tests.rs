@@ -1888,3 +1888,36 @@ fn advance_to_next_commit_propagates_io_error_when_outln_fails_mid_rebase() {
     );
 }
 
+
+#[test]
+fn advance_to_next_commit_propagates_io_error_when_outln_fails_after_rebase_finishes() {
+    let dir = TempDir::new().expect("tempdir");
+    let repo = dir.path();
+    let git_dir = repo.join(".git");
+
+    let state_dir = git_dir.join("factor");
+    fs::create_dir_all(&state_dir).expect("create factor dir");
+    fs::write(state_dir.join("split_count"), "3\n").expect("write split_count");
+    fs::write(state_dir.join("requires_rebase"), "false\n").expect("write requires_rebase");
+
+    let runner =
+        ScriptedRunner::default().with_output("git", &["rev-parse", "--git-dir"], repo, ".git\n");
+
+    let io = FailingIo;
+    let env = TestEnv {
+        cwd: repo.to_path_buf(),
+    };
+    let ctx = Ctx {
+        runner: &runner,
+        cwd: repo.to_path_buf(),
+        io: &io,
+        env: &env,
+        fs: &REAL_FS,
+    };
+
+    let err = advance_to_next_commit_in(&ctx, &state_dir).expect_err("expected io failure");
+    assert!(
+        matches!(&err, FactorError::Io(inner) if inner.to_string().contains("io fail")),
+        "err was: {err:?}"
+    );
+}
