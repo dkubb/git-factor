@@ -42,8 +42,8 @@ use self::helpers::{
     head_ref_literal, is_factor_active_in, is_mid_rebase_in, is_root_commit_in,
     mixed_reset_to_empty, print_hints_in, print_session_started, read_state,
     read_state_bool_or_default, read_state_parsed, remove_empty_root_in, resolve_commit,
-    resolve_commit_refs, run_git, shell_quote, sort_topologically, status_code, validate_ancestor,
-    validate_exec_syntax, validate_not_merge, write_state,
+    resolve_commit_refs, run_git, shell_quote, sort_topologically, status_code, trace_note,
+    validate_ancestor, validate_exec_syntax, validate_not_merge, write_state,
 };
 use self::types::{CommitSha, Commits};
 
@@ -318,6 +318,8 @@ fn real_ctx() -> Result<Ctx<'static>, FactorError> {
     reason = "Command handler dispatched from run()"
 )]
 fn cmd_abort_in(ctx: &Ctx<'_>) -> Result<i32, FactorError> {
+    trace_note(ctx, "factor_cmd_abort", &[]);
+
     if !is_factor_active_in(ctx) {
         return Err(FactorError::NoActiveSession);
     }
@@ -367,7 +369,7 @@ fn advance_to_next_commit_in(ctx: &Ctx<'_>, state_dir: &Path) -> Result<bool, Fa
             write_state(ctx, state_dir, "current_index", &current_index.to_string())?;
             write_state(ctx, state_dir, "split_count", "0")?;
 
-            run_git(ctx, &["reset", "--quiet", "--mixed", "HEAD~1"])?;
+            run_git(ctx, &["reset", "--quiet", "HEAD~1"])?;
 
             let current_commit = current_commit_from_state(ctx, state_dir)?;
             let message = commit_message(ctx, &current_commit)?;
@@ -419,6 +421,8 @@ fn advance_to_next_commit_in(ctx: &Ctx<'_>, state_dir: &Path) -> Result<bool, Fa
 
 /// Continues an in-progress factor session.
 fn cmd_continue_in(ctx: &Ctx<'_>, messages: &NonEmpty<NonEmptyString>) -> Result<i32, FactorError> {
+    trace_note(ctx, "factor_cmd_continue", &[]);
+
     if !is_factor_active_in(ctx) {
         return Err(FactorError::NoActiveSession);
     }
@@ -432,7 +436,7 @@ fn cmd_continue_in(ctx: &Ctx<'_>, messages: &NonEmpty<NonEmptyString>) -> Result
 
     // Check for staged changes before mutating the working tree. This avoids
     // deleting the remaining unstaged/untracked pool when nothing is staged.
-    let has_staged = git_status(ctx, &["diff", "--cached", "--quiet"])?;
+    let has_staged = git_status(ctx, &["diff", "--quiet", "--staged"])?;
 
     if has_staged.success() {
         return Err(FactorError::NoStagedChanges);
@@ -478,6 +482,20 @@ fn cmd_continue_in(ctx: &Ctx<'_>, messages: &NonEmpty<NonEmptyString>) -> Result
 
     let head_tree = git_output(ctx, &["rev-parse", "HEAD^{tree}"])?;
     let expected_tree = expected_tree_for_current_step(ctx, &state_dir, &original_commit)?;
+    let converged = if head_tree == expected_tree {
+        "true"
+    } else {
+        "false"
+    };
+    trace_note(
+        ctx,
+        "tree_compare_continue",
+        &[
+            ("expected_tree", expected_tree.as_str()),
+            ("actual_tree", head_tree.as_str()),
+            ("converged", converged),
+        ],
+    );
 
     if head_tree == expected_tree {
         // No more changes remain for this commit; advance to next or finish.
@@ -588,11 +606,11 @@ fn rehydrate_pool_preserving_index(
 /// worktree first (removing unstaged/untracked changes), then write the index
 /// contents back out so the gate validates the staged slice.
 fn materialize_index_to_worktree(ctx: &Ctx<'_>) -> Result<(), FactorError> {
-    run_git(ctx, &["checkout-index", "--quiet", "--all", "--force"])?;
+    run_git(ctx, &["checkout-index", "--all", "--force", "--quiet"])?;
 
     // checkout-index does not remove paths deleted in the index, so we must
     // explicitly remove any staged deletions to avoid validating extra files.
-    let deleted = git_output(ctx, &["diff", "--cached", "--name-only", "--diff-filter=D"])?;
+    let deleted = git_output(ctx, &["diff", "--diff-filter=D", "--name-only", "--staged"])?;
     for path in deleted.lines().map(str::trim).filter(|p| !p.is_empty()) {
         // `git diff --name-only` returns paths, not directories. Removing the file
         // is sufficient to ensure the worktree matches the staged deletion.
@@ -604,6 +622,8 @@ fn materialize_index_to_worktree(ctx: &Ctx<'_>) -> Result<(), FactorError> {
 
 /// Finishes the factor session by committing all remaining staged changes.
 fn cmd_finish_in(ctx: &Ctx<'_>, messages: &[NonEmptyString]) -> Result<i32, FactorError> {
+    trace_note(ctx, "factor_cmd_finish", &[]);
+
     if !is_factor_active_in(ctx) {
         return Err(FactorError::NoActiveSession);
     }
@@ -674,6 +694,20 @@ fn cmd_finish_in(ctx: &Ctx<'_>, messages: &[NonEmptyString]) -> Result<i32, Fact
 
     // Verify tree hash matches the original commit before committing.
     let actual_tree = git_output(ctx, &["write-tree"])?;
+    let converged = if actual_tree == expected_tree {
+        "true"
+    } else {
+        "false"
+    };
+    trace_note(
+        ctx,
+        "tree_compare_finish",
+        &[
+            ("expected_tree", expected_tree.as_str()),
+            ("actual_tree", actual_tree.as_str()),
+            ("converged", converged),
+        ],
+    );
     if actual_tree != expected_tree {
         return Err(FactorError::TreeHashMismatch {
             actual: actual_tree,
@@ -684,7 +718,7 @@ fn cmd_finish_in(ctx: &Ctx<'_>, messages: &[NonEmptyString]) -> Result<i32, Fact
     // Handle the empty-commit case (or "finish called when nothing remains"):
     // if there are no staged changes, create an empty commit so the rebase edit
     // stop can be satisfied without silently dropping the original commit.
-    let has_staged = git_status(ctx, &["diff", "--cached", "--quiet"])?;
+    let has_staged = git_status(ctx, &["diff", "--quiet", "--staged"])?;
 
     // Run exec gate on the clean working tree before committing.
     let exec_status = command_status_with(ctx, "bash", &["-c", exec_command.as_str()], &[], false)?;
@@ -731,6 +765,8 @@ fn cmd_start_in(
     exec: &NonEmpty<NonEmptyString>,
     commit_refs: &NonEmpty<NonEmptyString>,
 ) -> Result<i32, FactorError> {
+    trace_note(ctx, "factor_cmd_start", &[]);
+
     // Probe git dir early to surface NotGitRepo before other checks.
     let state_dir = factor_dir_in(ctx)?;
 
@@ -855,7 +891,7 @@ fn cmd_start_in(
     if is_root {
         mixed_reset_to_empty(ctx)?;
     } else {
-        run_git(ctx, &["reset", "--quiet", "--mixed", "HEAD~1"])?;
+        run_git(ctx, &["reset", "--quiet", "HEAD~1"])?;
     }
 
     print_session_started(ctx, &resolved_commits, &short_sha, &message)?;
@@ -871,13 +907,13 @@ fn build_rebase_args<'arg>(
 ) -> Vec<&'arg str> {
     let mut rebase_args = vec![
         "rebase",
-        "--quiet",
+        "--interactive",
         "--no-autosquash",
         "--no-autostash",
         "--no-rebase-merges",
         "--no-stat",
+        "--quiet",
         "--reschedule-failed-exec",
-        "--interactive",
     ];
     for cmd in exec {
         rebase_args.push("--exec");
@@ -927,10 +963,25 @@ fn expected_tree_for_current_step(
     original_commit: &CommitSha,
 ) -> Result<String, FactorError> {
     if let Ok(tree) = read_state(ctx, state_dir, "expected_tree") {
+        trace_note(
+            ctx,
+            "expected_tree_source",
+            &[("source", "state"), ("expected_tree", tree.as_str())],
+        );
         return Ok(tree.to_string());
     }
 
-    git_output(ctx, &["rev-parse", &format!("{original_commit}^{{tree}}")])
+    let tree = git_output(ctx, &["rev-parse", &format!("{original_commit}^{{tree}}")])?;
+    trace_note(
+        ctx,
+        "expected_tree_source",
+        &[
+            ("source", "original_commit"),
+            ("original_commit", original_commit.as_str()),
+            ("expected_tree", tree.as_str()),
+        ],
+    );
+    Ok(tree)
 }
 
 /// Creates a git commit preserving the original author and committer metadata.

@@ -1137,7 +1137,7 @@ fn cmd_start_errors_when_short_sha_is_empty() {
         )
         .with_status(
             "git",
-            &["rev-parse", "--verify", "--quiet", &format!("{sha}^2")],
+            &["rev-parse", "--quiet", "--verify", &format!("{sha}^2")],
             &[],
             true,
             repo,
@@ -1199,7 +1199,7 @@ fn cmd_start_propagates_rev_parse_short_sha_output_error() {
         )
         .with_status(
             "git",
-            &["rev-parse", "--verify", "--quiet", &format!("{sha}^2")],
+            &["rev-parse", "--quiet", "--verify", &format!("{sha}^2")],
             &[],
             true,
             repo,
@@ -1266,7 +1266,7 @@ fn cmd_start_propagates_status_error_when_start_sequence_fails() {
         )
         .with_status(
             "git",
-            &["rev-parse", "--verify", "--quiet", &format!("{sha}^2")],
+            &["rev-parse", "--quiet", "--verify", &format!("{sha}^2")],
             &[],
             true,
             repo,
@@ -1291,7 +1291,7 @@ fn cmd_start_propagates_status_error_when_start_sequence_fails() {
         .with_output("git", &["rev-parse", "HEAD^{tree}"], repo, "head_tree\n")
         .with_status(
             "git",
-            &["rev-parse", "--verify", "--quiet", &format!("{sha}^")],
+            &["rev-parse", "--quiet", "--verify", &format!("{sha}^")],
             &[],
             true,
             repo,
@@ -1379,7 +1379,7 @@ fn cmd_start_propagates_rebase_status_error_in_multi_commit_session() {
         )
         .with_status(
             "git",
-            &["rev-parse", "--verify", "--quiet", &format!("{sha_a}^2")],
+            &["rev-parse", "--quiet", "--verify", &format!("{sha_a}^2")],
             &[],
             true,
             repo,
@@ -1395,7 +1395,7 @@ fn cmd_start_propagates_rebase_status_error_in_multi_commit_session() {
         )
         .with_status(
             "git",
-            &["rev-parse", "--verify", "--quiet", &format!("{sha_b}^2")],
+            &["rev-parse", "--quiet", "--verify", &format!("{sha_b}^2")],
             &[],
             true,
             repo,
@@ -1418,7 +1418,7 @@ fn cmd_start_propagates_rebase_status_error_in_multi_commit_session() {
         )
         .with_status(
             "git",
-            &["rev-parse", "--verify", "--quiet", &format!("{sha_a}^")],
+            &["rev-parse", "--quiet", "--verify", &format!("{sha_a}^")],
             &[],
             true,
             repo,
@@ -1515,7 +1515,7 @@ fn cmd_start_propagates_requires_rebase_state_write_failure() {
         )
         .with_status(
             "git",
-            &["rev-parse", "--verify", "--quiet", &format!("{sha}^2")],
+            &["rev-parse", "--quiet", "--verify", &format!("{sha}^2")],
             &[],
             true,
             repo,
@@ -1539,7 +1539,7 @@ fn cmd_start_propagates_requires_rebase_state_write_failure() {
         .with_status("bash", &["-c", "true"], &[], false, repo, 0)
         .with_status(
             "git",
-            &["rev-parse", "--verify", "--quiet", &format!("{sha}^")],
+            &["rev-parse", "--quiet", "--verify", &format!("{sha}^")],
             &[],
             true,
             repo,
@@ -1640,7 +1640,7 @@ fn cmd_start_range_ref_inserts_shas_and_propagates_io_error_on_multi_commit_bann
         )
         .with_status(
             "git",
-            &["rev-parse", "--verify", "--quiet", &format!("{sha_a}^2")],
+            &["rev-parse", "--quiet", "--verify", &format!("{sha_a}^2")],
             &[],
             true,
             repo,
@@ -1648,7 +1648,7 @@ fn cmd_start_range_ref_inserts_shas_and_propagates_io_error_on_multi_commit_bann
         )
         .with_status(
             "git",
-            &["rev-parse", "--verify", "--quiet", &format!("{sha_b}^2")],
+            &["rev-parse", "--quiet", "--verify", &format!("{sha_b}^2")],
             &[],
             true,
             repo,
@@ -1672,7 +1672,7 @@ fn cmd_start_range_ref_inserts_shas_and_propagates_io_error_on_multi_commit_bann
         )
         .with_status(
             "git",
-            &["rev-parse", "--verify", "--quiet", &format!("{sha_a}^")],
+            &["rev-parse", "--quiet", "--verify", &format!("{sha_a}^")],
             &[],
             true,
             repo,
@@ -1682,13 +1682,13 @@ fn cmd_start_range_ref_inserts_shas_and_propagates_io_error_on_multi_commit_bann
             "git",
             &[
                 "rebase",
-                "--quiet",
+                "--interactive",
                 "--no-autosquash",
                 "--no-autostash",
                 "--no-rebase-merges",
                 "--no-stat",
+                "--quiet",
                 "--reschedule-failed-exec",
-                "--interactive",
                 "--exec",
                 "true",
                 &format!("{sha_a}^"),
@@ -1699,7 +1699,7 @@ fn cmd_start_range_ref_inserts_shas_and_propagates_io_error_on_multi_commit_bann
             0,
         )
         .with_output("git", &["rev-parse", "HEAD^{tree}"], repo, "head_tree\n")
-        .with_status("git", &["reset", "--quiet", "--mixed", "HEAD~1"], &[], false, repo, 0)
+        .with_status("git", &["reset", "--quiet", "HEAD~1"], &[], false, repo, 0)
         .with_output("git", &["diff", "--stat"], repo, "")
         .with_output(
             "git",
@@ -1773,7 +1773,7 @@ fn advance_to_next_commit_prints_untracked_changes_when_present() {
     let runner = ScriptedRunner::default()
         .with_status("git", &["rebase", "--continue"], &[], false, repo, 0)
         .with_output("git", &["rev-parse", "HEAD^{tree}"], repo, "head_tree\n")
-        .with_status("git", &["reset", "--quiet", "--mixed", "HEAD~1"], &[], false, repo, 0)
+        .with_status("git", &["reset", "--quiet", "HEAD~1"], &[], false, repo, 0)
         .with_output("git", &["rev-parse", "--git-dir"], repo, ".git\n")
         .with_output(
             "git",
@@ -1869,7 +1869,7 @@ fn advance_to_next_commit_propagates_io_error_when_outln_fails_mid_rebase() {
     let runner = ScriptedRunner::default()
         .with_status("git", &["rebase", "--continue"], &[], false, repo, 0)
         .with_output("git", &["rev-parse", "HEAD^{tree}"], repo, "head_tree\n")
-        .with_status("git", &["reset", "--quiet", "--mixed", "HEAD~1"], &[], false, repo, 0)
+        .with_status("git", &["reset", "--quiet", "HEAD~1"], &[], false, repo, 0)
         .with_output("git", &["rev-parse", "--git-dir"], repo, ".git\n")
         .with_output(
             "git",
@@ -2027,7 +2027,7 @@ fn advance_to_next_commit_omits_untracked_section_when_empty() {
     let runner = ScriptedRunner::default()
         .with_status("git", &["rebase", "--continue"], &[], false, repo, 0)
         .with_output("git", &["rev-parse", "HEAD^{tree}"], repo, "head_tree\n")
-        .with_status("git", &["reset", "--quiet", "--mixed", "HEAD~1"], &[], false, repo, 0)
+        .with_status("git", &["reset", "--quiet", "HEAD~1"], &[], false, repo, 0)
         .with_output("git", &["rev-parse", "--git-dir"], repo, ".git\n")
         .with_output(
             "git",
@@ -2361,7 +2361,7 @@ fn cmd_continue_errors_on_split_count_overflow() {
 
     let runner = ScriptedRunner::default()
         .with_output("git", &["rev-parse", "--git-dir"], repo, ".git\n")
-        .with_status("git", &["diff", "--cached", "--quiet"], &[], false, repo, 1)
+        .with_status("git", &["diff", "--quiet", "--staged"], &[], false, repo, 1)
         .with_status("git", &["checkout", "--quiet", "--", "."], &[], false, repo, 0)
         .with_status(
             "git",
@@ -2373,7 +2373,7 @@ fn cmd_continue_errors_on_split_count_overflow() {
         )
         .with_status(
             "git",
-            &["checkout-index", "--quiet", "--all", "--force"],
+            &["checkout-index", "--all", "--force", "--quiet"],
             &[],
             false,
             repo,
@@ -2381,7 +2381,7 @@ fn cmd_continue_errors_on_split_count_overflow() {
         )
         .with_output(
             "git",
-            &["diff", "--cached", "--name-only", "--diff-filter=D"],
+            &["diff", "--diff-filter=D", "--name-only", "--staged"],
             repo,
             "",
         )
@@ -2455,7 +2455,7 @@ fn cmd_continue_propagates_restore_status_error() {
 
     let runner = ScriptedRunner::default()
         .with_output("git", &["rev-parse", "--git-dir"], repo, ".git\n")
-        .with_status("git", &["diff", "--cached", "--quiet"], &[], false, repo, 1)
+        .with_status("git", &["diff", "--quiet", "--staged"], &[], false, repo, 1)
         .with_status("git", &["checkout", "--quiet", "--", "."], &[], false, repo, 0)
         .with_status(
             "git",
@@ -2467,7 +2467,7 @@ fn cmd_continue_propagates_restore_status_error() {
         )
         .with_status(
             "git",
-            &["checkout-index", "--quiet", "--all", "--force"],
+            &["checkout-index", "--all", "--force", "--quiet"],
             &[],
             false,
             repo,
@@ -2475,7 +2475,7 @@ fn cmd_continue_propagates_restore_status_error() {
         )
         .with_output(
             "git",
-            &["diff", "--cached", "--name-only", "--diff-filter=D"],
+            &["diff", "--diff-filter=D", "--name-only", "--staged"],
             repo,
             "",
         )
@@ -2593,7 +2593,7 @@ fn cmd_finish_errors_on_split_count_overflow() {
         )
         .with_status("git", &["cherry-pick", "--quit"], &[], false, repo, 0)
         .with_output("git", &["write-tree"], repo, expected_tree_output)
-        .with_status("git", &["diff", "--cached", "--quiet"], &[], false, repo, 1)
+        .with_status("git", &["diff", "--quiet", "--staged"], &[], false, repo, 1)
         .with_status("bash", &["-c", "true"], &[], false, repo, 0)
         .with_output(
             "git",
@@ -2746,7 +2746,7 @@ fn cmd_finish_propagates_git_commit_preserving_metadata_error() {
         )
         .with_status("git", &["cherry-pick", "--quit"], &[], false, repo, 0)
         .with_output("git", &["write-tree"], repo, expected_tree_output)
-        .with_status("git", &["diff", "--cached", "--quiet"], &[], false, repo, 1)
+        .with_status("git", &["diff", "--quiet", "--staged"], &[], false, repo, 1)
         .with_status("bash", &["-c", "true"], &[], false, repo, 0);
 
     let io = TestIo::default();

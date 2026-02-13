@@ -1833,7 +1833,7 @@ fi
             GitFactorExpectation::default()
                 .code(EXIT_TEMPFAIL)
                 .stderr("exec gate failed: false (exit code 1)\n")
-                .git_output(&["diff", "--cached", "--name-only"], "tracked.txt")
+                .git_output(&["diff", "--name-only", "--staged"], "tracked.txt")
                 .git_status_porcelain("M  tracked.txt\n?? new.txt")
                 .path_exists("new.txt", true),
         );
@@ -1873,7 +1873,7 @@ fi
         commit_file(repo, "file.txt", "one\n", "chore: base");
         commit_file(repo, "file.txt", "one\ntwo\n", "feat: original message");
 
-        let original_message = git(repo, &["log", "-1", "--format=%B"]);
+        let original_message = git(repo, &["log", "--format=%B", "--max-count=1"]);
 
         start_session(repo);
 
@@ -1881,7 +1881,7 @@ fi
             repo,
             &["--finish"],
             GitFactorExpectation::default().git_output(
-                &["log", "-1", "--format=%B"],
+                &["log", "--format=%B", "--max-count=1"],
                 original_message.trim_end().to_owned(),
             ),
         );
@@ -1929,7 +1929,7 @@ fi
         );
 
         let expected_tree = git(repo, &["rev-parse", "HEAD^{tree}"]);
-        let expected_subject = git(repo, &["log", "-1", "--format=%s"]);
+        let expected_subject = git(repo, &["log", "--format=%s", "--max-count=1"]);
 
         start_session(repo);
 
@@ -1938,7 +1938,7 @@ fi
             &["--finish"],
             GitFactorExpectation::default()
                 .git_output(&["rev-parse", "HEAD^{tree}"], expected_tree)
-                .git_output(&["log", "-1", "--format=%s"], expected_subject),
+                .git_output(&["log", "--format=%s", "--max-count=1"], expected_subject),
         );
     }
 
