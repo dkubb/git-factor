@@ -3346,3 +3346,81 @@ fi
         );
     }
 
+    #[test]
+    fn continue_reports_error_when_expected_tree_lookup_fails() {
+        let dir = init_repo();
+        let repo = dir.path();
+
+        commit_file(repo, "file.txt", "base\n", "chore: base");
+        commit_file(repo, "file.txt", "base\nchange\n", "feat: change");
+
+        start_session(repo);
+        write_file(repo, "file.txt", "base\nslice\n");
+        git(repo, &["add", "file.txt"]);
+
+        let (wrap_dir, wrap_bin) = make_git_wrapper_named(
+            "git",
+            #[expect(
+                clippy::literal_string_with_formatting_args,
+                reason = "shell script contains braces like ${1:-}"
+            )]
+            r#"if [ "${1:-}" = "rev-parse" ]; then
+  case "${2:-}" in
+    *"^{tree}")
+      echo "fatal: expected tree failed" >&2
+      exit 1
+      ;;
+  esac
+fi
+"#,
+        );
+        let _keep_alive = wrap_dir;
+
+        run_git_factor_with_env(
+            repo,
+            &["--continue", "--message", "test: slice"],
+            GitFactorExpectation::default()
+                .code(EXIT_SOFTWARE)
+                .stderr("git command failed: fatal: expected tree failed\n"),
+            "PATH",
+            format!("{}:{}", wrap_bin.display(), env::var("PATH").expect("PATH")),
+        );
+    }
+
+    #[test]
+    fn continue_reports_error_when_actual_tree_lookup_fails() {
+        let dir = init_repo();
+        let repo = dir.path();
+
+        commit_file(repo, "file.txt", "base\n", "chore: base");
+        commit_file(repo, "file.txt", "base\nchange\n", "feat: change");
+
+        start_session(repo);
+        write_file(repo, "file.txt", "base\nslice\n");
+        git(repo, &["add", "file.txt"]);
+
+        let (wrap_dir, wrap_bin) = make_git_wrapper_named(
+            "git",
+            #[expect(
+                clippy::literal_string_with_formatting_args,
+                reason = "shell script contains braces like ${1:-}"
+            )]
+            r#"if [ "${1:-}" = "rev-parse" ] && [ "${2:-}" = "HEAD^{tree}" ]; then
+  echo "fatal: actual tree failed" >&2
+  exit 1
+fi
+"#,
+        );
+        let _keep_alive = wrap_dir;
+
+        run_git_factor_with_env(
+            repo,
+            &["--continue", "--message", "test: slice"],
+            GitFactorExpectation::default()
+                .code(EXIT_SOFTWARE)
+                .stderr("git command failed: fatal: actual tree failed\n"),
+            "PATH",
+            format!("{}:{}", wrap_bin.display(), env::var("PATH").expect("PATH")),
+        );
+    }
+
