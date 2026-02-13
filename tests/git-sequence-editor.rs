@@ -618,3 +618,168 @@ exec echo hi\n\
 
     #[test]
     fn resolves_uppercase_hex40_via_rev_parse_and_maps_to_todo_token() {
+        let dir = TempDir::new().expect("tempdir");
+        let path = dir.path().join("todo");
+        fs::write(&path, "pick abc1234 first\n").expect("write todo file");
+
+        let requested = "A".repeat(40);
+        let resolved = format!("abc1234{}", "0".repeat(33));
+
+        let steps = vec![GitWrapperStep {
+            args: vec![
+                "rev-parse".to_owned(),
+                "--verify".to_owned(),
+                requested.clone(),
+            ],
+            stdout: format!("{resolved}\n"),
+            stderr: String::new(),
+            exit_code: 0,
+        }];
+
+        let (wrap_dir, wrap_bin, count_file) = make_ordered_git_wrapper(&steps);
+        let original_path = env::var_os("PATH").expect("PATH");
+        let prefixed_path = {
+            let mut joined = OsString::new();
+            joined.push(wrap_bin.as_os_str());
+            joined.push(OsStr::new(":"));
+            joined.push(original_path);
+            joined
+        };
+
+        run_editor_with_prefixed_path(
+            &["--drop", requested.as_str()],
+            GitSequenceEditorExpectation {
+                ordered_git_replay: Some(OrderedGitReplayExpectation::from_count_file(
+                    count_file,
+                    steps.len(),
+                )),
+                todo_content: Some("drop abc1234 first\n".to_owned()),
+                ..Default::default()
+            },
+            prefixed_path,
+            &path,
+        );
+        let _keep_alive = wrap_dir;
+    }
+
+    #[test]
+    fn reports_error_when_rev_parse_fails() {
+        let dir = TempDir::new().expect("tempdir");
+        let path = dir.path().join("todo");
+        fs::write(&path, "pick abc1234 first\n").expect("write todo file");
+
+        let requested = "a".repeat(40);
+        let steps = vec![GitWrapperStep {
+            args: vec![
+                "rev-parse".to_owned(),
+                "--verify".to_owned(),
+                requested.clone(),
+            ],
+            stdout: String::new(),
+            stderr: "fatal: bad object\n".to_owned(),
+            exit_code: 1,
+        }];
+
+        let (wrap_dir, wrap_bin, count_file) = make_ordered_git_wrapper(&steps);
+
+        let original_path = env::var_os("PATH").expect("PATH");
+        let prefixed_path = {
+            let mut joined = OsString::new();
+            joined.push(wrap_bin.as_os_str());
+            joined.push(OsStr::new(":"));
+            joined.push(original_path);
+            joined
+        };
+
+        run_editor_with_prefixed_path(
+            &["--drop", requested.as_str()],
+            GitSequenceEditorExpectation {
+                code: EXIT_FAILURE,
+                ordered_git_replay: Some(OrderedGitReplayExpectation::from_count_file(
+                    count_file,
+                    steps.len(),
+                )),
+                stderr: "git rev-parse failed (exit 1): fatal: bad object\n".to_owned(),
+                todo_content: Some("pick abc1234 first\n".to_owned()),
+                ..Default::default()
+            },
+            prefixed_path,
+            &path,
+        );
+        let _keep_alive = wrap_dir;
+    }
+
+    #[test]
+    fn reports_error_when_rev_parse_cannot_spawn() {
+        let dir = TempDir::new().expect("tempdir");
+        let path = dir.path().join("todo");
+        fs::write(&path, "pick abc1234 first\n").expect("write todo file");
+
+        let no_git_path = TempDir::new().expect("tempdir");
+        let prefixed_path = OsString::from(no_git_path.path().as_os_str());
+        let requested = "a".repeat(40);
+
+        run_editor_with_prefixed_path(
+            &["--drop", requested.as_str()],
+            GitSequenceEditorExpectation {
+                code: EXIT_FAILURE,
+                stderr: "failed to run git rev-parse: No such file or directory (os error 2)\n"
+                    .to_owned(),
+                todo_content: Some("pick abc1234 first\n".to_owned()),
+                ..Default::default()
+            },
+            prefixed_path,
+            &path,
+        );
+    }
+
+    #[test]
+    fn rejects_ambiguous_long_sha_resolution_in_todo() {
+        let dir = TempDir::new().expect("tempdir");
+        let path = dir.path().join("todo");
+        fs::write(&path, "pick abc first\npick abc1234 second\n").expect("write todo file");
+
+        let requested = "a".repeat(40);
+        let resolved = format!("abc1234{}", "0".repeat(33));
+
+        let steps = vec![GitWrapperStep {
+            args: vec![
+                "rev-parse".to_owned(),
+                "--verify".to_owned(),
+                requested.clone(),
+            ],
+            stdout: format!("{resolved}\n"),
+            stderr: String::new(),
+            exit_code: 0,
+        }];
+
+        let (wrap_dir, wrap_bin, count_file) = make_ordered_git_wrapper(&steps);
+
+        let original_path = env::var_os("PATH").expect("PATH");
+        let prefixed_path = {
+            let mut joined = OsString::new();
+            joined.push(wrap_bin.as_os_str());
+            joined.push(OsStr::new(":"));
+            joined.push(original_path);
+            joined
+        };
+
+        run_editor_with_prefixed_path(
+            &["--drop", requested.as_str()],
+            GitSequenceEditorExpectation {
+                code: EXIT_FAILURE,
+                ordered_git_replay: Some(OrderedGitReplayExpectation::from_count_file(
+                    count_file,
+                    steps.len(),
+                )),
+                stderr: format!("sha is ambiguous in todo: {resolved}\n"),
+                todo_content: Some("pick abc first\npick abc1234 second\n".to_owned()),
+                ..Default::default()
+            },
+            prefixed_path,
+            &path,
+        );
+        let _keep_alive = wrap_dir;
+    }
+
+    #[test]
