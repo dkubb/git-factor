@@ -879,3 +879,71 @@ fi
         );
     }
 
+    #[test]
+    fn start_requires_exec_command() {
+        let dir = init_repo();
+        let repo = dir.path();
+
+        commit_file(repo, "file.txt", "one\n", "chore: base");
+
+        run_git_factor(
+            repo,
+            &["HEAD"],
+            GitFactorExpectation::default()
+                .code(EXIT_USAGE)
+                .stderr("--exec <COMMAND> is required when starting a factor session\n"),
+        );
+    }
+
+    #[test]
+    fn start_requires_exec_command_when_only_message_is_provided() {
+        let dir = init_repo();
+        let repo = dir.path();
+
+        commit_file(repo, "file.txt", "one\n", "chore: base");
+
+        run_git_factor(
+            repo,
+            &["--message", "test: msg"],
+            GitFactorExpectation::default()
+                .code(EXIT_USAGE)
+                .stderr("--exec <COMMAND> is required when starting a factor session\n"),
+        );
+    }
+
+    #[test]
+    fn start_defaults_to_head_when_commit_is_omitted() {
+        let dir = init_repo();
+        let repo = dir.path();
+
+        commit_file(repo, "file.txt", "one\n", "chore: base");
+        commit_file(repo, "file.txt", "one\ntwo\n", "feat: change");
+        let head_short_sha = git(repo, &["rev-parse", "--short", "HEAD"]);
+
+        run_git_factor(
+            repo,
+            &["--exec", "true"],
+            GitFactorExpectation::default()
+                .rebase_apply_exists(false)
+                .rebase_merge_exists(false)
+                .requires_rebase(false)
+                .stdout(expected_single_commit_start_stdout(
+                    head_short_sha.as_str(),
+                    "feat: change",
+                )),
+        );
+
+        git(repo, &["add", "--all"]);
+        run_git_factor(
+            repo,
+            &["--continue", "--message", "test: split"],
+            GitFactorExpectation::default().stdout_suffix(expected_completion_stdout_suffix(1)),
+        );
+    }
+
+    #[test]
+    fn start_treats_explicit_head_sha_as_head_mode() {
+        let dir = init_repo();
+        let repo = dir.path();
+
+        commit_file(repo, "file.txt", "one\n", "chore: base");
