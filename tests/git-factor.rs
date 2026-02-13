@@ -391,8 +391,6 @@ mod tests {
     fn expected_single_commit_start_stdout(short_sha: &str, message: &str) -> String {
         format!(
             "\
-Unstaged changes after reset:
-M\tfile.txt
 FACTOR: Split session started for {short_sha}.
 ORIGINAL MESSAGE: {message}
 UNSTAGED:
@@ -554,8 +552,6 @@ HINTS:
     ) -> String {
         format!(
             "\
-Unstaged changes after reset:
-M\tfile.txt
 FACTOR: Split session started for {short_sha}.
 ORIGINAL MESSAGE: {message}
 UNSTAGED:
@@ -595,8 +591,6 @@ HINTS:
     ) -> String {
         format!(
             "\
-Unstaged changes after reset:
-M\tfile.txt
 FACTOR: Split session started for {short_sha}.
 ORIGINAL MESSAGE: {message}
 UNSTAGED:

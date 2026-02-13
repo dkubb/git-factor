@@ -206,6 +206,7 @@ exec echo hi\n\
             args: vec![
                 "rev-parse".to_owned(),
                 "--verify".to_owned(),
+                "--quiet".to_owned(),
                 long_sha.clone(),
             ],
             stdout: format!("{resolved}\n"),
@@ -270,6 +271,7 @@ exec echo hi\n\
             args: vec![
                 "rev-parse".to_owned(),
                 "--verify".to_owned(),
+                "--quiet".to_owned(),
                 long_sha.clone(),
             ],
             stdout: format!("{resolved}\n"),
@@ -370,6 +372,7 @@ exec echo hi\n\
             args: vec![
                 "rev-parse".to_owned(),
                 "--verify".to_owned(),
+                "--quiet".to_owned(),
                 requested.clone(),
             ],
             stdout: format!("{resolved}\n"),
@@ -417,6 +420,7 @@ exec echo hi\n\
             args: vec![
                 "rev-parse".to_owned(),
                 "--verify".to_owned(),
+                "--quiet".to_owned(),
                 long_sha.clone(),
             ],
             stdout: format!("{resolved}\n"),
@@ -535,6 +539,7 @@ exec echo hi\n\
             args: vec![
                 "rev-parse".to_owned(),
                 "--verify".to_owned(),
+                "--quiet".to_owned(),
                 requested.clone(),
             ],
             stdout: format!("{resolved}\n"),
@@ -582,6 +587,7 @@ exec echo hi\n\
             args: vec![
                 "rev-parse".to_owned(),
                 "--verify".to_owned(),
+                "--quiet".to_owned(),
                 requested.clone(),
             ],
             stdout: format!("{resolved}\n"),
@@ -629,6 +635,7 @@ exec echo hi\n\
             args: vec![
                 "rev-parse".to_owned(),
                 "--verify".to_owned(),
+                "--quiet".to_owned(),
                 requested.clone(),
             ],
             stdout: format!("{resolved}\n"),
@@ -673,6 +680,7 @@ exec echo hi\n\
             args: vec![
                 "rev-parse".to_owned(),
                 "--verify".to_owned(),
+                "--quiet".to_owned(),
                 requested.clone(),
             ],
             stdout: String::new(),
@@ -746,6 +754,7 @@ exec echo hi\n\
             args: vec![
                 "rev-parse".to_owned(),
                 "--verify".to_owned(),
+                "--quiet".to_owned(),
                 requested.clone(),
             ],
             stdout: format!("{resolved}\n"),
@@ -996,6 +1005,7 @@ edit abc1234 first
             args: vec![
                 "rev-parse".to_owned(),
                 "--verify".to_owned(),
+                "--quiet".to_owned(),
                 requested.clone(),
             ],
             stdout: format!("{resolved}\n"),

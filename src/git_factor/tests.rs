@@ -1682,6 +1682,7 @@ fn cmd_start_range_ref_inserts_shas_and_propagates_io_error_on_multi_commit_bann
             "git",
             &[
                 "rebase",
+                "--quiet",
                 "--no-autosquash",
                 "--no-autostash",
                 "--no-rebase-merges",
@@ -1698,7 +1699,7 @@ fn cmd_start_range_ref_inserts_shas_and_propagates_io_error_on_multi_commit_bann
             0,
         )
         .with_output("git", &["rev-parse", "HEAD^{tree}"], repo, "head_tree\n")
-        .with_status("git", &["reset", "--mixed", "HEAD~1"], &[], false, repo, 0)
+        .with_status("git", &["reset", "--quiet", "--mixed", "HEAD~1"], &[], false, repo, 0)
         .with_output("git", &["diff", "--stat"], repo, "")
         .with_output(
             "git",
@@ -1772,7 +1773,7 @@ fn advance_to_next_commit_prints_untracked_changes_when_present() {
     let runner = ScriptedRunner::default()
         .with_status("git", &["rebase", "--continue"], &[], false, repo, 0)
         .with_output("git", &["rev-parse", "HEAD^{tree}"], repo, "head_tree\n")
-        .with_status("git", &["reset", "--mixed", "HEAD~1"], &[], false, repo, 0)
+        .with_status("git", &["reset", "--quiet", "--mixed", "HEAD~1"], &[], false, repo, 0)
         .with_output("git", &["rev-parse", "--git-dir"], repo, ".git\n")
         .with_output(
             "git",
@@ -1868,7 +1869,7 @@ fn advance_to_next_commit_propagates_io_error_when_outln_fails_mid_rebase() {
     let runner = ScriptedRunner::default()
         .with_status("git", &["rebase", "--continue"], &[], false, repo, 0)
         .with_output("git", &["rev-parse", "HEAD^{tree}"], repo, "head_tree\n")
-        .with_status("git", &["reset", "--mixed", "HEAD~1"], &[], false, repo, 0)
+        .with_status("git", &["reset", "--quiet", "--mixed", "HEAD~1"], &[], false, repo, 0)
         .with_output("git", &["rev-parse", "--git-dir"], repo, ".git\n")
         .with_output(
             "git",
@@ -2026,7 +2027,7 @@ fn advance_to_next_commit_omits_untracked_section_when_empty() {
     let runner = ScriptedRunner::default()
         .with_status("git", &["rebase", "--continue"], &[], false, repo, 0)
         .with_output("git", &["rev-parse", "HEAD^{tree}"], repo, "head_tree\n")
-        .with_status("git", &["reset", "--mixed", "HEAD~1"], &[], false, repo, 0)
+        .with_status("git", &["reset", "--quiet", "--mixed", "HEAD~1"], &[], false, repo, 0)
         .with_output("git", &["rev-parse", "--git-dir"], repo, ".git\n")
         .with_output(
             "git",
@@ -2361,7 +2362,7 @@ fn cmd_continue_errors_on_split_count_overflow() {
     let runner = ScriptedRunner::default()
         .with_output("git", &["rev-parse", "--git-dir"], repo, ".git\n")
         .with_status("git", &["diff", "--cached", "--quiet"], &[], false, repo, 1)
-        .with_status("git", &["checkout", "--", "."], &[], false, repo, 0)
+        .with_status("git", &["checkout", "--quiet", "--", "."], &[], false, repo, 0)
         .with_status(
             "git",
             &["clean", "--force", "--quiet", "-d"],
@@ -2372,7 +2373,7 @@ fn cmd_continue_errors_on_split_count_overflow() {
         )
         .with_status(
             "git",
-            &["checkout-index", "--all", "--force"],
+            &["checkout-index", "--quiet", "--all", "--force"],
             &[],
             false,
             repo,
@@ -2455,7 +2456,7 @@ fn cmd_continue_propagates_restore_status_error() {
     let runner = ScriptedRunner::default()
         .with_output("git", &["rev-parse", "--git-dir"], repo, ".git\n")
         .with_status("git", &["diff", "--cached", "--quiet"], &[], false, repo, 1)
-        .with_status("git", &["checkout", "--", "."], &[], false, repo, 0)
+        .with_status("git", &["checkout", "--quiet", "--", "."], &[], false, repo, 0)
         .with_status(
             "git",
             &["clean", "--force", "--quiet", "-d"],
@@ -2466,7 +2467,7 @@ fn cmd_continue_propagates_restore_status_error() {
         )
         .with_status(
             "git",
-            &["checkout-index", "--all", "--force"],
+            &["checkout-index", "--quiet", "--all", "--force"],
             &[],
             false,
             repo,
@@ -2567,7 +2568,7 @@ fn cmd_finish_errors_on_split_count_overflow() {
             repo,
             expected_tree_output,
         )
-        .with_status("git", &["checkout", "--", "."], &[], false, repo, 0)
+        .with_status("git", &["checkout", "--quiet", "--", "."], &[], false, repo, 0)
         .with_status(
             "git",
             &["clean", "--force", "--quiet", "-d"],
@@ -2660,7 +2661,7 @@ fn cmd_finish_propagates_final_cherry_pick_status_error() {
             repo,
             expected_tree_output,
         )
-        .with_status("git", &["checkout", "--", "."], &[], false, repo, 0)
+        .with_status("git", &["checkout", "--quiet", "--", "."], &[], false, repo, 0)
         .with_status(
             "git",
             &["clean", "--force", "--quiet", "-d"],
@@ -2720,7 +2721,7 @@ fn cmd_finish_propagates_git_commit_preserving_metadata_error() {
             repo,
             expected_tree_output,
         )
-        .with_status("git", &["checkout", "--", "."], &[], false, repo, 0)
+        .with_status("git", &["checkout", "--quiet", "--", "."], &[], false, repo, 0)
         .with_status(
             "git",
             &["clean", "--force", "--quiet", "-d"],

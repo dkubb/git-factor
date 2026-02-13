@@ -367,7 +367,7 @@ fn advance_to_next_commit_in(ctx: &Ctx<'_>, state_dir: &Path) -> Result<bool, Fa
             write_state(ctx, state_dir, "current_index", &current_index.to_string())?;
             write_state(ctx, state_dir, "split_count", "0")?;
 
-            run_git(ctx, &["reset", "--mixed", "HEAD~1"])?;
+            run_git(ctx, &["reset", "--quiet", "--mixed", "HEAD~1"])?;
 
             let current_commit = current_commit_from_state(ctx, state_dir)?;
             let message = commit_message(ctx, &current_commit)?;
@@ -439,7 +439,7 @@ fn cmd_continue_in(ctx: &Ctx<'_>, messages: &NonEmpty<NonEmptyString>) -> Result
     }
 
     // Clean unstaged/untracked changes.
-    run_git(ctx, &["checkout", "--", "."])?;
+    run_git(ctx, &["checkout", "--quiet", "--", "."])?;
     run_git(ctx, &["clean", "--force", "--quiet", "-d"])?;
 
     // Materialize the staged slice into the working tree so the exec gate
@@ -507,7 +507,7 @@ fn cmd_continue_in(ctx: &Ctx<'_>, messages: &NonEmpty<NonEmptyString>) -> Result
             });
         }
 
-        run_git(ctx, &["reset"])?;
+        run_git(ctx, &["reset", "--quiet"])?;
         let stat_output = git_output(ctx, &["diff", "--stat"])?;
         let untracked_output = git_output(ctx, &["ls-files", "--others", "--exclude-standard"])?;
 
@@ -588,7 +588,7 @@ fn rehydrate_pool_preserving_index(
 /// worktree first (removing unstaged/untracked changes), then write the index
 /// contents back out so the gate validates the staged slice.
 fn materialize_index_to_worktree(ctx: &Ctx<'_>) -> Result<(), FactorError> {
-    run_git(ctx, &["checkout-index", "--all", "--force"])?;
+    run_git(ctx, &["checkout-index", "--quiet", "--all", "--force"])?;
 
     // checkout-index does not remove paths deleted in the index, so we must
     // explicitly remove any staged deletions to avoid validating extra files.
@@ -617,7 +617,7 @@ fn cmd_finish_in(ctx: &Ctx<'_>, messages: &[NonEmptyString]) -> Result<i32, Fact
     let expected_tree = expected_tree_for_current_step(ctx, &state_dir, &original_commit)?;
 
     // Clean unstaged/untracked changes.
-    run_git(ctx, &["checkout", "--", "."])?;
+    run_git(ctx, &["checkout", "--quiet", "--", "."])?;
     run_git(ctx, &["clean", "--force", "--quiet", "-d"])?;
 
     // Cherry-pick the original commit without committing to stage remaining changes.
@@ -855,7 +855,7 @@ fn cmd_start_in(
     if is_root {
         mixed_reset_to_empty(ctx)?;
     } else {
-        run_git(ctx, &["reset", "--mixed", "HEAD~1"])?;
+        run_git(ctx, &["reset", "--quiet", "--mixed", "HEAD~1"])?;
     }
 
     print_session_started(ctx, &resolved_commits, &short_sha, &message)?;
@@ -871,6 +871,7 @@ fn build_rebase_args<'arg>(
 ) -> Vec<&'arg str> {
     let mut rebase_args = vec![
         "rebase",
+        "--quiet",
         "--no-autosquash",
         "--no-autostash",
         "--no-rebase-merges",

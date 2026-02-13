@@ -139,7 +139,7 @@ fn validate_no_duplicates(label: &str, shas: &[NonEmptyString]) -> Result<(), St
 /// Resolves a 40-hex commit reference using `git rev-parse --verify`.
 fn git_rev_parse_verify_full(sha40: &str) -> Result<String, String> {
     let output = process::Command::new("git")
-        .args(["rev-parse", "--verify", sha40])
+        .args(["rev-parse", "--verify", "--quiet", sha40])
         .output()
         .map_err(|err| format!("failed to run git rev-parse: {err}"))?;
 

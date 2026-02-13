@@ -320,7 +320,7 @@ pub(super) fn remove_empty_root_in(ctx: &Ctx<'_>) -> Result<(), FactorError> {
     drop(command_status_with(
         ctx,
         "git",
-        &["rebase", "--root", "--interactive"],
+        &["rebase", "--quiet", "--root", "--interactive"],
         &[("GIT_SEQUENCE_EDITOR", &seq_editor)],
         false,
     ));
@@ -340,7 +340,7 @@ pub(super) fn mixed_reset_to_empty(ctx: &Ctx<'_>) -> Result<(), FactorError> {
     const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 
     let commit_sha = git_output(ctx, &["commit-tree", EMPTY_TREE, "-m", "empty"])?;
-    run_git(ctx, &["reset", "--mixed", &commit_sha])
+    run_git(ctx, &["reset", "--quiet", "--mixed", &commit_sha])
 }
 
 /// Resolves a commit reference to a full SHA.
