@@ -2260,3 +2260,50 @@ fi
     }
 
     #[test]
+    fn abort_reports_rebase_abort_failure() {
+        let dir = init_repo();
+        let repo = dir.path();
+
+        commit_file(repo, "file.txt", "one\n", "chore: base");
+        commit_file(repo, "file.txt", "one\ntwo\n", "feat: change");
+        commit_file(repo, "file.txt", "one\ntwo\nthree\n", "feat: latest");
+
+        run_git_factor(
+            repo,
+            &["--exec", "true", "HEAD~1"],
+            GitFactorExpectation::default(),
+        );
+
+        let (wrap_dir, wrap_bin) = make_git_wrapper_named(
+            "git",
+            #[expect(
+                clippy::literal_string_with_formatting_args,
+                reason = "shell script contains ${1:-} expansions"
+            )]
+            r#"if [ "${1:-}" = "rebase" ] && [ "${2:-}" = "--abort" ]; then
+  exit 19
+fi
+"#,
+        );
+        let _keep_alive = wrap_dir;
+
+        let original_path = env::var_os("PATH").expect("PATH");
+        let prefixed_path = {
+            let mut joined = OsString::new();
+            joined.push(wrap_bin.as_os_str());
+            joined.push(OsStr::new(":"));
+            joined.push(original_path);
+            joined
+        };
+
+        run_git_factor_with_prefixed_path(
+            repo,
+            &["--abort"],
+            GitFactorExpectation::default()
+                .code(EXIT_SOFTWARE)
+                .stderr("git command failed: git rebase failed (exit 19)\n"),
+            prefixed_path,
+        );
+    }
+
+    #[test]
