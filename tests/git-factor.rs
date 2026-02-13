@@ -3463,3 +3463,43 @@ fi
         );
     }
 
+    #[test]
+    fn abort_reports_failed_git_rebase_abort_status() {
+        let dir = init_repo();
+        let repo = dir.path();
+
+        commit_file(repo, "file.txt", "one\n", "chore: base");
+
+        // Create an active session directory so --abort proceeds to the rebase check.
+        let factor_dir = git_dir(repo).join("factor");
+        fs::create_dir_all(&factor_dir).expect("create factor dir");
+
+        // Force `is_mid_rebase()` so cmd_abort attempts `git rebase --abort`.
+        let rebase_merge_dir = git_dir(repo).join("rebase-merge");
+        fs::create_dir_all(&rebase_merge_dir).expect("create rebase-merge dir");
+
+        // Wrapper: force `git rebase --abort` to fail with a non-zero status.
+        let (wrap_dir, wrap_bin) = make_git_wrapper_named(
+            "git",
+            #[expect(
+                clippy::literal_string_with_formatting_args,
+                reason = "shell script contains braces like ${1:-}"
+            )]
+            r#"if [ "${1:-}" = "rebase" ] && [ "${2:-}" = "--abort" ]; then
+  exit 1
+fi
+"#,
+        );
+        let _keep_alive = wrap_dir;
+
+        run_git_factor_with_env(
+            repo,
+            &["--abort"],
+            GitFactorExpectation::default()
+                .code(EXIT_SOFTWARE)
+                .stderr("git command failed: git rebase failed (exit 1)\n"),
+            "PATH",
+            format!("{}:{}", wrap_bin.display(), env::var("PATH").expect("PATH")),
+        );
+    }
+}
