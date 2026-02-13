@@ -265,3 +265,286 @@ mod tests {
         clippy::too_many_lines,
         reason = "postcondition contract checks intentionally aggregate all shared assertions"
     )]
+    fn assert_git_factor_postconditions(
+        repo: &Path,
+        expected: GitFactorExpectation,
+    ) -> Result<(), String> {
+        let GitFactorExpectation {
+            factor_state_exists,
+            git_outputs,
+            git_outputs_non_empty,
+            git_status_porcelain: expected_git_status_porcelain,
+            git_status_porcelain_non_empty,
+            head_sha: expected_head_sha,
+            path_exists,
+            rebase_apply_exists,
+            rebase_merge_exists,
+            requires_rebase,
+            ..
+        } = expected;
+
+        if let Some(should_exist) = factor_state_exists {
+            let exists = git_dir(repo).join("factor").is_dir();
+            if exists != should_exist {
+                return Err(format!(
+                    "factor state dir existence mismatch: expected {should_exist}, got {exists}"
+                ));
+            }
+        }
+
+        if let Some(expected_status) = expected_git_status_porcelain.as_ref() {
+            let actual = git_status_porcelain(repo);
+            if actual != *expected_status {
+                return Err(format!(
+                    "git status --porcelain mismatch:\nexpected:\n{expected_status}\nactual:\n{actual}"
+                ));
+            }
+        }
+        if git_status_porcelain_non_empty == Some(true) {
+            let actual = git_status_porcelain(repo);
+            if actual.is_empty() {
+                return Err(
+                    "git status --porcelain expected non-empty output, got empty".to_owned(),
+                );
+            }
+        }
+
+        if let Some(expected_head) = expected_head_sha.as_ref() {
+            let actual = git(repo, &["rev-parse", "HEAD"]);
+            if actual != *expected_head {
+                return Err(format!(
+                    "HEAD mismatch: expected {expected_head}, got {actual}"
+                ));
+            }
+        }
+
+        for (args, expected_output) in git_outputs {
+            let args_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+            let actual = git(repo, &args_refs);
+            if actual != expected_output {
+                return Err(format!(
+                    "git output mismatch for {args_refs:?}: expected {expected_output:?}, got {actual:?}"
+                ));
+            }
+        }
+
+        for args in git_outputs_non_empty {
+            let args_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+            let actual = git(repo, &args_refs);
+            if actual.is_empty() {
+                return Err(format!(
+                    "git output expected non-empty for {args_refs:?}, got empty"
+                ));
+            }
+        }
+
+        for (path, expected_exists) in path_exists {
+            let actual_exists = repo.join(path.as_str()).exists();
+            if actual_exists != expected_exists {
+                return Err(format!(
+                    "path existence mismatch for {path:?}: expected {expected_exists}, got {actual_exists}"
+                ));
+            }
+        }
+
+        if let Some(expected_rebase_merge_exists) = rebase_merge_exists {
+            let rebase_merge_exists_actual = git_dir(repo).join("rebase-merge").is_dir();
+            if rebase_merge_exists_actual != expected_rebase_merge_exists {
+                return Err(format!(
+                    "rebase-merge existence mismatch: expected {expected_rebase_merge_exists}, got {rebase_merge_exists_actual}",
+                ));
+            }
+        }
+
+        if let Some(expected_rebase_apply_exists) = rebase_apply_exists {
+            let rebase_apply_exists_actual = git_dir(repo).join("rebase-apply").is_dir();
+            if rebase_apply_exists_actual != expected_rebase_apply_exists {
+                return Err(format!(
+                    "rebase-apply existence mismatch: expected {expected_rebase_apply_exists}, got {rebase_apply_exists_actual}",
+                ));
+            }
+        }
+
+        if let Some(expected_requires_rebase) = requires_rebase {
+            let requires_rebase_path = git_dir(repo).join("factor/requires_rebase");
+            let actual = fs::read_to_string(&requires_rebase_path).map_err(|err| {
+                format!(
+                    "failed to read requires_rebase file `{}`: {err}",
+                    requires_rebase_path.display()
+                )
+            })?;
+            let expected_content = if expected_requires_rebase {
+                "true\n"
+            } else {
+                "false\n"
+            };
+            if actual != expected_content {
+                return Err(format!(
+                    "requires_rebase mismatch: expected {expected_content:?}, got {actual:?}"
+                ));
+            }
+        }
+
+        Ok(())
+    }
+
+    fn expected_single_commit_start_stdout(short_sha: &str, message: &str) -> String {
+        format!(
+            "\
+Unstaged changes after reset:
+M\tfile.txt
+FACTOR: Split session started for {short_sha}.
+ORIGINAL MESSAGE: {message}
+UNSTAGED:
+  file.txt | 1 +
+   1 file changed, 1 insertion(+)
+
+NEXT: Stage changes for the first atomic commit, then run:
+  git factor --continue --message \"type: description\"
+
+Run git factor --help for the full workflow guide.
+
+HINTS:
+  - Find the ONE smallest addition nothing depends on
+  - Target 15-30 lines (50 max)
+  - Message: single concrete action, no \"and\"/\"or\"
+  - Verify: git log --oneline | wc -l
+  - NEVER use git commit. ONLY use git factor --continue.
+  REMAINING:  1 file changed, 1 insertion(+)
+  RECOVERY: git factor --abort
+"
+        )
+    }
+
+    fn expected_single_commit_start_with_untracked_stdout(
+        short_sha: &str,
+        message: &str,
+        untracked: &str,
+    ) -> String {
+        format!(
+            "\
+FACTOR: Split session started for {short_sha}.
+ORIGINAL MESSAGE: {message}
+UNSTAGED:
+UNTRACKED:
+  {untracked}
+
+NEXT: Stage changes for the first atomic commit, then run:
+  git factor --continue --message \"type: description\"
+
+Run git factor --help for the full workflow guide.
+
+HINTS:
+  - Find the ONE smallest addition nothing depends on
+  - Target 15-30 lines (50 max)
+  - Message: single concrete action, no \"and\"/\"or\"
+  - Verify: git log --oneline | wc -l
+  - NEVER use git commit. ONLY use git factor --continue.
+  RECOVERY: git factor --abort
+"
+        )
+    }
+
+    fn expected_multi_commit_start_suffix(first_short_sha: &str) -> String {
+        format!(
+            "\
+FACTOR: Split session started for 2 commits (first: {first_short_sha}).
+ORIGINAL MESSAGE: feat: a
+UNSTAGED:
+  base.txt | 1 +
+   1 file changed, 1 insertion(+)
+
+NEXT: Stage changes for the first atomic commit, then run:
+  git factor --continue --message \"type: description\"
+
+Run git factor --help for the full workflow guide.
+
+HINTS:
+  - Find the ONE smallest addition nothing depends on
+  - Target 15-30 lines (50 max)
+  - Message: single concrete action, no \"and\"/\"or\"
+  - Verify: git log --oneline | wc -l
+  - NEVER use git commit. ONLY use git factor --continue.
+  REMAINING:  1 file changed, 1 insertion(+)
+  RECOVERY: git factor --abort
+"
+        )
+    }
+
+    fn expected_now_splitting_suffix_with_remaining(
+        short_sha: &str,
+        original_message: &str,
+        unstaged_summary: &str,
+    ) -> String {
+        format!(
+            "\
+FACTOR: Previous commit split into 1 commits.
+FACTOR: Now splitting {short_sha}.
+ORIGINAL MESSAGE: {original_message}
+UNSTAGED:
+{unstaged_summary}
+
+NEXT: Stage changes for the next commit, then run:
+  git factor --continue --message \"type: description\"
+
+HINTS:
+  - Find the ONE smallest addition nothing depends on
+  - Target 15-30 lines (50 max)
+  - Message: single concrete action, no \"and\"/\"or\"
+  - Verify: git log --oneline | wc -l
+  - NEVER use git commit. ONLY use git factor --continue.
+  REMAINING:  1 file changed, 1 insertion(+)
+  RECOVERY: git factor --abort
+"
+        )
+    }
+
+    fn expected_now_splitting_suffix_with_untracked(
+        short_sha: &str,
+        original_message: &str,
+    ) -> String {
+        format!(
+            "\
+FACTOR: Previous commit split into 1 commits.
+FACTOR: Now splitting {short_sha}.
+ORIGINAL MESSAGE: {original_message}
+UNSTAGED:
+UNTRACKED:
+  new.txt
+
+NEXT: Stage changes for the next commit, then run:
+  git factor --continue --message \"type: description\"
+
+HINTS:
+  - Find the ONE smallest addition nothing depends on
+  - Target 15-30 lines (50 max)
+  - Message: single concrete action, no \"and\"/\"or\"
+  - Verify: git log --oneline | wc -l
+  - NEVER use git commit. ONLY use git factor --continue.
+  RECOVERY: git factor --abort
+"
+        )
+    }
+
+    fn expected_continue_remaining_suffix() -> &'static str {
+        "\
+FACTOR: Split 1 committed.
+STATE: Remaining changes are unstaged.
+UNSTAGED:
+UNTRACKED:
+  b.txt
+
+NEXT: Stage changes for the next commit, then run:
+  git factor --continue --message \"type: description\"
+
+HINTS:
+  - Find the ONE smallest addition nothing depends on
+  - Target 15-30 lines (50 max)
+  - Message: single concrete action, no \"and\"/\"or\"
+  - Verify: git log --oneline | wc -l
+  - NEVER use git commit. ONLY use git factor --continue.
+  RECOVERY: git factor --abort
+"
+    }
+
+    fn expected_single_commit_start_with_reference_and_claude_stdout(
