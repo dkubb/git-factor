@@ -94,6 +94,15 @@ impl Fs for FailingRequiresRebaseWriteFs {
     }
 }
 
+fn ctx_for(path: &Path) -> Ctx<'static> {
+    Ctx {
+        runner: &REAL_RUNNER,
+        cwd: path.to_path_buf(),
+        io: &REAL_IO,
+        env: &REAL_ENV,
+        fs: &REAL_FS,
+    }
+}
 
 #[cfg(unix)]
 fn exit_status(code: i32) -> ExitStatus {
@@ -1888,7 +1897,6 @@ fn advance_to_next_commit_propagates_io_error_when_outln_fails_mid_rebase() {
     );
 }
 
-
 #[test]
 fn advance_to_next_commit_propagates_io_error_when_outln_fails_after_rebase_finishes() {
     let dir = TempDir::new().expect("tempdir");
@@ -1985,3 +1993,166 @@ fn advance_to_next_commit_errors_when_rebase_is_required_but_not_in_progress() {
     assert_eq!(err.to_string(), "git command failed: no rebase in progress");
 }
 
+#[test]
+fn advance_to_next_commit_omits_untracked_section_when_empty() {
+    let dir = TempDir::new().expect("tempdir");
+    let repo = dir.path();
+    let git_dir = repo.join(".git");
+    fs::create_dir_all(git_dir.join("rebase-merge")).expect("create rebase-merge");
+
+    let state_dir = git_dir.join("factor");
+    fs::create_dir_all(&state_dir).expect("create factor dir");
+    fs::write(
+        state_dir.join("commits"),
+        format!("{}\n{}\n", "a".repeat(40), "b".repeat(40)),
+    )
+    .expect("write commits");
+    fs::write(state_dir.join("current_index"), "0\n").expect("write current_index");
+    fs::write(state_dir.join("split_count"), "1\n").expect("write split_count");
+
+    let runner = ScriptedRunner::default()
+        .with_status("git", &["rebase", "--continue"], &[], false, repo, 0)
+        .with_status("git", &["reset", "--mixed", "HEAD~1"], &[], false, repo, 0)
+        .with_output("git", &["rev-parse", "--git-dir"], repo, ".git\n")
+        .with_output(
+            "git",
+            &["show", "--format=%B", "--no-patch", &"b".repeat(40)],
+            repo,
+            "msg\n",
+        )
+        .with_output(
+            "git",
+            &["diff", "--stat"],
+            repo,
+            "file.txt | 1 +\n1 file changed, 1 insertion(+)\n",
+        )
+        .with_output(
+            "git",
+            &["ls-files", "--others", "--exclude-standard"],
+            repo,
+            "",
+        )
+        .with_output(
+            "git",
+            &["rev-parse", "--short", &"b".repeat(40)],
+            repo,
+            "bbbbbbb\n",
+        )
+        .with_output(
+            "git",
+            &["rev-parse", "--show-toplevel"],
+            repo,
+            repo.to_string_lossy().as_ref(),
+        );
+
+    let io = TestIo::default();
+    let env = TestEnv {
+        cwd: repo.to_path_buf(),
+    };
+    let ctx = Ctx {
+        runner: &runner,
+        cwd: repo.to_path_buf(),
+        io: &io,
+        env: &env,
+        fs: &REAL_FS,
+    };
+
+    let has_next = advance_to_next_commit_in(&ctx, &state_dir).expect("advance ok");
+    assert!(has_next, "expected another commit to be ready");
+
+    assert_eq!(
+        io.stdout(),
+        concat!(
+            "FACTOR: Previous commit split into 1 commits.\n",
+            "FACTOR: Now splitting bbbbbbb.\n",
+            "ORIGINAL MESSAGE: msg\n",
+            "UNSTAGED:\n",
+            "  file.txt | 1 +\n",
+            "  1 file changed, 1 insertion(+)\n",
+            "\n",
+            "NEXT: Stage changes for the next commit, then run:\n",
+            "  git factor --continue --message \"type: description\"\n",
+            "\n",
+            "HINTS:\n",
+            "  - Find the ONE smallest addition nothing depends on\n",
+            "  - Target 15-30 lines (50 max)\n",
+            "  - Message: single concrete action, no \"and\"/\"or\"\n",
+            "  - Verify: git log --oneline | wc -l\n",
+            "  - NEVER use git commit. ONLY use git factor --continue.\n",
+            "  REMAINING: 1 file changed, 1 insertion(+)\n",
+            "  RECOVERY: git factor --abort\n"
+        )
+    );
+    assert_eq!(io.stderr(), "");
+}
+
+#[test]
+fn rehydrate_pool_preserving_index_succeeds_when_cherry_pick_succeeds() {
+    let dir = TempDir::new().expect("tempdir");
+    let repo = dir.path();
+
+    let runner = ScriptedRunner::default()
+        .with_output("git", &["write-tree"], repo, "deadbeef\n")
+        .with_status(
+            "git",
+            &[
+                "cherry-pick",
+                "--no-commit",
+                "--strategy-option",
+                "theirs",
+                &"a".repeat(40),
+            ],
+            &[],
+            false,
+            repo,
+            0,
+        )
+        .with_status("git", &["cherry-pick", "--quit"], &[], false, repo, 0)
+        .with_status("git", &["read-tree", "deadbeef"], &[], false, repo, 0);
+
+    let io = TestIo::default();
+    let env = TestEnv {
+        cwd: repo.to_path_buf(),
+    };
+    let ctx = Ctx {
+        runner: &runner,
+        cwd: repo.to_path_buf(),
+        io: &io,
+        env: &env,
+        fs: &REAL_FS,
+    };
+
+    let commit = CommitSha::new("a".repeat(40)).expect("sha");
+    let result = rehydrate_pool_preserving_index(&ctx, &commit);
+
+    assert!(result.is_ok(), "rehydrate should succeed");
+    assert_eq!(io.stdout(), "");
+    assert_eq!(io.stderr(), "");
+}
+
+#[test]
+fn rehydrate_pool_preserving_index_propagates_cherry_pick_status_error() {
+    let dir = TempDir::new().expect("tempdir");
+    let repo = dir.path();
+
+    let runner = ScriptedRunner::default().with_output("git", &["write-tree"], repo, "deadbeef\n");
+
+    let io = TestIo::default();
+    let env = TestEnv {
+        cwd: repo.to_path_buf(),
+    };
+    let ctx = Ctx {
+        runner: &runner,
+        cwd: repo.to_path_buf(),
+        io: &io,
+        env: &env,
+        fs: &REAL_FS,
+    };
+
+    let commit = CommitSha::new("a".repeat(40)).expect("sha");
+    let err = rehydrate_pool_preserving_index(&ctx, &commit).expect_err("expected error");
+
+    assert!(
+        matches!(
+            &err,
+            FactorError::GitCommand(msg)
