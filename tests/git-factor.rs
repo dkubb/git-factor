@@ -1266,3 +1266,38 @@ fi
         );
     }
 
+    #[test]
+    fn continue_rejects_without_active_session() {
+        let dir = init_repo();
+        run_git_factor_in_dir(
+            dir.path(),
+            &["--continue", "--message", "test: slice"],
+            GitFactorExpectation::default()
+                .code(EXIT_USAGE)
+                .stderr("no active factor session\n"),
+        );
+    }
+
+    #[test]
+    fn finish_rejects_without_active_session() {
+        let dir = init_repo();
+        let repo = dir.path();
+
+        run_git_factor(
+            repo,
+            &["--finish", "--message", "test: msg"],
+            GitFactorExpectation::default()
+                .code(EXIT_USAGE)
+                .stderr("no active factor session\n"),
+        );
+    }
+
+    #[test]
+    fn cli_invalid_flag_triggers_clap_error_path() {
+        run_git_factor_no_repo(
+            &["--definitely-not-a-real-flag"],
+            GitFactorExpectation::default().code(EXIT_USAGE),
+        );
+    }
+
+    #[test]
