@@ -1332,3 +1332,31 @@ fi
     }
 
     #[test]
+    fn rejects_merge_commits() {
+        let dir = init_repo();
+        let repo = dir.path();
+
+        commit_file(repo, "file.txt", "one\n", "chore: base");
+
+        // Create a merge commit.
+        git(repo, &["checkout", "-b", "left"]);
+        commit_file(repo, "left.txt", "left\n", "feat: left");
+        git(repo, &["checkout", "-b", "right", "HEAD~1"]);
+        commit_file(repo, "right.txt", "right\n", "feat: right");
+        git(repo, &["checkout", "left"]);
+        git(repo, &["merge", "--no-ff", "right", "--no-edit"]);
+
+        let merge_sha = git(repo, &["rev-parse", "HEAD"]);
+
+        run_git_factor(
+            repo,
+            &["--exec", "true", merge_sha.as_str()],
+            GitFactorExpectation::default()
+                .code(EXIT_DATAERR)
+                .stderr(format!(
+                    "commit {merge_sha} is a merge commit and cannot be split\n"
+                )),
+        );
+    }
+
+    #[test]
