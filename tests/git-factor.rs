@@ -1360,3 +1360,25 @@ fi
     }
 
     #[test]
+    fn rejects_commits_that_are_not_ancestors_of_head() {
+        let dir = init_repo();
+        let repo = dir.path();
+
+        commit_file(repo, "file.txt", "one\n", "chore: base");
+        let main_branch = git(repo, &["branch", "--show-current"]);
+        git(repo, &["checkout", "-b", "other"]);
+        commit_file(repo, "other.txt", "other\n", "feat: other");
+        let other_sha = git(repo, &["rev-parse", "HEAD"]);
+        git(repo, &["checkout", main_branch.as_str()]);
+        commit_file(repo, "file.txt", "one\ntwo\n", "feat: on master");
+
+        run_git_factor(
+            repo,
+            &["--exec", "true", other_sha.as_str()],
+            GitFactorExpectation::default()
+                .code(EXIT_DATAERR)
+                .stderr(format!("commit {other_sha} is not an ancestor of HEAD\n")),
+        );
+    }
+
+    #[test]
