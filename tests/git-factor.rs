@@ -864,3 +864,18 @@ fi
     }
 
     #[test]
+    fn cli_no_args_prints_help() {
+        run_git_factor_no_repo(
+            &[],
+            GitFactorExpectation::default().stdout(expected_help_stdout()),
+        );
+    }
+
+    #[test]
+    fn cli_help_flag_prints_help_to_stdout_and_exits_ok() {
+        run_git_factor_no_repo(
+            &["--help"],
+            GitFactorExpectation::default().stdout(expected_help_stdout()),
+        );
+    }
+
