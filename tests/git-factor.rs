@@ -947,3 +947,170 @@ fi
         let repo = dir.path();
 
         commit_file(repo, "file.txt", "one\n", "chore: base");
+        commit_file(repo, "file.txt", "one\ntwo\n", "feat: change");
+        let head_sha = git(repo, &["rev-parse", "HEAD"]);
+        let head_short_sha = git(repo, &["rev-parse", "--short", "HEAD"]);
+
+        run_git_factor(
+            repo,
+            &["--exec", "true", head_sha.as_str()],
+            GitFactorExpectation::default()
+                .requires_rebase(false)
+                .stdout(expected_single_commit_start_stdout(
+                    head_short_sha.as_str(),
+                    "feat: change",
+                )),
+        );
+    }
+
+    #[test]
+    fn start_runs_with_absolute_git_dir() {
+        let dir = init_repo();
+        let repo = dir.path();
+
+        commit_file(repo, "file.txt", "one\n", "chore: base");
+        commit_file(repo, "file.txt", "one\ntwo\n", "feat: change");
+
+        let git_dir_abs = git_dir(repo);
+        run_git_factor_with_env(
+            repo,
+            &["--exec", "true", "HEAD"],
+            GitFactorExpectation::default(),
+            "GIT_DIR",
+            git_dir_abs.into_os_string(),
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_exec_syntax() {
+        let dir = init_repo();
+        let repo = dir.path();
+
+        commit_file(repo, "file.txt", "base\n", "chore: base");
+
+        run_git_factor(
+            repo,
+            &["--exec", "true &&", "HEAD"],
+            GitFactorExpectation::default()
+                .code(EXIT_DATAERR)
+                .stderr("invalid exec syntax: true &&\n"),
+        );
+    }
+
+    #[test]
+    fn rejects_ranges_when_rev_list_returns_no_commits() {
+        let dir = init_repo();
+        let repo = dir.path();
+
+        commit_file(repo, "file.txt", "one\n", "chore: base");
+        commit_file(repo, "file.txt", "one\ntwo\n", "feat: change");
+
+        // Intercept rev-list and return success with no output so the commit set
+        // is empty before topological sorting.
+        let (wrap_dir, wrap_bin) = make_git_wrapper_named(
+            "git",
+            #[expect(
+                clippy::literal_string_with_formatting_args,
+                reason = "shell script contains ${VAR:-default} expansions"
+            )]
+            r#"if [ "${1:-}" = "rev-list" ] && [ "${2:-}" = "HEAD~1..HEAD" ]; then
+  exit 0
+fi
+"#,
+        );
+
+        let original_path = env::var_os("PATH").expect("PATH");
+        let prefixed_path = {
+            let mut joined = OsString::new();
+            joined.push(wrap_bin.as_os_str());
+            joined.push(OsStr::new(":"));
+            joined.push(original_path);
+            joined
+        };
+
+        let _keep_alive = wrap_dir;
+        run_git_factor_with_prefixed_path(
+            repo,
+            &["--exec", "true", "HEAD~1..HEAD"],
+            GitFactorExpectation::default()
+                .code(EXIT_SOFTWARE)
+                .stderr("git command failed: no commits resolved from the given refs\n"),
+            prefixed_path,
+        );
+    }
+
+    #[test]
+    fn rejects_empty_commit_range_when_rev_list_returns_no_commits() {
+        let dir = init_repo();
+        let repo = dir.path();
+
+        commit_file(repo, "file.txt", "one\n", "chore: base");
+        commit_file(repo, "file.txt", "one\ntwo\n", "feat: change");
+
+        run_git_factor(
+            repo,
+            &["--exec", "true", "HEAD..HEAD"],
+            GitFactorExpectation::default()
+                .code(EXIT_SOFTWARE)
+                .stderr("git command failed: no commits resolved from the given refs\n"),
+        );
+    }
+
+    #[test]
+    fn rejects_abort_when_combined_with_other_options() {
+        let dir = init_repo();
+        let repo = dir.path();
+
+        run_git_factor(
+            repo,
+            &["--abort", "--finish"],
+            GitFactorExpectation::default()
+                .code(EXIT_USAGE)
+                .stderr("--abort cannot be combined with other options\n"),
+        );
+    }
+
+    #[test]
+    fn rejects_abort_when_combined_with_continue() {
+        let dir = init_repo();
+        let repo = dir.path();
+
+        run_git_factor(
+            repo,
+            &["--abort", "--continue", "--message", "test: msg"],
+            GitFactorExpectation::default()
+                .code(EXIT_USAGE)
+                .stderr("--abort cannot be combined with other options\n"),
+        );
+    }
+
+    #[test]
+    fn rejects_abort_when_combined_with_exec() {
+        let dir = init_repo();
+        let repo = dir.path();
+
+        run_git_factor(
+            repo,
+            &["--abort", "--exec", "true"],
+            GitFactorExpectation::default()
+                .code(EXIT_USAGE)
+                .stderr("--abort cannot be combined with other options\n"),
+        );
+    }
+
+    #[test]
+    fn rejects_abort_when_combined_with_commit() {
+        let dir = init_repo();
+        let repo = dir.path();
+        commit_file(repo, "file.txt", "one\n", "chore: base");
+
+        run_git_factor(
+            repo,
+            &["--abort", "HEAD"],
+            GitFactorExpectation::default()
+                .code(EXIT_USAGE)
+                .stderr("--abort cannot be combined with other options\n"),
+        );
+    }
+
+    #[test]
