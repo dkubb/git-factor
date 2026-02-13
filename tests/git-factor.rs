@@ -2307,3 +2307,219 @@ fi
     }
 
     #[test]
+    fn continue_advances_to_next_commit_for_multi_commit_range() {
+        let dir = init_repo();
+        let repo = dir.path();
+
+        commit_file(repo, "base.txt", "base\n", "chore: base");
+        commit_file(repo, "base.txt", "base\na\n", "feat: a");
+        // Second commit introduces an untracked file when reset --mixed runs, so
+        // advance_to_next_commit prints the UNTRACKED section.
+        write_file(repo, "base.txt", "base\na\nb\n");
+        write_file(repo, "new.txt", "new\n");
+        git(repo, &["add", "--all"]);
+        git(repo, &["commit", "--message", "feat: b"]);
+        let first_short_sha = git(repo, &["rev-parse", "--short", "HEAD~1"]);
+        let second_short_sha = git(repo, &["rev-parse", "--short", "HEAD"]);
+
+        run_git_factor(
+            repo,
+            &["--exec", "true", "HEAD~2..HEAD"],
+            GitFactorExpectation::default()
+                .stdout_suffix(expected_multi_commit_start_suffix(first_short_sha.as_str())),
+        );
+
+        // First commit: stage everything and continue. This should advance to the next commit.
+        git(repo, &["add", "--all"]);
+        run_git_factor(
+            repo,
+            &["--continue", "--message", "test: split a"],
+            GitFactorExpectation::default().stdout_suffix(
+                expected_now_splitting_suffix_with_remaining(
+                    second_short_sha.as_str(),
+                    "feat: b",
+                    "  base.txt | 1 +\n   1 file changed, 1 insertion(+)\nUNTRACKED:\n  new.txt",
+                ),
+            ),
+        );
+
+        // Second commit: finish quickly.
+        git(repo, &["add", "--all"]);
+        run_git_factor(
+            repo,
+            &["--continue", "--message", "test: split b"],
+            GitFactorExpectation::default().stdout_suffix(expected_completion_stdout_suffix(1)),
+        );
+    }
+
+    #[test]
+    fn continue_advances_to_next_commit_for_multiple_explicit_refs() {
+        let dir = init_repo();
+        let repo = dir.path();
+
+        commit_file(repo, "base.txt", "base\n", "chore: base");
+        commit_file(repo, "base.txt", "base\na\n", "feat: a");
+        write_file(repo, "base.txt", "base\na\nb\n");
+        git(repo, &["add", "--all"]);
+        git(repo, &["commit", "--message", "feat: b"]);
+        let first_short_sha = git(repo, &["rev-parse", "--short", "HEAD~1"]);
+        let second_short_sha = git(repo, &["rev-parse", "--short", "HEAD"]);
+
+        run_git_factor(
+            repo,
+            &["--exec", "true", "HEAD~1", "HEAD"],
+            GitFactorExpectation::default()
+                .stdout_suffix(expected_multi_commit_start_suffix(first_short_sha.as_str())),
+        );
+
+        git(repo, &["add", "--all"]);
+        run_git_factor(
+            repo,
+            &["--continue", "--message", "test: split a"],
+            GitFactorExpectation::default().stdout_suffix(
+                expected_now_splitting_suffix_with_remaining(
+                    second_short_sha.as_str(),
+                    "feat: b",
+                    "  base.txt | 1 +\n   1 file changed, 1 insertion(+)",
+                ),
+            ),
+        );
+
+        git(repo, &["add", "--all"]);
+        run_git_factor(
+            repo,
+            &["--continue", "--message", "test: split b"],
+            GitFactorExpectation::default().stdout_suffix(expected_completion_stdout_suffix(1)),
+        );
+    }
+
+    #[test]
+    fn continue_prints_untracked_when_next_commit_adds_files() {
+        let dir = init_repo();
+        let repo = dir.path();
+
+        // Commit A modifies an existing file.
+        commit_file(repo, "file.txt", "one\n", "chore: one");
+        write_file(repo, "file.txt", "two\n");
+        git(repo, &["add", "file.txt"]);
+        git(repo, &["commit", "--message", "chore: two"]);
+
+        // Commit B adds a new file, which will become untracked after the mixed reset.
+        write_file(repo, "new.txt", "new\n");
+        git(repo, &["add", "new.txt"]);
+        git(repo, &["commit", "--message", "chore: add new"]);
+        let second_short_sha = git(repo, &["rev-parse", "--short", "HEAD"]);
+
+        // Start factoring both commits.
+        run_git_factor(
+            repo,
+            &["--exec", "true", "HEAD~2..HEAD"],
+            GitFactorExpectation::default(),
+        );
+
+        // Stage the entire first commit's change so we advance to the next commit.
+        git(repo, &["add", "file.txt"]);
+
+        run_git_factor(
+            repo,
+            &["--continue", "--message", "test: first"],
+            GitFactorExpectation::default().stdout_suffix(
+                expected_now_splitting_suffix_with_untracked(
+                    second_short_sha.as_str(),
+                    "chore: add new",
+                ),
+            ),
+        );
+    }
+
+    #[test]
+    fn start_prints_untracked_when_target_commit_adds_file() {
+        let dir = init_repo();
+        let repo = dir.path();
+
+        commit_file(repo, "base.txt", "one\n", "chore: base");
+        commit_file(repo, "new.txt", "new\n", "feat: add file");
+        let head_short_sha = git(repo, &["rev-parse", "--short", "HEAD"]);
+
+        run_git_factor(
+            repo,
+            &["--exec", "true", "HEAD"],
+            GitFactorExpectation::default().stdout(
+                expected_single_commit_start_with_untracked_stdout(
+                    head_short_sha.as_str(),
+                    "feat: add file",
+                    "new.txt",
+                ),
+            ),
+        );
+    }
+
+    #[test]
+    fn continue_drops_empty_root_commit_session() {
+        let dir = init_repo();
+        let repo = dir.path();
+
+        // Single root commit.
+        commit_file(repo, "file.txt", "one\n", "feat: root");
+
+        let expected_tree = git(repo, &["rev-parse", "HEAD^{tree}"]);
+        let root = git(repo, &["rev-list", "--max-parents=0", "HEAD"]);
+
+        start_session(repo);
+        git(repo, &["add", "--all"]);
+        run_git_factor(
+            repo,
+            &["--continue", "--message", "test: root split"],
+            GitFactorExpectation::default()
+                .stdout_suffix(expected_completion_stdout_suffix(1))
+                .git_output(&["rev-parse", "HEAD^{tree}"], expected_tree)
+                .git_output_non_empty(&["ls-tree", root.as_str()]),
+        );
+    }
+
+    #[test]
+    fn finish_skips_root_rebase_when_root_tree_is_not_empty() {
+        let dir = init_repo();
+        let repo = dir.path();
+
+        commit_file(repo, "file.txt", "one\n", "feat: root");
+
+        start_session(repo);
+        git(repo, &["add", "--all"]);
+
+        let (wrap_dir, wrap_bin) = make_git_wrapper_named(
+            "git",
+            #[expect(
+                clippy::literal_string_with_formatting_args,
+                reason = "shell script contains ${1:-} expansions"
+            )]
+            r#"if [ "${1:-}" = "ls-tree" ]; then
+  echo "100644 blob deadbeefdeadbeefdeadbeefdeadbeefdeadbeef	file.txt"
+  exit 0
+fi
+if [ "${1:-}" = "rebase" ] && [ "${2:-}" = "--root" ] && [ "${3:-}" = "--interactive" ]; then
+  echo "UNEXPECTED_ROOT_REBASE" >&2
+  exit 1
+fi
+"#,
+        );
+        let _keep_alive = wrap_dir;
+
+        let original_path = env::var_os("PATH").expect("PATH");
+        let prefixed_path = {
+            let mut joined = OsString::new();
+            joined.push(wrap_bin.as_os_str());
+            joined.push(OsStr::new(":"));
+            joined.push(original_path);
+            joined
+        };
+
+        run_git_factor_with_prefixed_path(
+            repo,
+            &["--continue", "--message", "test: root split"],
+            GitFactorExpectation::default().stdout_suffix(expected_completion_stdout_suffix(1)),
+            prefixed_path,
+        );
+    }
+
+    #[test]
