@@ -883,7 +883,7 @@ pub(super) fn remove_empty_root_in(ctx: &Ctx<'_>) -> Result<(), FactorError> {
         ctx,
         "git",
         &["rebase", "--interactive", "--quiet", "--root"],
-        &[("GIT_SEQUENCE_EDITOR", &seq_editor)],
+        &[("GIT_EDITOR", "false"), ("GIT_SEQUENCE_EDITOR", &seq_editor)],
         false,
     ));
 
@@ -983,6 +983,30 @@ pub(super) fn sort_topologically(
 /// Runs a git command and returns success/failure.
 pub(super) fn run_git(ctx: &Ctx<'_>, args: &[&str]) -> Result<(), FactorError> {
     run_git_with(ctx, "git", args)
+}
+
+/// Runs a git command with editor invocations disabled.
+///
+/// Use this for flows where opening an editor is unexpected and should fail
+/// fast (for example `git rebase --continue` in automated factor sessions).
+pub(super) fn run_git_non_interactive(ctx: &Ctx<'_>, args: &[&str]) -> Result<(), FactorError> {
+    let status = command_status_with(
+        ctx,
+        "git",
+        args,
+        &[("GIT_EDITOR", "false"), ("GIT_SEQUENCE_EDITOR", "false")],
+        false,
+    )?;
+
+    if status.success() {
+        Ok(())
+    } else {
+        Err(FactorError::GitCommand(format!(
+            "git {} failed (exit {})",
+            args.first().unwrap_or(&""),
+            status_code(status)
+        )))
+    }
 }
 
 /// Runs a git command using the provided executable name/path.
