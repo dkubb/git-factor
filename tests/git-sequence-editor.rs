@@ -453,3 +453,168 @@ exec echo hi\n\
     }
 
     #[test]
+    fn rejects_drop_sha_not_present_in_todo() {
+        let dir = TempDir::new().expect("tempdir");
+        let path = dir.path().join("todo");
+        fs::write(&path, "pick abc1234 first\n").expect("write todo file");
+
+        run_editor(
+            &["--drop", "deadbeef"],
+            GitSequenceEditorExpectation {
+                code: EXIT_FAILURE,
+                stderr: "sha not present in todo: deadbeef\n".to_owned(),
+                ..Default::default()
+            },
+            &path,
+        );
+    }
+
+    #[test]
+    fn rejects_pick_sha_not_present_in_todo() {
+        let dir = TempDir::new().expect("tempdir");
+        let path = dir.path().join("todo");
+        fs::write(&path, "pick abc1234 first\n").expect("write todo file");
+
+        run_editor(
+            &["--pick", "deadbeef"],
+            GitSequenceEditorExpectation {
+                code: EXIT_FAILURE,
+                stderr: "sha not present in todo: deadbeef\n".to_owned(),
+                ..Default::default()
+            },
+            &path,
+        );
+    }
+
+    #[test]
+    fn rejects_edit_sha_not_present_in_todo() {
+        let dir = TempDir::new().expect("tempdir");
+        let path = dir.path().join("todo");
+        fs::write(&path, "pick abc1234 first\n").expect("write todo file");
+
+        run_editor(
+            &["--edit", "deadbeef"],
+            GitSequenceEditorExpectation {
+                code: EXIT_FAILURE,
+                stderr: "sha not present in todo: deadbeef\n".to_owned(),
+                ..Default::default()
+            },
+            &path,
+        );
+    }
+
+    #[test]
+    fn rejects_non_hex_40_char_sha_without_rev_parse() {
+        let dir = TempDir::new().expect("tempdir");
+        let path = dir.path().join("todo");
+        fs::write(&path, "pick abc1234 first\n").expect("write todo file");
+
+        let requested = format!("{}g", "a".repeat(39));
+
+        run_editor(
+            &["--drop", requested.as_str()],
+            GitSequenceEditorExpectation {
+                code: EXIT_FAILURE,
+                stderr: format!("sha not present in todo: {requested}\n"),
+                ..Default::default()
+            },
+            &path,
+        );
+    }
+
+    #[test]
+    fn resolves_hex40_via_rev_parse_and_maps_to_todo_token() {
+        let dir = TempDir::new().expect("tempdir");
+        let path = dir.path().join("todo");
+        fs::write(&path, "pick abc1234 first\n").expect("write todo file");
+
+        let requested = "a".repeat(40);
+        let resolved = format!("abc1234{}", "0".repeat(33));
+
+        let steps = vec![GitWrapperStep {
+            args: vec![
+                "rev-parse".to_owned(),
+                "--verify".to_owned(),
+                requested.clone(),
+            ],
+            stdout: format!("{resolved}\n"),
+            stderr: String::new(),
+            exit_code: 0,
+        }];
+
+        let (wrap_dir, wrap_bin, count_file) = make_ordered_git_wrapper(&steps);
+
+        let original_path = env::var_os("PATH").expect("PATH");
+        let prefixed_path = {
+            let mut joined = OsString::new();
+            joined.push(wrap_bin.as_os_str());
+            joined.push(OsStr::new(":"));
+            joined.push(original_path);
+            joined
+        };
+
+        run_editor_with_prefixed_path(
+            &["--drop", requested.as_str()],
+            GitSequenceEditorExpectation {
+                ordered_git_replay: Some(OrderedGitReplayExpectation::from_count_file(
+                    count_file,
+                    steps.len(),
+                )),
+                todo_content: Some("drop abc1234 first\n".to_owned()),
+                ..Default::default()
+            },
+            prefixed_path,
+            &path,
+        );
+        let _keep_alive = wrap_dir;
+    }
+
+    #[test]
+    fn resolves_hex40_to_full_sha_token_present_in_todo() {
+        let dir = TempDir::new().expect("tempdir");
+        let path = dir.path().join("todo");
+
+        let requested = "a".repeat(40);
+        let resolved = format!("deadbeef{}", "0".repeat(32));
+        fs::write(&path, format!("pick {resolved} first\n")).expect("write todo file");
+
+        let steps = vec![GitWrapperStep {
+            args: vec![
+                "rev-parse".to_owned(),
+                "--verify".to_owned(),
+                requested.clone(),
+            ],
+            stdout: format!("{resolved}\n"),
+            stderr: String::new(),
+            exit_code: 0,
+        }];
+
+        let (wrap_dir, wrap_bin, count_file) = make_ordered_git_wrapper(&steps);
+
+        let original_path = env::var_os("PATH").expect("PATH");
+        let prefixed_path = {
+            let mut joined = OsString::new();
+            joined.push(wrap_bin.as_os_str());
+            joined.push(OsStr::new(":"));
+            joined.push(original_path);
+            joined
+        };
+
+        run_editor_with_prefixed_path(
+            &["--drop", requested.as_str()],
+            GitSequenceEditorExpectation {
+                ordered_git_replay: Some(OrderedGitReplayExpectation::from_count_file(
+                    count_file,
+                    steps.len(),
+                )),
+                todo_content: Some(format!("drop {resolved} first\n")),
+                ..Default::default()
+            },
+            prefixed_path,
+            &path,
+        );
+        let _keep_alive = wrap_dir;
+    }
+
+    #[test]
+    fn resolves_uppercase_hex40_via_rev_parse_and_maps_to_todo_token() {
