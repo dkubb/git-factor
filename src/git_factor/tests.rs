@@ -1288,6 +1288,7 @@ fn cmd_start_propagates_status_error_when_start_sequence_fails() {
             0,
         )
         .with_status("bash", &["-c", "true"], &[], false, repo, 0)
+        .with_output("git", &["rev-parse", "HEAD^{tree}"], repo, "head_tree\n")
         .with_status(
             "git",
             &["rev-parse", "--verify", "--quiet", &format!("{sha}^")],
@@ -1696,6 +1697,7 @@ fn cmd_start_range_ref_inserts_shas_and_propagates_io_error_on_multi_commit_bann
             repo,
             0,
         )
+        .with_output("git", &["rev-parse", "HEAD^{tree}"], repo, "head_tree\n")
         .with_status("git", &["reset", "--mixed", "HEAD~1"], &[], false, repo, 0)
         .with_output("git", &["diff", "--stat"], repo, "")
         .with_output(
@@ -1769,6 +1771,7 @@ fn advance_to_next_commit_prints_untracked_changes_when_present() {
 
     let runner = ScriptedRunner::default()
         .with_status("git", &["rebase", "--continue"], &[], false, repo, 0)
+        .with_output("git", &["rev-parse", "HEAD^{tree}"], repo, "head_tree\n")
         .with_status("git", &["reset", "--mixed", "HEAD~1"], &[], false, repo, 0)
         .with_output("git", &["rev-parse", "--git-dir"], repo, ".git\n")
         .with_output(
@@ -1864,6 +1867,7 @@ fn advance_to_next_commit_propagates_io_error_when_outln_fails_mid_rebase() {
 
     let runner = ScriptedRunner::default()
         .with_status("git", &["rebase", "--continue"], &[], false, repo, 0)
+        .with_output("git", &["rev-parse", "HEAD^{tree}"], repo, "head_tree\n")
         .with_status("git", &["reset", "--mixed", "HEAD~1"], &[], false, repo, 0)
         .with_output("git", &["rev-parse", "--git-dir"], repo, ".git\n")
         .with_output(
@@ -1953,6 +1957,7 @@ fn advance_to_next_commit_errors_on_current_index_overflow() {
 
     let runner = ScriptedRunner::default()
         .with_status("git", &["rebase", "--continue"], &[], false, repo, 0)
+        .with_output("git", &["rev-parse", "HEAD^{tree}"], repo, "head_tree\n")
         .with_output("git", &["rev-parse", "--git-dir"], repo, ".git\n");
     let io = TestIo::default();
     let env = TestEnv {
@@ -2020,6 +2025,7 @@ fn advance_to_next_commit_omits_untracked_section_when_empty() {
 
     let runner = ScriptedRunner::default()
         .with_status("git", &["rebase", "--continue"], &[], false, repo, 0)
+        .with_output("git", &["rev-parse", "HEAD^{tree}"], repo, "head_tree\n")
         .with_status("git", &["reset", "--mixed", "HEAD~1"], &[], false, repo, 0)
         .with_output("git", &["rev-parse", "--git-dir"], repo, ".git\n")
         .with_output(

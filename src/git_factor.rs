@@ -355,6 +355,11 @@ fn advance_to_next_commit_in(ctx: &Ctx<'_>, state_dir: &Path) -> Result<bool, Fa
         run_git(ctx, &["rebase", "--continue"])?;
 
         if is_mid_rebase_in(ctx) {
+            // Capture the rewritten commit tree for the next edit stop before
+            // resetting to unstage its diff for splitting.
+            let expected_tree = git_output(ctx, &["rev-parse", "HEAD^{tree}"])?;
+            write_state(ctx, state_dir, "expected_tree", &expected_tree)?;
+
             // Another edit stop reached: advance to the next commit.
             let current_index = read_state_parsed::<usize>(ctx, state_dir, "current_index")?
                 .checked_add(1)
@@ -472,7 +477,7 @@ fn cmd_continue_in(ctx: &Ctx<'_>, messages: &NonEmpty<NonEmptyString>) -> Result
     write_state(ctx, &state_dir, "split_count", &split_count.to_string())?;
 
     let head_tree = git_output(ctx, &["rev-parse", "HEAD^{tree}"])?;
-    let expected_tree = git_output(ctx, &["rev-parse", &format!("{original_commit}^{{tree}}")])?;
+    let expected_tree = expected_tree_for_current_step(ctx, &state_dir, &original_commit)?;
 
     if head_tree == expected_tree {
         // No more changes remain for this commit; advance to next or finish.
@@ -609,7 +614,7 @@ fn cmd_finish_in(ctx: &Ctx<'_>, messages: &[NonEmptyString]) -> Result<i32, Fact
     }
     let original_commit = current_commit_from_state(ctx, &state_dir)?;
     let exec_command = read_state(ctx, &state_dir, "exec")?;
-    let expected_tree = git_output(ctx, &["rev-parse", &format!("{original_commit}^{{tree}}")])?;
+    let expected_tree = expected_tree_for_current_step(ctx, &state_dir, &original_commit)?;
 
     // Clean unstaged/untracked changes.
     run_git(ctx, &["checkout", "--", "."])?;
@@ -842,6 +847,11 @@ fn cmd_start_in(
         }
     }
 
+    // Capture the tree of the exact commit currently being split. In
+    // interactive rebase sessions this is the rewritten edit-stop commit.
+    let expected_tree = git_output(ctx, &["rev-parse", "HEAD^{tree}"])?;
+    write_state(ctx, &state_dir, "expected_tree", &expected_tree)?;
+
     if is_root {
         mixed_reset_to_empty(ctx)?;
     } else {
@@ -902,6 +912,24 @@ fn current_commit_from_state(ctx: &Ctx<'_>, state_dir: &Path) -> Result<CommitSh
     })?;
 
     CommitSha::new((*sha_str).to_owned())
+}
+
+/// Returns the expected converged tree for the current split step.
+///
+/// New sessions persist this as `expected_tree`, derived from the live edit-stop
+/// commit (`HEAD^{tree}`), which stays correct after rebase rewrites. For older
+/// sessions created before this state key existed, fall back to deriving the
+/// tree from the original commit SHA recorded in `commits`.
+fn expected_tree_for_current_step(
+    ctx: &Ctx<'_>,
+    state_dir: &Path,
+    original_commit: &CommitSha,
+) -> Result<String, FactorError> {
+    if let Ok(tree) = read_state(ctx, state_dir, "expected_tree") {
+        return Ok(tree.to_string());
+    }
+
+    git_output(ctx, &["rev-parse", &format!("{original_commit}^{{tree}}")])
 }
 
 /// Creates a git commit preserving the original author and committer metadata.

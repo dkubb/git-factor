@@ -3372,6 +3372,46 @@ fi
     }
 
     #[test]
+    fn continue_uses_expected_tree_state_without_original_tree_lookup() {
+        let dir = init_repo();
+        let repo = dir.path();
+
+        commit_file(repo, "file.txt", "base\n", "chore: base");
+        commit_file(repo, "file.txt", "base\na\nb\n", "feat: change");
+
+        start_session(repo);
+        write_file(repo, "file.txt", "base\na\n");
+        git(repo, &["add", "file.txt"]);
+
+        let (wrap_dir, wrap_bin) = make_git_wrapper_named(
+            "git",
+            #[expect(
+                clippy::literal_string_with_formatting_args,
+                reason = "shell script contains braces like ${1:-}"
+            )]
+            r#"if [ "${1:-}" = "rev-parse" ]; then
+  case "${2:-}" in
+    HEAD^{tree}) ;;
+    *"^{tree}")
+      echo "fatal: unexpected original tree lookup" >&2
+      exit 1
+      ;;
+  esac
+fi
+"#,
+        );
+        let _keep_alive = wrap_dir;
+
+        run_git_factor_with_env(
+            repo,
+            &["--continue", "--message", "test: slice"],
+            GitFactorExpectation::default(),
+            "PATH",
+            format!("{}:{}", wrap_bin.display(), env::var("PATH").expect("PATH")),
+        );
+    }
+
+    #[test]
     fn continue_reports_error_when_actual_tree_lookup_fails() {
         let dir = init_repo();
         let repo = dir.path();
@@ -3417,6 +3457,8 @@ fi
         commit_file(repo, "file.txt", "one\ntwo\n", "feat: change");
 
         start_session(repo);
+        fs::remove_file(git_dir(repo).join("factor/expected_tree"))
+            .expect("remove expected_tree to force fallback lookup");
 
         let (wrap_dir, wrap_bin) = make_git_wrapper_named(
             "git",
