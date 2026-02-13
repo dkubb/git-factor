@@ -2156,3 +2156,165 @@ fn rehydrate_pool_preserving_index_propagates_cherry_pick_status_error() {
         matches!(
             &err,
             FactorError::GitCommand(msg)
+                if msg.contains("git cherry-pick:") && msg.contains("unexpected status call")
+        ),
+        "err was: {err:?}"
+    );
+}
+
+#[test]
+fn commit_sha_new_validates_length_and_hex() {
+    assert!(
+        CommitSha::new("a".repeat(40)).is_ok(),
+        "40 hex should be ok"
+    );
+    assert!(
+        CommitSha::new("a".repeat(39)).is_err(),
+        "wrong length should fail"
+    );
+    assert!(
+        CommitSha::new("g".repeat(40)).is_err(),
+        "non-hex should fail"
+    );
+}
+
+#[test]
+fn remove_empty_root_is_noop_when_root_is_not_empty() {
+    let dir = TempDir::new().expect("tempdir");
+    let repo = dir.path();
+    let ctx = ctx_for(repo);
+
+    let status = Command::new("git")
+        .args(["init"])
+        .current_dir(repo)
+        .status()
+        .expect("git init");
+    assert!(status.success(), "git init should succeed");
+
+    drop(
+        Command::new("git")
+            .args(["config", "user.name", "Git Factor Tests"])
+            .current_dir(repo)
+            .status(),
+    );
+    drop(
+        Command::new("git")
+            .args(["config", "user.email", "git-factor-tests@example.invalid"])
+            .current_dir(repo)
+            .status(),
+    );
+
+    fs::write(repo.join("file.txt"), "one\n").expect("write file");
+    assert!(
+        Command::new("git")
+            .args(["add", "file.txt"])
+            .current_dir(repo)
+            .status()
+            .expect("git add")
+            .success()
+    );
+    assert!(
+        Command::new("git")
+            .args(["commit", "--message", "chore: base"])
+            .current_dir(repo)
+            .status()
+            .expect("git commit")
+            .success()
+    );
+
+    let result = remove_empty_root_in(&ctx);
+
+    assert!(result.is_ok(), "should be a no-op when root is not empty");
+}
+
+#[test]
+fn run_with_args_maps_help_to_exit_ok() {
+    let dir = TempDir::new().expect("tempdir");
+    let io = TestIo::default();
+    let ctx = Ctx {
+        runner: &REAL_RUNNER,
+        cwd: dir.path().to_path_buf(),
+        io: &io,
+        env: &REAL_ENV,
+        fs: &REAL_FS,
+    };
+    let code = run_and_report_with_args_vec(
+        &ctx,
+        vec![OsString::from("git-factor"), OsString::from("--help")],
+    );
+    assert_eq!(code, EXIT_OK);
+    assert!(io.stdout().contains("WORKFLOW:"), "help should be printed");
+    assert!(io.stderr().is_empty(), "help should not print to stderr");
+}
+
+#[test]
+fn run_with_args_errors_when_exec_is_missing() {
+    let dir = TempDir::new().expect("tempdir");
+    let io = TestIo::default();
+    let ctx = Ctx {
+        runner: &REAL_RUNNER,
+        cwd: dir.path().to_path_buf(),
+        io: &io,
+        env: &REAL_ENV,
+        fs: &REAL_FS,
+    };
+    let code = run_and_report_with_args_vec(
+        &ctx,
+        vec![OsString::from("git-factor"), OsString::from("HEAD")],
+    );
+    assert_eq!(code, EXIT_USAGE);
+    let stderr = io.stderr();
+    assert!(stderr.contains("--exec <COMMAND> is required"));
+}
+
+#[test]
+fn run_with_args_defaults_missing_commit_to_head() {
+    let dir = TempDir::new().expect("tempdir");
+    let io = TestIo::default();
+    let ctx = Ctx {
+        runner: &REAL_RUNNER,
+        cwd: dir.path().to_path_buf(),
+        io: &io,
+        env: &REAL_ENV,
+        fs: &REAL_FS,
+    };
+    let code = run_and_report_with_args_vec(
+        &ctx,
+        vec![
+            OsString::from("git-factor"),
+            OsString::from("--exec"),
+            OsString::from("true"),
+        ],
+    );
+    assert_eq!(code, EXIT_DATAERR);
+    let stderr = io.stderr();
+    assert_eq!(stderr, "not a git repository\n");
+}
+
+#[test]
+fn validate_exec_syntax_reports_spawn_failure_as_git_command() {
+    let dir = TempDir::new().expect("tempdir");
+    let repo = dir.path();
+
+    let runner = ScriptedRunner::default();
+    let io = TestIo::default();
+    let env = TestEnv {
+        cwd: repo.to_path_buf(),
+    };
+    let ctx = Ctx {
+        runner: &runner,
+        cwd: repo.to_path_buf(),
+        io: &io,
+        env: &env,
+        fs: &REAL_FS,
+    };
+
+    let err = validate_exec_syntax(&ctx, "echo hi").expect_err("expected spawn failure");
+    assert!(
+        matches!(&err, FactorError::GitCommand(msg) if msg.contains("bash syntax check:") && msg.contains("unexpected status call")),
+        "err was: {err:?}"
+    );
+}
+
+#[test]
+fn cmd_continue_errors_on_split_count_overflow() {
