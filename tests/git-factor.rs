@@ -1721,3 +1721,168 @@ fi
     }
 
     #[test]
+    fn continue_completes_single_commit_split_and_preserves_tree() {
+        let dir = init_repo();
+        let repo = dir.path();
+
+        commit_file(repo, "file.txt", "one\n", "chore: base");
+        commit_file(repo, "file.txt", "one\ntwo\n", "feat: original");
+
+        let expected_tree = git(repo, &["rev-parse", "HEAD^{tree}"]);
+
+        start_session(repo);
+
+        // Stage all remaining changes and commit the slice.
+        git(repo, &["add", "--all"]);
+        run_git_factor(
+            repo,
+            &["--continue", "--message", "test: split"],
+            GitFactorExpectation::default()
+                .git_output(&["rev-parse", "HEAD^{tree}"], expected_tree)
+                .git_status_porcelain("")
+                .factor_state_exists(false),
+        );
+    }
+
+    #[test]
+    fn continue_requires_staged_changes_and_does_not_wipe_pool() {
+        let dir = init_repo();
+        let repo = dir.path();
+
+        commit_file(repo, "file.txt", "one\n", "chore: base");
+        commit_file(repo, "file.txt", "one\ntwo\n", "feat: change");
+
+        start_session(repo);
+
+        let diff_before = git(repo, &["diff", "--stat"]);
+
+        run_git_factor(
+            repo,
+            &["--continue", "--message", "test: no staging"],
+            GitFactorExpectation::default()
+                .code(EXIT_USAGE)
+                .stderr("no staged changes to commit\n")
+                .git_output(&["diff", "--stat"], diff_before),
+        );
+    }
+
+    #[test]
+    fn continue_reports_error_when_rebase_disappears_after_exec_gate() {
+        let dir = init_repo();
+        let repo = dir.path();
+
+        commit_file(repo, "file.txt", "one\n", "chore: base");
+        commit_file(repo, "file.txt", "one\ntwo\n", "feat: change");
+
+        run_git_factor(
+            repo,
+            &["--exec", "rm -rf .git/rebase-merge && true", "HEAD~1"],
+            GitFactorExpectation::default(),
+        );
+
+        git(repo, &["add", "--all"]);
+        run_git_factor(
+            repo,
+            &["--continue", "--message", "test: split"],
+            GitFactorExpectation::default()
+                .code(EXIT_SOFTWARE)
+                .stderr(concat!(
+                    "The previous cherry-pick is now empty, possibly due to conflict resolution.\n",
+                    "If you wish to commit it anyway, use:\n",
+                    "\n",
+                    "    git commit --allow-empty\n",
+                    "\n",
+                    "Otherwise, please use 'git cherry-pick --skip'\n",
+                    "git command failed: no rebase in progress\n"
+                )),
+        );
+    }
+
+    #[test]
+    fn continue_preserves_index_and_rehydrates_pool_when_exec_gate_fails() {
+        let dir = init_repo();
+        let repo = dir.path();
+
+        commit_file(repo, "tracked.txt", "one\n", "chore: base");
+
+        // Original commit both modifies a tracked file and adds a new file.
+        write_file(repo, "tracked.txt", "one\ntwo\n");
+        write_file(repo, "new.txt", "new\n");
+        git(repo, &["add", "--all"]);
+        git(repo, &["commit", "--message", "feat: original"]);
+
+        // Split the commit with a failing exec gate.
+        start_session_with_exec(repo, "false");
+
+        // Stage only tracked.txt from the pool; leave new.txt unstaged.
+        git(repo, &["add", "tracked.txt"]);
+
+        run_git_factor(
+            repo,
+            &["--continue", "--message", "test: staged slice"],
+            GitFactorExpectation::default()
+                .code(EXIT_TEMPFAIL)
+                .stderr("exec gate failed: false (exit code 1)\n")
+                .git_output(&["diff", "--cached", "--name-only"], "tracked.txt")
+                .git_status_porcelain("M  tracked.txt\n?? new.txt")
+                .path_exists("new.txt", true),
+        );
+    }
+
+    #[test]
+    fn continue_leaves_remaining_changes_unstaged_after_partial_split() {
+        let dir = init_repo();
+        let repo = dir.path();
+
+        commit_file(repo, "base.txt", "base\n", "chore: base");
+
+        // Original commit touches two files so we can split into at least 2 slices.
+        write_file(repo, "a.txt", "a\n");
+        write_file(repo, "b.txt", "b\n");
+        git(repo, &["add", "--all"]);
+        git(repo, &["commit", "--message", "feat: original"]);
+
+        start_session(repo);
+
+        // Commit only a.txt as the first slice.
+        git(repo, &["add", "a.txt"]);
+        run_git_factor(
+            repo,
+            &["--continue", "--message", "test: slice a"],
+            GitFactorExpectation::default()
+                .stdout_suffix(expected_continue_remaining_suffix())
+                .git_output(&["ls-files", "--others", "--exclude-standard"], "b.txt"),
+        );
+    }
+
+    #[test]
+    fn finish_reuses_original_commit_message_when_none_provided() {
+        let dir = init_repo();
+        let repo = dir.path();
+
+        commit_file(repo, "file.txt", "one\n", "chore: base");
+        commit_file(repo, "file.txt", "one\ntwo\n", "feat: original message");
+
+        let original_message = git(repo, &["log", "-1", "--format=%B"]);
+
+        start_session(repo);
+
+        run_git_factor(
+            repo,
+            &["--finish"],
+            GitFactorExpectation::default().git_output(
+                &["log", "-1", "--format=%B"],
+                original_message.trim_end().to_owned(),
+            ),
+        );
+    }
+
+    #[test]
+    fn finish_succeeds_without_rebase_when_target_is_head() {
+        let dir = init_repo();
+        let repo = dir.path();
+
+        commit_file(repo, "file.txt", "one\n", "chore: base");
+        commit_file(repo, "file.txt", "one\ntwo\n", "feat: change");
+        let head_short_sha = git(repo, &["rev-parse", "--short", "HEAD"]);
+
