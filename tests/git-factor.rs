@@ -3293,3 +3293,56 @@ fi
         );
     }
 
+    #[test]
+    fn finish_reports_tree_hash_mismatch_via_write_tree_wrapper() {
+        let dir = init_repo();
+        let repo = dir.path();
+
+        commit_file(repo, "file.txt", "one\n", "chore: base");
+        commit_file(repo, "file.txt", "one\ntwo\n", "feat: change");
+
+        // Wrapper: force `git write-tree` (used for actual tree) to return a bogus value.
+        let (wrap_dir, wrap_bin) = make_git_wrapper_named(
+            "git",
+            #[expect(
+                clippy::literal_string_with_formatting_args,
+                reason = "shell script contains braces like ${1:-}"
+            )]
+            r#"if [ "${1:-}" = "write-tree" ]; then
+  echo "0000000000000000000000000000000000000000"
+  exit 0
+fi
+"#,
+        );
+        let _keep_alive = wrap_dir;
+
+        let wrapped_path = format!("{}:{}", wrap_bin.display(), env::var("PATH").expect("PATH"));
+        run_git_factor_with_env(
+            repo,
+            &["--exec", "true", "HEAD"],
+            GitFactorExpectation::default(),
+            "PATH",
+            wrapped_path.clone(),
+        );
+        let original_commit = fs::read_to_string(git_dir(repo).join("factor/commits"))
+            .expect("read commits")
+            .lines()
+            .next()
+            .expect("first commit in session state")
+            .to_owned();
+        let expected_tree = git(repo, &["rev-parse", &format!("{original_commit}^{{tree}}")]);
+        let actual_tree = "0000000000000000000000000000000000000000";
+
+        run_git_factor_with_env(
+            repo,
+            &["--finish", "--message", "test: finish"],
+            GitFactorExpectation::default()
+                .code(EXIT_TEMPFAIL)
+                .stderr(format!(
+                    "tree hash mismatch: expected {expected_tree}, got {actual_tree}\n"
+                )),
+            "PATH",
+            wrapped_path,
+        );
+    }
+
