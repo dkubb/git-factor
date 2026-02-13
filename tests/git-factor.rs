@@ -1551,3 +1551,173 @@ fi
     exit 1
   fi
 fi
+"#,
+        );
+        let _keep_alive = wrap_dir;
+
+        let original_path = env::var_os("PATH").expect("PATH");
+        let prefixed_path = {
+            let mut joined = OsString::new();
+            joined.push(wrap_bin.as_os_str());
+            joined.push(OsStr::new(":"));
+            joined.push(original_path);
+            joined
+        };
+
+        run_git_factor_with_prefixed_path(
+            repo,
+            &["--exec", "true", "HEAD"],
+            GitFactorExpectation::default()
+                .code(EXIT_SOFTWARE)
+                .stderr("git command failed: mock diff stat failure\n"),
+            prefixed_path,
+        );
+    }
+
+    #[test]
+    fn start_reports_error_when_hint_show_toplevel_fails() {
+        let dir = init_repo();
+        let repo = dir.path();
+
+        commit_file(repo, "file.txt", "one\n", "chore: base");
+        commit_file(repo, "file.txt", "one\ntwo\n", "feat: change");
+
+        let (wrap_dir, wrap_bin) = make_git_wrapper_named(
+            "git",
+            #[expect(
+                clippy::literal_string_with_formatting_args,
+                reason = "shell script contains ${1:-} expansions"
+            )]
+            r#"if [ "${1:-}" = "rev-parse" ] && [ "${2:-}" = "--show-toplevel" ]; then
+  echo "mock show-toplevel failure" >&2
+  exit 1
+fi
+"#,
+        );
+        let _keep_alive = wrap_dir;
+
+        let original_path = env::var_os("PATH").expect("PATH");
+        let prefixed_path = {
+            let mut joined = OsString::new();
+            joined.push(wrap_bin.as_os_str());
+            joined.push(OsStr::new(":"));
+            joined.push(original_path);
+            joined
+        };
+
+        run_git_factor_with_prefixed_path(
+            repo,
+            &["--exec", "true", "HEAD"],
+            GitFactorExpectation::default()
+                .code(EXIT_SOFTWARE)
+                .stderr("git command failed: mock show-toplevel failure\n"),
+            prefixed_path,
+        );
+    }
+
+    #[test]
+    fn start_reports_state_write_error_when_git_dir_is_not_a_directory() {
+        let dir = init_repo();
+        let repo = dir.path();
+
+        commit_file(repo, "file.txt", "one\n", "chore: base");
+        commit_file(repo, "file.txt", "one\ntwo\n", "feat: change");
+
+        let (wrap_dir, wrap_bin) = make_git_wrapper_named(
+            "git",
+            #[expect(
+                clippy::literal_string_with_formatting_args,
+                reason = "shell script contains ${1:-} expansions"
+            )]
+            r#"if [ "${1:-}" = "rev-parse" ] && [ "${2:-}" = "--git-dir" ]; then
+  echo "/dev/null"
+  exit 0
+fi
+"#,
+        );
+        let _keep_alive = wrap_dir;
+
+        let original_path = env::var_os("PATH").expect("PATH");
+        let prefixed_path = {
+            let mut joined = OsString::new();
+            joined.push(wrap_bin.as_os_str());
+            joined.push(OsStr::new(":"));
+            joined.push(original_path);
+            joined
+        };
+
+        run_git_factor_with_prefixed_path(
+            repo,
+            &["--exec", "true", "HEAD"],
+            GitFactorExpectation::default()
+                .code(EXIT_SOFTWARE)
+                .stderr("failed to write state: Not a directory (os error 20)\n"),
+            prefixed_path,
+        );
+    }
+
+    #[test]
+    fn rejects_start_when_session_dir_exists() {
+        let dir = init_repo();
+        let repo = dir.path();
+        commit_file(repo, "file.txt", "one\n", "chore: base");
+
+        let factor_dir = git_dir(repo).join("factor");
+        fs::create_dir_all(&factor_dir).expect("create factor dir");
+
+        run_git_factor(
+            repo,
+            &["--exec", "true", "HEAD"],
+            GitFactorExpectation::default()
+                .code(EXIT_USAGE)
+                .stderr("a factor session is already active (use --abort to cancel)\n"),
+        );
+    }
+
+    #[test]
+    fn rejects_start_during_an_existing_rebase() {
+        let dir = init_repo();
+        let repo = dir.path();
+        commit_file(repo, "file.txt", "one\n", "chore: base");
+
+        // Simulate an in-progress rebase (is_mid_rebase checks for these dirs).
+        let rebase_merge = git_dir(repo).join("rebase-merge");
+        fs::create_dir_all(&rebase_merge).expect("create rebase-merge dir");
+
+        run_git_factor(
+            repo,
+            &["--exec", "true", "HEAD"],
+            GitFactorExpectation::default()
+                .code(EXIT_USAGE)
+                .stderr("a rebase is already in progress\n"),
+        );
+    }
+
+    #[test]
+    fn abort_restores_repo_state_after_start() {
+        let dir = init_repo();
+        let repo = dir.path();
+
+        commit_file(repo, "file.txt", "one\n", "chore: base");
+        commit_file(repo, "file.txt", "one\ntwo\n", "feat: change");
+        commit_file(repo, "file.txt", "one\ntwo\nthree\n", "feat: latest");
+
+        let head_before = git(repo, &["rev-parse", "HEAD"]);
+
+        run_git_factor(
+            repo,
+            &["--exec", "true", "HEAD~1"],
+            GitFactorExpectation::default().factor_state_exists(true),
+        );
+
+        run_git_factor(
+            repo,
+            &["--abort"],
+            GitFactorExpectation::default()
+                .head_sha(head_before)
+                .git_status_porcelain("")
+                .factor_state_exists(false),
+        );
+    }
+
+    #[test]
