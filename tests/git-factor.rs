@@ -2050,3 +2050,89 @@ fi
     }
 
     #[test]
+    fn start_uses_rebase_root_for_multi_commit_session_starting_at_root() {
+        let dir = init_repo();
+        let repo = dir.path();
+
+        commit_file(repo, "file.txt", "root\n", "feat: root");
+        commit_file(repo, "file.txt", "root\nnext\n", "feat: next");
+        let root_sha = git(repo, &["rev-list", "--max-parents=0", "HEAD"]);
+
+        let (wrap_dir, wrap_bin) = make_git_wrapper_named(
+            "git",
+            #[expect(
+                clippy::literal_string_with_formatting_args,
+                reason = "shell script contains braces like ${1:-}"
+            )]
+            r#"if [ "${1:-}" = "rebase" ]; then
+  saw_root=0
+  for arg in "$@"; do
+    if [ "$arg" = "--root" ]; then
+      saw_root=1
+      break
+    fi
+  done
+  if [ "$saw_root" -eq 1 ]; then
+    exit 42
+  fi
+  exit 43
+fi
+"#,
+        );
+        let _keep_alive = wrap_dir;
+
+        run_git_factor_with_env(
+            repo,
+            &["--exec", "true", root_sha.as_str(), "HEAD"],
+            GitFactorExpectation::default()
+                .code(EXIT_SOFTWARE)
+                .stderr("git command failed: git rebase failed (exit 42)\n"),
+            "PATH",
+            format!("{}:{}", wrap_bin.display(), env::var("PATH").expect("PATH")),
+        );
+    }
+
+    #[test]
+    fn start_does_not_use_rebase_root_for_non_root_multi_commit_session() {
+        let dir = init_repo();
+        let repo = dir.path();
+
+        commit_file(repo, "file.txt", "one\n", "feat: one");
+        commit_file(repo, "file.txt", "one\ntwo\n", "feat: two");
+        commit_file(repo, "file.txt", "one\ntwo\nthree\n", "feat: three");
+
+        let (wrap_dir, wrap_bin) = make_git_wrapper_named(
+            "git",
+            #[expect(
+                clippy::literal_string_with_formatting_args,
+                reason = "shell script contains braces like ${1:-}"
+            )]
+            r#"if [ "${1:-}" = "rebase" ]; then
+  saw_root=0
+  for arg in "$@"; do
+    if [ "$arg" = "--root" ]; then
+      saw_root=1
+      break
+    fi
+  done
+  if [ "$saw_root" -eq 1 ]; then
+    exit 42
+  fi
+  exit 43
+fi
+"#,
+        );
+        let _keep_alive = wrap_dir;
+
+        run_git_factor_with_env(
+            repo,
+            &["--exec", "true", "HEAD~1", "HEAD"],
+            GitFactorExpectation::default()
+                .code(EXIT_SOFTWARE)
+                .stderr("git command failed: git rebase failed (exit 43)\n"),
+            "PATH",
+            format!("{}:{}", wrap_bin.display(), env::var("PATH").expect("PATH")),
+        );
+    }
+
+    #[test]
