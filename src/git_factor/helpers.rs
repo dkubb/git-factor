@@ -1,6 +1,469 @@
 use super::*;
 use core::str::FromStr;
 use std::collections::{BTreeSet, HashSet};
+use std::fmt::Write as _;
+use std::fs::OpenOptions;
+use std::io::Write as _;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
+
+/// Environment variable enabling JSONL trace logging.
+const TRACE_LOG_ENV: &str = "GIT_FACTOR_TRACE_LOG";
+
+/// Maximum number of path entries captured per status category.
+const TRACE_MAX_PATHS: usize = 200;
+
+/// Maximum number of bytes persisted for stdout/stderr payloads.
+const TRACE_MAX_TEXT_BYTES: usize = 8192;
+
+#[derive(Debug, Default)]
+struct RepoSnapshot {
+    head: Option<String>,
+    head_tree: Option<String>,
+    git_dir: Option<String>,
+    toplevel: Option<String>,
+    staged_paths: Vec<String>,
+    unstaged_paths: Vec<String>,
+    untracked_paths: Vec<String>,
+    factor_current_index: Option<String>,
+    factor_split_count: Option<String>,
+    factor_requires_rebase: Option<String>,
+    factor_expected_tree: Option<String>,
+    factor_current_commit: Option<String>,
+    rebase_state: Option<String>,
+    rebase_msgnum: Option<String>,
+    rebase_end: Option<String>,
+    rebase_todo_head: Option<String>,
+    rebase_done_tail: Option<String>,
+}
+
+fn trace_log_path(ctx: &Ctx<'_>) -> Option<PathBuf> {
+    let raw = ctx.env.var_os(TRACE_LOG_ENV)?;
+    if raw.is_empty() {
+        return None;
+    }
+    Some(PathBuf::from(raw))
+}
+
+fn now_unix_ms() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |dur| dur.as_millis())
+}
+
+fn trace_text_limit(text: &str) -> String {
+    let mut out = String::new();
+    for ch in text.chars() {
+        let next_len = ch.len_utf8();
+        if out.len().saturating_add(next_len) > TRACE_MAX_TEXT_BYTES {
+            break;
+        }
+        out.push(ch);
+    }
+    out
+}
+
+fn json_escape(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for ch in text.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            _ if ch.is_control() => {
+                let _ = write!(out, "\\u{:04X}", ch as u32);
+            }
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
+fn push_json_str(buf: &mut String, key: &str, value: &str) {
+    let _ = write!(buf, "\"{}\":\"{}\"", json_escape(key), json_escape(value));
+}
+
+fn push_json_opt_str(buf: &mut String, key: &str, value: Option<&str>) {
+    match value {
+        Some(value) => push_json_str(buf, key, value),
+        None => {
+            let _ = write!(buf, "\"{}\":null", json_escape(key));
+        }
+    }
+}
+
+fn push_json_u128(buf: &mut String, key: &str, value: u128) {
+    let _ = write!(buf, "\"{}\":{}", json_escape(key), value);
+}
+
+fn push_json_i32(buf: &mut String, key: &str, value: i32) {
+    let _ = write!(buf, "\"{}\":{}", json_escape(key), value);
+}
+
+fn push_json_bool(buf: &mut String, key: &str, value: bool) {
+    let _ = write!(
+        buf,
+        "\"{}\":{}",
+        json_escape(key),
+        if value { "true" } else { "false" }
+    );
+}
+
+fn push_json_array(buf: &mut String, key: &str, values: &[String]) {
+    let _ = write!(buf, "\"{}\":[", json_escape(key));
+    for (idx, value) in values.iter().enumerate() {
+        if idx > 0 {
+            buf.push(',');
+        }
+        let _ = write!(buf, "\"{}\"", json_escape(value));
+    }
+    buf.push(']');
+}
+
+fn maybe_git_output(ctx: &Ctx<'_>, args: &[&str]) -> Option<(i32, String, String)> {
+    let output = ctx.runner.output("git", args, &ctx.cwd).ok()?;
+    let code = status_code(output.status);
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+    Some((code, stdout, stderr))
+}
+
+fn read_trimmed_optional(ctx: &Ctx<'_>, path: &Path) -> Option<String> {
+    if !ctx.fs.exists(path) {
+        return None;
+    }
+    let content = ctx.fs.read_to_string(path).ok()?;
+    Some(content.trim().to_owned())
+}
+
+fn first_rebase_todo_line(text: &str) -> Option<String> {
+    text.lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty() && !line.starts_with('#'))
+        .map(str::to_owned)
+}
+
+fn last_non_empty_line(text: &str) -> Option<String> {
+    text.lines()
+        .rev()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .map(str::to_owned)
+}
+
+fn collect_status_paths(ctx: &Ctx<'_>) -> (Vec<String>, Vec<String>, Vec<String>) {
+    let mut staged = Vec::new();
+    let mut unstaged = Vec::new();
+    let mut untracked = Vec::new();
+
+    let Some((_code, status, _stderr)) = maybe_git_output(
+        ctx,
+        &["status", "--porcelain=v1", "--untracked-files=all"],
+    ) else {
+        return (staged, unstaged, untracked);
+    };
+
+    for line in status.lines() {
+        if line.len() < 3 {
+            continue;
+        }
+        let bytes = line.as_bytes();
+        let path = line[3..].to_owned();
+        if bytes[0] == b'?' && bytes[1] == b'?' {
+            if untracked.len() < TRACE_MAX_PATHS {
+                untracked.push(path);
+            }
+            continue;
+        }
+        if bytes[0] != b' ' && bytes[0] != b'?' && staged.len() < TRACE_MAX_PATHS {
+            staged.push(path.clone());
+        }
+        if bytes[1] != b' ' && bytes[1] != b'?' && unstaged.len() < TRACE_MAX_PATHS {
+            unstaged.push(path);
+        }
+    }
+
+    (staged, unstaged, untracked)
+}
+
+fn collect_repo_snapshot(ctx: &Ctx<'_>) -> RepoSnapshot {
+    let mut snapshot = RepoSnapshot::default();
+
+    if let Some((_code, head, _stderr)) = maybe_git_output(ctx, &["rev-parse", "--verify", "HEAD"])
+        && !head.is_empty()
+    {
+        snapshot.head = Some(head);
+    }
+
+    if let Some((_code, tree, _stderr)) =
+        maybe_git_output(ctx, &["rev-parse", "--verify", "HEAD^{tree}"])
+            && !tree.is_empty()
+    {
+        snapshot.head_tree = Some(tree);
+    }
+
+    let git_dir = git_dir_in(ctx).ok();
+    if let Some(ref dir) = git_dir {
+        snapshot.git_dir = Some(dir.to_string_lossy().into_owned());
+
+        if let Some((_code, toplevel, _stderr)) = maybe_git_output(ctx, &["rev-parse", "--show-toplevel"])
+            && !toplevel.is_empty()
+        {
+            snapshot.toplevel = Some(toplevel);
+        }
+
+        let factor_dir = dir.join("factor");
+        snapshot.factor_current_index = read_trimmed_optional(ctx, &factor_dir.join("current_index"));
+        snapshot.factor_split_count = read_trimmed_optional(ctx, &factor_dir.join("split_count"));
+        snapshot.factor_requires_rebase =
+            read_trimmed_optional(ctx, &factor_dir.join("requires_rebase"));
+        snapshot.factor_expected_tree = read_trimmed_optional(ctx, &factor_dir.join("expected_tree"));
+
+        if let (Some(commits), Some(index)) = (
+            read_trimmed_optional(ctx, &factor_dir.join("commits")),
+            snapshot
+                .factor_current_index
+                .as_deref()
+                .and_then(|value| value.parse::<usize>().ok()),
+        ) {
+            let commit = commits
+                .lines()
+                .map(str::trim)
+                .filter(|line| !line.is_empty())
+                .nth(index)
+                .map(str::to_owned);
+            snapshot.factor_current_commit = commit;
+        }
+
+        let rebase_merge = dir.join("rebase-merge");
+        let rebase_apply = dir.join("rebase-apply");
+        if ctx.fs.is_dir(&rebase_merge) {
+            snapshot.rebase_state = Some("rebase-merge".to_owned());
+            snapshot.rebase_msgnum = read_trimmed_optional(ctx, &rebase_merge.join("msgnum"));
+            snapshot.rebase_end = read_trimmed_optional(ctx, &rebase_merge.join("end"));
+            snapshot.rebase_todo_head = read_trimmed_optional(ctx, &rebase_merge.join("git-rebase-todo"))
+                .as_deref()
+                .and_then(first_rebase_todo_line);
+            snapshot.rebase_done_tail = read_trimmed_optional(ctx, &rebase_merge.join("done"))
+                .as_deref()
+                .and_then(last_non_empty_line);
+        } else if ctx.fs.is_dir(&rebase_apply) {
+            snapshot.rebase_state = Some("rebase-apply".to_owned());
+            snapshot.rebase_msgnum = read_trimmed_optional(ctx, &rebase_apply.join("next"));
+            snapshot.rebase_end = read_trimmed_optional(ctx, &rebase_apply.join("last"));
+            snapshot.rebase_todo_head =
+                read_trimmed_optional(ctx, &rebase_apply.join("patch")).map(|_| "patch".to_owned());
+            snapshot.rebase_done_tail = None;
+        }
+    }
+
+    let (staged, unstaged, untracked) = collect_status_paths(ctx);
+    snapshot.staged_paths = staged;
+    snapshot.unstaged_paths = unstaged;
+    snapshot.untracked_paths = untracked;
+    snapshot
+}
+
+fn push_snapshot_fields(buf: &mut String, prefix: &str, snapshot: &RepoSnapshot) {
+    push_json_opt_str(
+        buf,
+        &format!("{prefix}_head"),
+        snapshot.head.as_deref(),
+    );
+    buf.push(',');
+    push_json_opt_str(
+        buf,
+        &format!("{prefix}_head_tree"),
+        snapshot.head_tree.as_deref(),
+    );
+    buf.push(',');
+    push_json_opt_str(buf, &format!("{prefix}_git_dir"), snapshot.git_dir.as_deref());
+    buf.push(',');
+    push_json_opt_str(
+        buf,
+        &format!("{prefix}_toplevel"),
+        snapshot.toplevel.as_deref(),
+    );
+    buf.push(',');
+    push_json_array(buf, &format!("{prefix}_staged_paths"), &snapshot.staged_paths);
+    buf.push(',');
+    push_json_array(
+        buf,
+        &format!("{prefix}_unstaged_paths"),
+        &snapshot.unstaged_paths,
+    );
+    buf.push(',');
+    push_json_array(
+        buf,
+        &format!("{prefix}_untracked_paths"),
+        &snapshot.untracked_paths,
+    );
+    buf.push(',');
+    push_json_opt_str(
+        buf,
+        &format!("{prefix}_factor_current_index"),
+        snapshot.factor_current_index.as_deref(),
+    );
+    buf.push(',');
+    push_json_opt_str(
+        buf,
+        &format!("{prefix}_factor_split_count"),
+        snapshot.factor_split_count.as_deref(),
+    );
+    buf.push(',');
+    push_json_opt_str(
+        buf,
+        &format!("{prefix}_factor_requires_rebase"),
+        snapshot.factor_requires_rebase.as_deref(),
+    );
+    buf.push(',');
+    push_json_opt_str(
+        buf,
+        &format!("{prefix}_factor_expected_tree"),
+        snapshot.factor_expected_tree.as_deref(),
+    );
+    buf.push(',');
+    push_json_opt_str(
+        buf,
+        &format!("{prefix}_factor_current_commit"),
+        snapshot.factor_current_commit.as_deref(),
+    );
+    buf.push(',');
+    push_json_opt_str(
+        buf,
+        &format!("{prefix}_rebase_state"),
+        snapshot.rebase_state.as_deref(),
+    );
+    buf.push(',');
+    push_json_opt_str(
+        buf,
+        &format!("{prefix}_rebase_msgnum"),
+        snapshot.rebase_msgnum.as_deref(),
+    );
+    buf.push(',');
+    push_json_opt_str(
+        buf,
+        &format!("{prefix}_rebase_end"),
+        snapshot.rebase_end.as_deref(),
+    );
+    buf.push(',');
+    push_json_opt_str(
+        buf,
+        &format!("{prefix}_rebase_todo_head"),
+        snapshot.rebase_todo_head.as_deref(),
+    );
+    buf.push(',');
+    push_json_opt_str(
+        buf,
+        &format!("{prefix}_rebase_done_tail"),
+        snapshot.rebase_done_tail.as_deref(),
+    );
+}
+
+fn append_trace_line(ctx: &Ctx<'_>, line: &str) {
+    let Some(path) = trace_log_path(ctx) else {
+        return;
+    };
+    if let Some(parent) = path.parent() {
+        drop(std::fs::create_dir_all(parent));
+    }
+    let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) else {
+        return;
+    };
+    drop(file.write_all(line.as_bytes()));
+    drop(file.write_all(b"\n"));
+}
+
+fn trace_process_command(
+    ctx: &Ctx<'_>,
+    mode: &str,
+    bin: &str,
+    args: &[&str],
+    envs: &[(&str, &str)],
+    quiet: bool,
+    duration_ms: u128,
+    exit_code: Option<i32>,
+    stdout: Option<&str>,
+    stderr: Option<&str>,
+    spawned: bool,
+    before: &RepoSnapshot,
+    after: &RepoSnapshot,
+) {
+    if trace_log_path(ctx).is_none() {
+        return;
+    }
+
+    let mut line = String::new();
+    line.push('{');
+    push_json_u128(&mut line, "ts_unix_ms", now_unix_ms());
+    line.push(',');
+    push_json_str(&mut line, "event", "process");
+    line.push(',');
+    push_json_str(&mut line, "mode", mode);
+    line.push(',');
+    push_json_str(&mut line, "bin", bin);
+    line.push(',');
+    let argv = args.iter().map(|arg| (*arg).to_owned()).collect::<Vec<String>>();
+    push_json_array(&mut line, "args", &argv);
+    line.push(',');
+    let env_arr = envs
+        .iter()
+        .map(|(key, value)| format!("{key}={value}"))
+        .collect::<Vec<String>>();
+    push_json_array(&mut line, "env", &env_arr);
+    line.push(',');
+    push_json_bool(&mut line, "quiet", quiet);
+    line.push(',');
+    push_json_bool(&mut line, "spawned", spawned);
+    line.push(',');
+    push_json_u128(&mut line, "duration_ms", duration_ms);
+    line.push(',');
+    if let Some(code) = exit_code {
+        push_json_i32(&mut line, "exit_code", code);
+    } else {
+        push_json_opt_str(&mut line, "exit_code", None);
+    }
+    line.push(',');
+    push_json_opt_str(
+        &mut line,
+        "stdout",
+        stdout.map(trace_text_limit).as_deref(),
+    );
+    line.push(',');
+    push_json_opt_str(
+        &mut line,
+        "stderr",
+        stderr.map(trace_text_limit).as_deref(),
+    );
+    line.push(',');
+    push_snapshot_fields(&mut line, "before", before);
+    line.push(',');
+    push_snapshot_fields(&mut line, "after", after);
+    line.push('}');
+    append_trace_line(ctx, &line);
+}
+
+/// Writes a note event into the trace log, if tracing is enabled.
+pub(super) fn trace_note(ctx: &Ctx<'_>, event: &str, fields: &[(&str, &str)]) {
+    if trace_log_path(ctx).is_none() {
+        return;
+    }
+    let snapshot = collect_repo_snapshot(ctx);
+    let mut line = String::new();
+    line.push('{');
+    push_json_u128(&mut line, "ts_unix_ms", now_unix_ms());
+    line.push(',');
+    push_json_str(&mut line, "event", event);
+    line.push(',');
+    push_snapshot_fields(&mut line, "state", &snapshot);
+    for &(key, value) in fields {
+        line.push(',');
+        push_json_str(&mut line, key, value);
+    }
+    line.push('}');
+    append_trace_line(ctx, &line);
+}
 
 /// Spawns a command and returns its exit status.
 ///
@@ -14,9 +477,60 @@ pub(super) fn command_status_with(
     quiet: bool,
 ) -> Result<ExitStatus, FactorError> {
     let first_arg = args.first().copied().unwrap_or("");
-    ctx.runner
-        .status(bin, args, envs, quiet, &ctx.cwd)
-        .map_err(|err| FactorError::GitCommand(format!("{bin} {first_arg}: {err}")))
+    let trace_enabled = trace_log_path(ctx).is_some();
+    let before = if trace_enabled {
+        Some(collect_repo_snapshot(ctx))
+    } else {
+        None
+    };
+    let started = Instant::now();
+    let result = ctx.runner.status(bin, args, envs, quiet, &ctx.cwd);
+    let duration_ms = started.elapsed().as_millis();
+    match result {
+        Ok(status) => {
+            if let Some(before) = before.as_ref() {
+                let after = collect_repo_snapshot(ctx);
+                trace_process_command(
+                    ctx,
+                    "status",
+                    bin,
+                    args,
+                    envs,
+                    quiet,
+                    duration_ms,
+                    Some(status.code().unwrap_or(EXIT_SOFTWARE)),
+                    None,
+                    None,
+                    true,
+                    before,
+                    &after,
+                );
+            }
+            Ok(status)
+        }
+        Err(err) => {
+            if let Some(before) = before.as_ref() {
+                let after = collect_repo_snapshot(ctx);
+                let err_text = err.to_string();
+                trace_process_command(
+                    ctx,
+                    "status",
+                    bin,
+                    args,
+                    envs,
+                    quiet,
+                    duration_ms,
+                    None,
+                    None,
+                    Some(err_text.as_str()),
+                    false,
+                    before,
+                    &after,
+                );
+            }
+            Err(FactorError::GitCommand(format!("{bin} {first_arg}: {err}")))
+        }
+    }
 }
 
 /// Runs `git <args...>` and returns its exit status.
@@ -131,16 +645,64 @@ pub(super) fn git_output_with(
     bin: &str,
     args: &[&str],
 ) -> Result<String, FactorError> {
-    let output = ctx.runner.output(bin, args, &ctx.cwd).map_err(|err| {
+    let trace_enabled = trace_log_path(ctx).is_some();
+    let before = if trace_enabled {
+        Some(collect_repo_snapshot(ctx))
+    } else {
+        None
+    };
+    let started = Instant::now();
+    let output = ctx.runner.output(bin, args, &ctx.cwd);
+    let duration_ms = started.elapsed().as_millis();
+    let output = output.map_err(|err| {
+        if let Some(before) = before.as_ref() {
+            let after = collect_repo_snapshot(ctx);
+            let err_text = err.to_string();
+            trace_process_command(
+                ctx,
+                "output",
+                bin,
+                args,
+                &[],
+                false,
+                duration_ms,
+                None,
+                None,
+                Some(err_text.as_str()),
+                false,
+                before,
+                &after,
+            );
+        }
         FactorError::GitCommand(format!("git {}: {err}", args.first().unwrap_or(&"")))
     })?;
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
-        return Err(FactorError::GitCommand(stderr));
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    if let Some(before) = before.as_ref() {
+        let after = collect_repo_snapshot(ctx);
+        trace_process_command(
+            ctx,
+            "output",
+            bin,
+            args,
+            &[],
+            false,
+            duration_ms,
+            Some(output.status.code().unwrap_or(EXIT_SOFTWARE)),
+            Some(stdout.as_str()),
+            Some(stderr.as_str()),
+            true,
+            before,
+            &after,
+        );
     }
 
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+    if !output.status.success() {
+        return Err(FactorError::GitCommand(stderr.trim().to_owned()));
+    }
+
+    Ok(stdout.trim().to_owned())
 }
 
 /// Returns true if a factor session is currently active.
@@ -153,7 +715,7 @@ pub(super) fn is_root_commit_in(ctx: &Ctx<'_>, sha: &CommitSha) -> bool {
     command_status_with(
         ctx,
         "git",
-        &["rev-parse", "--verify", "--quiet", &format!("{sha}^")],
+        &["rev-parse", "--quiet", "--verify", &format!("{sha}^")],
         &[],
         true,
     )
@@ -320,7 +882,7 @@ pub(super) fn remove_empty_root_in(ctx: &Ctx<'_>) -> Result<(), FactorError> {
     drop(command_status_with(
         ctx,
         "git",
-        &["rebase", "--quiet", "--root", "--interactive"],
+        &["rebase", "--interactive", "--quiet", "--root"],
         &[("GIT_SEQUENCE_EDITOR", &seq_editor)],
         false,
     ));
@@ -340,7 +902,7 @@ pub(super) fn mixed_reset_to_empty(ctx: &Ctx<'_>) -> Result<(), FactorError> {
     const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 
     let commit_sha = git_output(ctx, &["commit-tree", EMPTY_TREE, "-m", "empty"])?;
-    run_git(ctx, &["reset", "--quiet", "--mixed", &commit_sha])
+    run_git(ctx, &["reset", "--quiet", &commit_sha])
 }
 
 /// Resolves a commit reference to a full SHA.
@@ -425,12 +987,7 @@ pub(super) fn run_git(ctx: &Ctx<'_>, args: &[&str]) -> Result<(), FactorError> {
 
 /// Runs a git command using the provided executable name/path.
 pub(super) fn run_git_with(ctx: &Ctx<'_>, bin: &str, args: &[&str]) -> Result<(), FactorError> {
-    let status = ctx
-        .runner
-        .status(bin, args, &[], false, &ctx.cwd)
-        .map_err(|err| {
-            FactorError::GitCommand(format!("git {}: {err}", args.first().unwrap_or(&"")))
-        })?;
+    let status = command_status_with(ctx, bin, args, &[], false)?;
 
     if status.success() {
         Ok(())
@@ -494,7 +1051,7 @@ pub(super) fn validate_not_merge(ctx: &Ctx<'_>, sha: &CommitSha) -> Result<(), F
     let has_second_parent = command_status_with(
         ctx,
         "git",
-        &["rev-parse", "--verify", "--quiet", &format!("{sha}^2")],
+        &["rev-parse", "--quiet", "--verify", &format!("{sha}^2")],
         &[],
         true,
     )
