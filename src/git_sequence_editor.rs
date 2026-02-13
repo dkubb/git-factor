@@ -127,6 +127,7 @@ mod tests {
     use std::path::Path;
 
     use non_empty_string::NonEmptyString;
+    use tempfile::TempDir;
 
     use super::todo::{
         Action, TodoSha, is_hex40, parse_todo_action, parse_todo_sha, resolve_requested_sha,
@@ -237,5 +238,17 @@ exec echo hi\n\
         assert_eq!(parse_todo_sha("merge -C deadbeef topic"), None);
         assert_eq!(parse_todo_sha("noop"), None);
         assert_eq!(parse_todo_sha("update-ref refs/heads/main"), None);
+    }
+
+    #[test]
+    fn run_for_reports_missing_todo_file() {
+        let dir = TempDir::new().expect("tempdir");
+        let todo_path = dir.path().join("missing-todo");
+        let cli = Cli::for_tests(vec![], vec![], todo_path, vec![]);
+        let err = run_for(&cli).expect_err("must fail for missing todo file");
+        assert!(
+            err.starts_with("failed to read todo file:"),
+            "unexpected error: {err}"
+        );
     }
 }
