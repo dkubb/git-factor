@@ -548,3 +548,235 @@ HINTS:
     }
 
     fn expected_single_commit_start_with_reference_and_claude_stdout(
+        short_sha: &str,
+        message: &str,
+        reference_path: &Path,
+    ) -> String {
+        format!(
+            "\
+Unstaged changes after reset:
+M\tfile.txt
+FACTOR: Split session started for {short_sha}.
+ORIGINAL MESSAGE: {message}
+UNSTAGED:
+  file.txt | 1 +
+   1 file changed, 1 insertion(+)
+UNTRACKED:
+  references/rust.md
+
+NEXT: Stage changes for the first atomic commit, then run:
+  git factor --continue --message \"type: description\"
+
+Run git factor --help for the full workflow guide.
+
+HINTS:
+  - Find the ONE smallest addition nothing depends on
+  - Target 15-30 lines (50 max)
+  - Message: single concrete action, no \"and\"/\"or\"
+  - Verify: git log --oneline | wc -l
+  - NEVER use git commit. ONLY use git factor --continue.
+  REMAINING:  1 file changed, 1 insertion(+)
+  REFERENCE: {}
+  RECOVERY: git factor --abort
+<claude>
+- If context is above 50%, pause and ask the user to /compact.
+- Do NOT stop early. Keep committing until \"Complete\".
+- Do NOT use git commit directly. ONLY use git-factor --continue.
+- Each commit MUST pass the exec gate. No shortcuts.
+</claude>
+",
+            reference_path.display()
+        )
+    }
+
+    fn expected_single_commit_start_with_claude_no_reference_stdout(
+        short_sha: &str,
+        message: &str,
+    ) -> String {
+        format!(
+            "\
+Unstaged changes after reset:
+M\tfile.txt
+FACTOR: Split session started for {short_sha}.
+ORIGINAL MESSAGE: {message}
+UNSTAGED:
+  file.txt | 1 +
+   1 file changed, 1 insertion(+)
+
+NEXT: Stage changes for the first atomic commit, then run:
+  git factor --continue --message \"type: description\"
+
+Run git factor --help for the full workflow guide.
+
+HINTS:
+  - Find the ONE smallest addition nothing depends on
+  - Target 15-30 lines (50 max)
+  - Message: single concrete action, no \"and\"/\"or\"
+  - Verify: git log --oneline | wc -l
+  - NEVER use git commit. ONLY use git factor --continue.
+  REMAINING:  1 file changed, 1 insertion(+)
+  RECOVERY: git factor --abort
+<claude>
+- If context is above 50%, pause and ask the user to /compact.
+- Do NOT stop early. Keep committing until \"Complete\".
+- Do NOT use git commit directly. ONLY use git-factor --continue.
+- Each commit MUST pass the exec gate. No shortcuts.
+</claude>
+"
+        )
+    }
+
+    fn expected_help_stdout() -> &'static str {
+        "\
+Split a large git commit into smaller atomic commits
+
+Usage: git-factor [OPTIONS] [COMMIT]...
+
+Arguments:
+  [COMMIT]...
+          Commit(s) or ranges to split (e.g. SHA, A..B, main..HEAD).
+          
+          Accepts full or short SHAs, branch names, and revision ranges. Ranges are expanded via git rev-list in chronological order. Multiple refs can be specified and are deduplicated automatically.
+
+Options:
+  -h, --help
+          Print help (see a summary with '-h')
+
+Session Control:
+      --abort
+          Abort the current factor session and restore the repository
+
+      --continue
+          Continue by committing the currently staged changes.
+          
+          Stages must contain changes and the exec gate must pass. After committing, remaining changes are restored as unstaged changes.
+
+      --finish
+          Commit all remaining changes and finish the current commit.
+          
+          Cherry-picks the original commit to restore all remaining changes, verifies the tree hash matches, then runs the exec gate. When no --message is given, reuses the original commit message.
+
+Start Options:
+      --exec <COMMAND>
+          Shell command(s) to run as a validation gate after each split commit.
+          
+          Multiple --exec flags are joined with && and also passed to git rebase --exec. The command must have valid bash syntax.
+
+Commit Options:
+  -m, --message <MSG>
+          Commit message for the split commit.
+          
+          Required with --continue. Optional with --finish (defaults to the original commit message). Multiple --message flags produce separate paragraphs, matching git commit behavior.
+
+WORKFLOW:
+  1. Start a session:    git factor --exec 'make test' HEAD
+  2. Stage changes:      git add --patch -- <path>
+  3. Commit a slice:     git factor --continue --message 'type: description'
+  4. Repeat steps 2-3 for each atomic commit.
+  5. Finish remaining:   git factor --finish
+
+  Each split commit must pass the exec gate independently.
+  Use --finish without --message to reuse the original commit message.
+
+EXAMPLES:
+  Split the latest commit, running tests after each split:
+    git factor --exec 'cargo test' HEAD
+
+  Split three commits in a range:
+    git factor --exec 'make check' HEAD~3..HEAD
+
+  Split two specific commits:
+    git factor --exec 'npm test' abc1234 def5678
+
+  Continue with a multi-paragraph commit message:
+    git factor --continue --message 'feat: add login' --message 'Implements OAuth2 flow.'
+
+  Finish with the original commit message:
+    git factor --finish
+
+  Abort and restore the repository:
+    git factor --abort
+"
+    }
+
+    fn expected_completion_stdout_suffix(split_count: u32) -> String {
+        format!("FACTOR: Complete. Final commit split into {split_count} commits.\n")
+    }
+
+    fn execute_expectation(expectation: GitFactorExpectation) {
+        let bin_path = expectation.bin_path.clone().unwrap_or_else(git_factor_bin);
+        let mut command = Command::new(&bin_path);
+        if let Some(repo) = expectation.repo.as_ref() {
+            command.current_dir(repo);
+        }
+        command.args(&expectation.args);
+        if let Some(path_env) = expectation.path_env.as_ref() {
+            command.env("PATH", path_env);
+        }
+        for entry in &expectation.envs {
+            command.env(&entry.0, &entry.1);
+        }
+        assert_git_factor_command(&mut command, expectation);
+    }
+
+    fn run_git_factor(repo: &Path, args: &[&str], expected: GitFactorExpectation) {
+        let mut expectation = expected;
+        expectation.args = args.iter().map(OsString::from).collect();
+        expectation.repo = Some(repo.to_path_buf());
+        execute_expectation(expectation);
+    }
+
+    fn run_git_factor_in_dir(dir: &Path, args: &[&str], expected: GitFactorExpectation) {
+        let mut expectation = expected;
+        expectation.args = args.iter().map(OsString::from).collect();
+        expectation.repo = Some(dir.to_path_buf());
+        execute_expectation(expectation);
+    }
+
+    fn run_git_factor_no_repo(args: &[&str], expected: GitFactorExpectation) {
+        let mut expectation = expected;
+        expectation.args = args.iter().map(OsString::from).collect();
+        execute_expectation(expectation);
+    }
+
+    fn run_git_factor_with_prefixed_path(
+        repo: &Path,
+        args: &[&str],
+        expected: GitFactorExpectation,
+        path_env: OsString,
+    ) {
+        let mut expectation = expected;
+        expectation.args = args.iter().map(OsString::from).collect();
+        expectation.path_env = Some(path_env);
+        expectation.repo = Some(repo.to_path_buf());
+        execute_expectation(expectation);
+    }
+
+    fn run_git_factor_with_env(
+        repo: &Path,
+        args: &[&str],
+        expected: GitFactorExpectation,
+        key: impl Into<OsString>,
+        value: impl Into<OsString>,
+    ) {
+        let mut expectation = expected;
+        expectation.args = args.iter().map(OsString::from).collect();
+        expectation.envs.push((key.into(), value.into()));
+        expectation.repo = Some(repo.to_path_buf());
+        execute_expectation(expectation);
+    }
+
+    fn run_git_factor_with_bin(
+        repo: &Path,
+        bin_path: &Path,
+        args: &[&str],
+        expected: GitFactorExpectation,
+    ) {
+        let mut expectation = expected;
+        expectation.args = args.iter().map(OsString::from).collect();
+        expectation.bin_path = Some(bin_path.to_path_buf());
+        expectation.repo = Some(repo.to_path_buf());
+        execute_expectation(expectation);
+    }
+
+    #[test]
