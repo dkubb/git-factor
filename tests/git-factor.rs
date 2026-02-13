@@ -2189,3 +2189,31 @@ fi
     }
 
     #[test]
+    fn abort_mid_rebase_cleans_untracked_files() {
+        let dir = init_repo();
+        let repo = dir.path();
+
+        commit_file(repo, "file.txt", "one\n", "chore: base");
+        commit_file(repo, "file.txt", "one\ntwo\n", "feat: change");
+        commit_file(repo, "file.txt", "one\ntwo\nthree\n", "feat: latest");
+
+        run_git_factor(
+            repo,
+            &["--exec", "true", "HEAD~1"],
+            GitFactorExpectation::default()
+                .rebase_merge_exists(true)
+                .rebase_apply_exists(false),
+        );
+
+        write_file(repo, "untracked.txt", "hello\n");
+
+        run_git_factor(
+            repo,
+            &["--abort"],
+            GitFactorExpectation::default()
+                .path_exists("untracked.txt", false)
+                .git_status_porcelain(""),
+        );
+    }
+
+    #[test]
