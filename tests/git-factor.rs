@@ -3263,3 +3263,33 @@ fi
     }
 
     #[test]
+    fn finish_rejects_empty_original_message_when_no_message_provided() {
+        let dir = init_repo();
+        let repo = dir.path();
+
+        commit_file(repo, "file.txt", "one\n", "chore: base");
+        git(
+            repo,
+            &[
+                "commit",
+                "--allow-empty",
+                "--allow-empty-message",
+                "--message",
+                "",
+            ],
+        );
+
+        start_session(repo);
+
+        // Stage everything and attempt to finish with no message; tool should
+        // refuse to reuse an empty original message.
+        git(repo, &["add", "--all"]);
+        run_git_factor(
+            repo,
+            &["--finish"],
+            GitFactorExpectation::default()
+                .code(EXIT_SOFTWARE)
+                .stderr("git command failed: original commit has empty message\n"),
+        );
+    }
+
