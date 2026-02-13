@@ -50,8 +50,9 @@ use self::helpers::{
     head_ref_literal, is_factor_active_in, is_mid_rebase_in, is_root_commit_in,
     mixed_reset_to_empty, print_hints_in, print_session_started, read_state,
     read_state_bool_or_default, read_state_parsed, remove_empty_root_in, resolve_commit,
-    resolve_commit_refs, run_git, shell_quote, sort_topologically, status_code, trace_note,
-    validate_ancestor, validate_exec_syntax, validate_not_merge, write_state,
+    resolve_commit_refs, run_git, run_git_non_interactive, shell_quote, sort_topologically,
+    status_code, trace_note, validate_ancestor, validate_exec_syntax, validate_not_merge,
+    write_state,
 };
 use self::types::{CommitSha, Commits};
 
@@ -362,7 +363,7 @@ fn advance_to_next_commit_in(ctx: &Ctx<'_>, state_dir: &Path) -> Result<bool, Fa
             return Err(FactorError::GitCommand("no rebase in progress".to_owned()));
         }
 
-        run_git(ctx, &["rebase", "--continue"])?;
+        run_git_non_interactive(ctx, &["rebase", "--continue"])?;
 
         if is_mid_rebase_in(ctx) {
             // Capture the rewritten commit tree for the next edit stop before
@@ -878,7 +879,7 @@ fn cmd_start_in(
             ctx,
             "git",
             &rebase_args,
-            &[("GIT_SEQUENCE_EDITOR", &seq_editor)],
+            &[("GIT_EDITOR", "false"), ("GIT_SEQUENCE_EDITOR", &seq_editor)],
             false,
         )?;
 

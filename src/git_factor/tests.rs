@@ -1693,7 +1693,7 @@ fn cmd_start_range_ref_inserts_shas_and_propagates_io_error_on_multi_commit_bann
                 "true",
                 &format!("{sha_a}^"),
             ],
-            &[("GIT_SEQUENCE_EDITOR", &seq_editor)],
+            &[("GIT_EDITOR", "false"), ("GIT_SEQUENCE_EDITOR", &seq_editor)],
             false,
             repo,
             0,
@@ -1771,7 +1771,7 @@ fn advance_to_next_commit_prints_untracked_changes_when_present() {
     fs::write(state_dir.join("split_count"), "3\n").expect("write split_count");
 
     let runner = ScriptedRunner::default()
-        .with_status("git", &["rebase", "--continue"], &[], false, repo, 0)
+        .with_status("git", &["rebase", "--continue"], &[("GIT_EDITOR", "false"), ("GIT_SEQUENCE_EDITOR", "false")], false, repo, 0)
         .with_output("git", &["rev-parse", "HEAD^{tree}"], repo, "head_tree\n")
         .with_status("git", &["reset", "--quiet", "HEAD~1"], &[], false, repo, 0)
         .with_output("git", &["rev-parse", "--git-dir"], repo, ".git\n")
@@ -1867,7 +1867,7 @@ fn advance_to_next_commit_propagates_io_error_when_outln_fails_mid_rebase() {
     fs::write(state_dir.join("split_count"), "3\n").expect("write split_count");
 
     let runner = ScriptedRunner::default()
-        .with_status("git", &["rebase", "--continue"], &[], false, repo, 0)
+        .with_status("git", &["rebase", "--continue"], &[("GIT_EDITOR", "false"), ("GIT_SEQUENCE_EDITOR", "false")], false, repo, 0)
         .with_output("git", &["rev-parse", "HEAD^{tree}"], repo, "head_tree\n")
         .with_status("git", &["reset", "--quiet", "HEAD~1"], &[], false, repo, 0)
         .with_output("git", &["rev-parse", "--git-dir"], repo, ".git\n")
@@ -1957,7 +1957,7 @@ fn advance_to_next_commit_errors_on_current_index_overflow() {
         .expect("write current_index");
 
     let runner = ScriptedRunner::default()
-        .with_status("git", &["rebase", "--continue"], &[], false, repo, 0)
+        .with_status("git", &["rebase", "--continue"], &[("GIT_EDITOR", "false"), ("GIT_SEQUENCE_EDITOR", "false")], false, repo, 0)
         .with_output("git", &["rev-parse", "HEAD^{tree}"], repo, "head_tree\n")
         .with_output("git", &["rev-parse", "--git-dir"], repo, ".git\n");
     let io = TestIo::default();
@@ -2025,7 +2025,7 @@ fn advance_to_next_commit_omits_untracked_section_when_empty() {
     fs::write(state_dir.join("split_count"), "1\n").expect("write split_count");
 
     let runner = ScriptedRunner::default()
-        .with_status("git", &["rebase", "--continue"], &[], false, repo, 0)
+        .with_status("git", &["rebase", "--continue"], &[("GIT_EDITOR", "false"), ("GIT_SEQUENCE_EDITOR", "false")], false, repo, 0)
         .with_output("git", &["rev-parse", "HEAD^{tree}"], repo, "head_tree\n")
         .with_status("git", &["reset", "--quiet", "HEAD~1"], &[], false, repo, 0)
         .with_output("git", &["rev-parse", "--git-dir"], repo, ".git\n")
