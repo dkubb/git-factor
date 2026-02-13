@@ -2087,28 +2087,46 @@ fn advance_to_next_commit_omits_untracked_section_when_empty() {
 }
 
 #[test]
-fn rehydrate_pool_preserving_index_succeeds_when_cherry_pick_succeeds() {
+fn rehydrate_pool_preserving_index_succeeds_when_restore_succeeds() {
     let dir = TempDir::new().expect("tempdir");
     let repo = dir.path();
 
+    let original = "a".repeat(40);
+    let expected_tree = "feedface\n";
     let runner = ScriptedRunner::default()
-        .with_output("git", &["write-tree"], repo, "deadbeef\n")
+        .with_output("git", &["write-tree"], repo, "feedface\n")
         .with_status(
             "git",
             &[
-                "cherry-pick",
-                "--no-commit",
-                "--strategy-option",
-                "theirs",
-                &"a".repeat(40),
+                "restore",
+                "--source",
+                original.as_str(),
+                "--staged",
+                "--worktree",
+                "--",
+                ".",
             ],
             &[],
             false,
             repo,
             0,
         )
-        .with_status("git", &["cherry-pick", "--quit"], &[], false, repo, 0)
-        .with_status("git", &["read-tree", "deadbeef"], &[], false, repo, 0);
+        .with_status(
+            "git",
+            &["clean", "--force", "--quiet", "-d"],
+            &[],
+            false,
+            repo,
+            0,
+        )
+        .with_output(
+            "git",
+            &["rev-parse", &format!("{original}^{{tree}}")],
+            repo,
+            expected_tree,
+        )
+        .with_output("git", &["write-tree"], repo, expected_tree)
+        .with_status("git", &["read-tree", "feedface"], &[], false, repo, 0);
 
     let io = TestIo::default();
     let env = TestEnv {
@@ -2122,7 +2140,7 @@ fn rehydrate_pool_preserving_index_succeeds_when_cherry_pick_succeeds() {
         fs: &REAL_FS,
     };
 
-    let commit = CommitSha::new("a".repeat(40)).expect("sha");
+    let commit = CommitSha::new(original).expect("sha");
     let result = rehydrate_pool_preserving_index(&ctx, &commit);
 
     assert!(result.is_ok(), "rehydrate should succeed");
@@ -2131,11 +2149,11 @@ fn rehydrate_pool_preserving_index_succeeds_when_cherry_pick_succeeds() {
 }
 
 #[test]
-fn rehydrate_pool_preserving_index_propagates_cherry_pick_status_error() {
+fn rehydrate_pool_preserving_index_propagates_restore_status_error() {
     let dir = TempDir::new().expect("tempdir");
     let repo = dir.path();
 
-    let runner = ScriptedRunner::default().with_output("git", &["write-tree"], repo, "deadbeef\n");
+    let runner = ScriptedRunner::default().with_output("git", &["write-tree"], repo, "feedface\n");
 
     let io = TestIo::default();
     let env = TestEnv {
@@ -2156,7 +2174,7 @@ fn rehydrate_pool_preserving_index_propagates_cherry_pick_status_error() {
         matches!(
             &err,
             FactorError::GitCommand(msg)
-                if msg.contains("git cherry-pick:") && msg.contains("unexpected status call")
+                if msg.contains("git restore:") && msg.contains("unexpected status call")
         ),
         "err was: {err:?}"
     );
@@ -2510,6 +2528,7 @@ fn cmd_continue_propagates_cherry_pick_status_error() {
 }
 
 #[test]
+#[expect(clippy::too_many_lines, reason = "explicit scripted git call sequence")]
 fn cmd_finish_errors_on_split_count_overflow() {
     let dir = TempDir::new().expect("tempdir");
     let repo = dir.path();
@@ -2559,18 +2578,34 @@ fn cmd_finish_errors_on_split_count_overflow() {
         .with_status(
             "git",
             &[
-                "cherry-pick",
-                "--no-commit",
-                "--strategy-option",
-                "theirs",
+                "restore",
+                "--source",
                 original.as_str(),
+                "--staged",
+                "--worktree",
+                "--",
+                ".",
             ],
             &[],
             false,
             repo,
             0,
         )
-        .with_status("git", &["cherry-pick", "--quit"], &[], false, repo, 0)
+        .with_status(
+            "git",
+            &["clean", "--force", "--quiet", "-d"],
+            &[],
+            false,
+            repo,
+            0,
+        )
+        .with_output(
+            "git",
+            &["rev-parse", &format!("{original}^{{tree}}")],
+            repo,
+            expected_tree_output,
+        )
+        .with_output("git", &["write-tree"], repo, expected_tree_output)
         .with_output("git", &["write-tree"], repo, expected_tree_output)
         .with_status("git", &["diff", "--cached", "--quiet"], &[], false, repo, 1)
         .with_status("bash", &["-c", "true"], &[], false, repo, 0)
@@ -2614,7 +2649,7 @@ fn cmd_finish_errors_on_split_count_overflow() {
 }
 
 #[test]
-fn cmd_finish_propagates_final_cherry_pick_status_error() {
+fn cmd_finish_propagates_final_restore_status_error() {
     let dir = TempDir::new().expect("tempdir");
     let repo = dir.path();
     let git_dir = repo.join(".git");
@@ -2662,12 +2697,12 @@ fn cmd_finish_propagates_final_cherry_pick_status_error() {
         fs: &REAL_FS,
     };
 
-    let err = cmd_finish_in(&ctx, &messages).expect_err("expected cherry-pick status error");
+    let err = cmd_finish_in(&ctx, &messages).expect_err("expected restore status error");
     assert!(
         matches!(
             &err,
             FactorError::GitCommand(msg)
-                if msg.contains("git cherry-pick:") && msg.contains("unexpected status call")
+                if msg.contains("git restore:") && msg.contains("unexpected status call")
         ),
         "err was: {err:?}"
     );
@@ -2712,18 +2747,34 @@ fn cmd_finish_propagates_git_commit_preserving_metadata_error() {
         .with_status(
             "git",
             &[
-                "cherry-pick",
-                "--no-commit",
-                "--strategy-option",
-                "theirs",
+                "restore",
+                "--source",
                 original.as_str(),
+                "--staged",
+                "--worktree",
+                "--",
+                ".",
             ],
             &[],
             false,
             repo,
             0,
         )
-        .with_status("git", &["cherry-pick", "--quit"], &[], false, repo, 0)
+        .with_status(
+            "git",
+            &["clean", "--force", "--quiet", "-d"],
+            &[],
+            false,
+            repo,
+            0,
+        )
+        .with_output(
+            "git",
+            &["rev-parse", &format!("{original}^{{tree}}")],
+            repo,
+            expected_tree_output,
+        )
+        .with_output("git", &["write-tree"], repo, expected_tree_output)
         .with_output("git", &["write-tree"], repo, expected_tree_output)
         .with_status("git", &["diff", "--cached", "--quiet"], &[], false, repo, 1)
         .with_status("bash", &["-c", "true"], &[], false, repo, 0);

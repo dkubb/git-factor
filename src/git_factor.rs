@@ -482,6 +482,7 @@ fn cmd_continue_in(ctx: &Ctx<'_>, messages: &NonEmpty<NonEmptyString>) -> Result
         ctx,
         &[
             "cherry-pick",
+            "--empty=drop",
             "--strategy-option",
             "theirs",
             original_commit.as_str(),
@@ -516,8 +517,10 @@ fn cmd_continue_in(ctx: &Ctx<'_>, messages: &NonEmpty<NonEmptyString>) -> Result
         // No more changes remain for this commit; advance to next or finish.
         advance_to_next_commit_in(ctx, &state_dir)?;
     } else {
-        // More changes remain.
-        run_git(ctx, &["reset", "--mixed", "HEAD~1"])?;
+        // More changes remain. Re-pin to the original commit tree before
+        // exposing the remainder as unstaged changes.
+        pin_worktree_and_index_to_commit(ctx, &original_commit)?;
+        run_git(ctx, &["reset", "--mixed", head_before.as_str()])?;
         let stat_output = git_output(ctx, &["diff", "--stat"])?;
         let untracked_output = git_output(ctx, &["ls-files", "--others", "--exclude-standard"])?;
 
@@ -552,34 +555,7 @@ fn rehydrate_pool_preserving_index(
     original_commit: &CommitSha,
 ) -> Result<(), FactorError> {
     let idx_tree = git_output(ctx, &["write-tree"])?;
-
-    let status = git_status(
-        ctx,
-        &[
-            "cherry-pick",
-            "--no-commit",
-            "--strategy-option",
-            "theirs",
-            original_commit.as_str(),
-        ],
-    )?;
-
-    if !status.success() {
-        let unmerged = git_output(ctx, &["diff", "--name-only", "--diff-filter=U"])?;
-        if !unmerged.is_empty() {
-            return Err(FactorError::GitCommand(format!(
-                "rehydrate cherry-pick left conflicts:\n{unmerged}"
-            )));
-        }
-    }
-
-    let quit_status = git_status(ctx, &["cherry-pick", "--quit"])?;
-    if !quit_status.success() {
-        return Err(FactorError::GitCommand(format!(
-            "git cherry-pick --quit failed (exit {})",
-            status_code(quit_status)
-        )));
-    }
+    pin_worktree_and_index_to_commit(ctx, original_commit)?;
 
     let read_tree_status = git_status(ctx, &["read-tree", idx_tree.as_str()])?;
     if !read_tree_status.success() {
@@ -612,6 +588,39 @@ fn materialize_index_to_worktree(ctx: &Ctx<'_>) -> Result<(), FactorError> {
     Ok(())
 }
 
+/// Re-pins both index and worktree to the original commit tree.
+///
+/// This provides a deterministic baseline before exposing the remaining
+/// unstaged pool for the next split.
+fn pin_worktree_and_index_to_commit(
+    ctx: &Ctx<'_>,
+    original_commit: &CommitSha,
+) -> Result<(), FactorError> {
+    run_git(
+        ctx,
+        &[
+            "restore",
+            "--source",
+            original_commit.as_str(),
+            "--staged",
+            "--worktree",
+            "--",
+            ".",
+        ],
+    )?;
+    run_git(ctx, &["clean", "--force", "--quiet", "-d"])?;
+
+    let expected_tree = git_output(ctx, &["rev-parse", &format!("{original_commit}^{{tree}}")])?;
+    let actual_tree = git_output(ctx, &["write-tree"])?;
+    if actual_tree != expected_tree {
+        return Err(FactorError::TreeHashMismatch {
+            actual: actual_tree,
+            expected: expected_tree,
+        });
+    }
+
+    Ok(())
+}
 /// Finishes the factor session by committing all remaining staged changes.
 fn cmd_finish_in(ctx: &Ctx<'_>, messages: &[NonEmptyString]) -> Result<i32, FactorError> {
     if !is_factor_active_in(ctx) {
@@ -629,39 +638,8 @@ fn cmd_finish_in(ctx: &Ctx<'_>, messages: &[NonEmptyString]) -> Result<i32, Fact
     // Clean unstaged/untracked changes.
     run_git(ctx, &["checkout", "--", "."])?;
     run_git(ctx, &["clean", "--force", "--quiet", "-d"])?;
-
-    // Cherry-pick the original commit without committing to stage remaining changes.
-    // With --strategy-option theirs, conflicts are auto-resolved in favor of the
-    // original commit.
-    let cherry_status = git_status(
-        ctx,
-        &[
-            "cherry-pick",
-            "--no-commit",
-            "--strategy-option",
-            "theirs",
-            original_commit.as_str(),
-        ],
-    )?;
-
-    if !cherry_status.success() {
-        let unmerged = git_output(ctx, &["diff", "--name-only", "--diff-filter=U"])?;
-        if !unmerged.is_empty() {
-            drop(command_status_with(
-                ctx,
-                "git",
-                &["cherry-pick", "--abort"],
-                &[],
-                true,
-            ));
-            return Err(FactorError::GitCommand(format!(
-                "final cherry-pick left conflicts:\n{unmerged}"
-            )));
-        }
-    }
-
-    // Clear sequencer state while keeping the index/worktree changes.
-    run_git(ctx, &["cherry-pick", "--quit"])?;
+    // Re-pin to the original commit tree to stage the full remainder.
+    pin_worktree_and_index_to_commit(ctx, &original_commit)?;
 
     // Resolve effective messages: use original commit message when none provided.
     let effective_messages: NonEmpty<NonEmptyString> = if messages.is_empty() {
@@ -731,10 +709,44 @@ fn cmd_finish_in(ctx: &Ctx<'_>, messages: &[NonEmptyString]) -> Result<i32, Fact
     Ok(EXIT_OK)
 }
 
+/// Runs the on-enter exec gate for HEAD factoring during an existing rebase.
+fn run_on_enter_exec_gate_for_active_rebase_head(
+    ctx: &Ctx<'_>,
+    is_mid_rebase: bool,
+    single_head_session: bool,
+    exec_command: &NonEmptyString,
+) -> Result<(), FactorError> {
+    if !(is_mid_rebase && single_head_session) {
+        return Ok(());
+    }
+
+    let status = command_status_with(ctx, "bash", &["-c", exec_command.as_str()], &[], false)?;
+    if status.success() {
+        return Ok(());
+    }
+
+    let code = status_code(status);
+    ctx.outln("FACTOR: On-enter exec gate failed for current commit.")?;
+    ctx.outln(&format!("EXEC: {exec_command}"))?;
+    ctx.outln(&format!("CODE: {code}"))?;
+    ctx.out("\n")?;
+    ctx.outln("NEXT: Fix the commit and amend it.")?;
+    ctx.outln("THEN: Run `git rebase --continue`, then run `git factor` again.")?;
+
+    Err(FactorError::ExecFailed {
+        code,
+        command: exec_command.clone(),
+    })
+}
+
 /// Starts a new factor session.
 #[expect(
     clippy::single_call_fn,
     reason = "Command handler dispatched from run()"
+)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "start command orchestrates validation, rebase setup, and session bootstrap"
 )]
 fn cmd_start_in(
     ctx: &Ctx<'_>,
@@ -747,17 +759,18 @@ fn cmd_start_in(
     if ctx.fs.is_dir(&state_dir) {
         return Err(FactorError::ActiveSession);
     }
-    if is_mid_rebase_in(ctx) {
-        return Err(FactorError::ActiveRebase);
-    }
 
     let commits = resolve_commit_refs(ctx, commit_refs)?;
     let resolved_commits = sort_topologically(ctx, &commits)?;
     let head_ref = head_ref_literal();
     let head_commit = resolve_commit(ctx, &head_ref)?;
+    let is_mid_rebase = is_mid_rebase_in(ctx);
 
     let base_sha = resolved_commits.first();
     let single_head_session = resolved_commits.len() == 1 && base_sha == &head_commit;
+    if is_mid_rebase && !single_head_session {
+        return Err(FactorError::ActiveRebase);
+    }
 
     // Validate all resolved commits.
     for sha in &resolved_commits {
@@ -778,9 +791,17 @@ fn cmd_start_in(
         .map(NonEmptyString::as_str)
         .collect::<Vec<&str>>()
         .join(" && ");
+    let exec_command = NonEmptyString::try_from(exec_combined.clone())
+        .map_err(|_err| FactorError::GitCommand("empty exec command".to_owned()))?;
 
     // Validate exec command syntax before starting the session.
     validate_exec_syntax(ctx, &exec_combined)?;
+    run_on_enter_exec_gate_for_active_rebase_head(
+        ctx,
+        is_mid_rebase,
+        single_head_session,
+        &exec_command,
+    )?;
 
     // Persist state for the session.
     ctx.fs
@@ -791,11 +812,16 @@ fn cmd_start_in(
     write_state(ctx, &state_dir, "current_index", "0")?;
     write_state(ctx, &state_dir, "exec", &exec_combined)?;
     write_state(ctx, &state_dir, "split_count", "0")?;
+    let requires_rebase = if single_head_session {
+        is_mid_rebase
+    } else {
+        true
+    };
     write_state(
         ctx,
         &state_dir,
         "requires_rebase",
-        if single_head_session { "false" } else { "true" },
+        if requires_rebase { "true" } else { "false" },
     )?;
 
     let is_root = is_root_commit_in(ctx, base_sha);
@@ -1055,6 +1081,13 @@ fn run_with_args_vec(ctx: &Ctx<'_>, args: Vec<OsString>) -> Result<i32, FactorEr
             return Err(FactorError::Usage(
                 "--continue cannot be combined with --exec or COMMIT".to_owned(),
             ));
+        }
+        if !is_factor_active_in(ctx) && is_mid_rebase_in(ctx) {
+            ctx.outln(
+                "FACTOR: No active factor session found; delegating to `git rebase --continue`.",
+            )?;
+            run_git(ctx, &["rebase", "--continue"])?;
+            return Ok(EXIT_OK);
         }
         let messages = NonEmpty::from_vec(cli.message().to_vec())
             .ok_or_else(|| FactorError::Usage("--continue requires --message <MSG>".to_owned()))?;
