@@ -248,3 +248,131 @@ exec /usr/bin/git "$@"
 
     (dir, bin)
 }
+
+fn sh_single_quote(value: &str) -> String {
+    // POSIX sh-safe single-quoted string.
+    // Example: abc'def -> 'abc'"'"'def'
+    let mut out = String::new();
+    out.push('\'');
+    for ch in value.chars() {
+        if ch == '\'' {
+            out.push_str("'\"'\"'");
+        } else {
+            out.push(ch);
+        }
+    }
+    out.push('\'');
+    out
+}
+
+/// Creates a PATH prefix containing a strict, ordered-replay `git` wrapper.
+///
+/// Behavior:
+/// - Each invocation increments a counter in a file.
+/// - The Nth invocation must match the Nth step exactly (argc + per-arg).
+/// - Any extra invocations fail immediately.
+///
+/// The caller should assert that the counter equals `steps.len()` to ensure no
+/// steps were skipped.
+pub fn make_ordered_git_wrapper(steps: &[GitWrapperStep]) -> (TempDir, PathBuf, PathBuf) {
+    use core::fmt::Write as _;
+
+    let dir = TempDir::new().expect("tempdir");
+    let bin = dir.path().join("bin");
+    fs::create_dir_all(&bin).expect("create bin dir");
+
+    let count_file = dir.path().join("git-invocations");
+
+    let mut script = String::new();
+    script.push_str("#!/usr/bin/env bash\nset -Eeuo pipefail\n\n");
+    writeln!(
+        script,
+        "count_file={}",
+        sh_single_quote(&count_file.to_string_lossy())
+    )
+    .expect("write script");
+    script.push_str(
+        r#"
+if [ -f "$count_file" ]; then
+  count="$(cat "$count_file" 2>/dev/null || echo 0)"
+else
+  count=0
+fi
+count="$((count + 1))"
+printf "%s" "$count" > "$count_file"
+
+fail_unexpected() {
+  echo "unexpected git invocation #$count: $*" >&2
+  exit 99
+}
+
+case "$count" in
+"#,
+    );
+
+    for (idx, step) in steps.iter().enumerate() {
+        let n = idx + 1;
+        writeln!(script, "{n})").expect("write script");
+        writeln!(script, "  if [ \"$#\" -ne {} ]; then", step.args.len()).expect("write script");
+        script.push_str("    fail_unexpected \"$@\"\n");
+        script.push_str("  fi\n");
+        for (arg_idx, expected) in step.args.iter().enumerate() {
+            let pos = arg_idx + 1;
+            writeln!(
+                script,
+                "  if [ \"${pos}\" != {} ]; then",
+                sh_single_quote(expected)
+            )
+            .expect("write script");
+            script.push_str("    fail_unexpected \"$@\"\n");
+            script.push_str("  fi\n");
+        }
+
+        if !step.stdout.is_empty() {
+            script.push_str("  cat <<'STDOUT'\n");
+            script.push_str(&step.stdout);
+            if !step.stdout.ends_with('\n') {
+                script.push('\n');
+            }
+            script.push_str("STDOUT\n");
+        }
+
+        if !step.stderr.is_empty() {
+            script.push_str("  cat <<'STDERR' >&2\n");
+            script.push_str(&step.stderr);
+            if !step.stderr.ends_with('\n') {
+                script.push('\n');
+            }
+            script.push_str("STDERR\n");
+        }
+
+        writeln!(script, "  exit {}", step.exit_code).expect("write script");
+        script.push_str("  ;;\n");
+    }
+
+    script.push_str(
+        r#"*)
+  fail_unexpected "$@"
+  ;;
+esac
+"#,
+    );
+
+    let wrapper = bin.join("git");
+    write_executable(&wrapper, script.as_str());
+    (dir, bin, count_file)
+}
+
+pub fn make_git_wrapper_named(name: &str, body: &str) -> (TempDir, PathBuf) {
+    let dir = TempDir::new().expect("tempdir");
+    let bin = dir.path().join("bin");
+    fs::create_dir_all(&bin).expect("create bin dir");
+    let script = bin.join(name);
+    let real_binary = format!("/usr/bin/{name}");
+    let content = format!(
+        "#!/usr/bin/env bash\nset -Eeuo pipefail\n\n{body}\n\nexec {} \"$@\"\n",
+        sh_single_quote(real_binary.as_str())
+    );
+    write_executable(&script, content.as_str());
+    (dir, bin)
+}
