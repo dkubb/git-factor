@@ -780,3 +780,87 @@ EXAMPLES:
     }
 
     #[test]
+    fn rejects_commit_ref_when_git_returns_non_hex_40_char_sha() {
+        let dir = init_repo();
+        let repo = dir.path();
+        commit_file(repo, "file.txt", "one\n", "chore: base");
+
+        // Intercept `git rev-parse --verify <ref>` and return a non-hex 40-char SHA to
+        // ensure we exercise CommitSha::new's non-hex branch in a non-test build.
+        let (wrap_dir, wrap_bin) = make_git_wrapper_named(
+            "git",
+            #[expect(
+                clippy::literal_string_with_formatting_args,
+                reason = "shell script contains ${VAR:-default} expansions"
+            )]
+            r#"if [ "${1:-}" = "rev-parse" ] && [ "${2:-}" = "--verify" ] && [ "${3:-}" = "definitely-not-a-commit" ]; then
+  printf "%040s\n" "g" | tr ' ' 'g'
+  exit 0
+fi
+"#,
+        );
+
+        let original_path = env::var_os("PATH").expect("PATH");
+        let prefixed_path = {
+            let mut joined = OsString::new();
+            joined.push(wrap_bin.as_os_str());
+            joined.push(OsStr::new(":"));
+            joined.push(original_path);
+            joined
+        };
+
+        // Wrapper tempdir must live through command execution.
+        let _keep_alive = wrap_dir;
+        run_git_factor_with_prefixed_path(
+            repo,
+            &["--exec", "true", "definitely-not-a-commit"],
+            GitFactorExpectation::default()
+                .code(EXIT_DATAERR)
+                .stderr("invalid commit: 000000000000000000000000000000000000000g\n"),
+            prefixed_path,
+        );
+    }
+
+    #[test]
+    fn rejects_commit_ref_when_git_returns_non_40_char_sha() {
+        let dir = init_repo();
+        let repo = dir.path();
+        commit_file(repo, "file.txt", "one\n", "chore: base");
+
+        // Intercept `git rev-parse --verify <ref>` and return a short SHA to
+        // exercise CommitSha::new's length-validation branch.
+        let (wrap_dir, wrap_bin) = make_git_wrapper_named(
+            "git",
+            #[expect(
+                clippy::literal_string_with_formatting_args,
+                reason = "shell script contains ${VAR:-default} expansions"
+            )]
+            r#"if [ "${1:-}" = "rev-parse" ] && [ "${2:-}" = "--verify" ] && [ "${3:-}" = "definitely-not-a-commit" ]; then
+  echo "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  exit 0
+fi
+"#,
+        );
+
+        let original_path = env::var_os("PATH").expect("PATH");
+        let prefixed_path = {
+            let mut joined = OsString::new();
+            joined.push(wrap_bin.as_os_str());
+            joined.push(OsStr::new(":"));
+            joined.push(original_path);
+            joined
+        };
+
+        // Wrapper tempdir must live through command execution.
+        let _keep_alive = wrap_dir;
+        run_git_factor_with_prefixed_path(
+            repo,
+            &["--exec", "true", "definitely-not-a-commit"],
+            GitFactorExpectation::default()
+                .code(EXIT_DATAERR)
+                .stderr("invalid commit: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n"),
+            prefixed_path,
+        );
+    }
+
+    #[test]
