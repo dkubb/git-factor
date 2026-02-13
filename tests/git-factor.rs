@@ -2806,3 +2806,191 @@ fi
     }
 
     #[test]
+    fn start_reports_rebase_failure_when_sequence_editor_fails() {
+        let dir = init_repo();
+        let repo = dir.path();
+
+        commit_file(repo, "file.txt", "one\n", "chore: base");
+        commit_file(repo, "file.txt", "one\ntwo\n", "feat: change");
+
+        // Copy git-factor into a new directory and provide a sibling editor that always fails.
+        let bin_dir = TempDir::new().expect("tempdir");
+        let (factor, _editor_unused) = copy_bins_to(bin_dir.path());
+        let bad_editor = bin_dir.path().join("git-sequence-editor");
+        write_executable(&bad_editor, "#!/bin/sh\nexit 1\n");
+        let bad_editor_canonical =
+            fs::canonicalize(&bad_editor).expect("canonical path for git-sequence-editor wrapper");
+        let edited_short_sha = git(repo, &["rev-parse", "--short", "HEAD~1"]);
+        let expected_stderr = format!(
+            "error: there was a problem with the editor ''{}' '--edit' '{}''\n\
+                 git command failed: git rebase failed (exit 1)\n",
+            bad_editor_canonical.display(),
+            edited_short_sha,
+        );
+
+        run_git_factor_with_bin(
+            repo,
+            factor.as_path(),
+            &["--exec", "true", "HEAD~1"],
+            GitFactorExpectation::default()
+                .code(EXIT_SOFTWARE)
+                .stderr(expected_stderr),
+        );
+    }
+
+    #[test]
+    fn continue_reports_git_commit_failure() {
+        let dir = init_repo();
+        let repo = dir.path();
+
+        commit_file(repo, "file.txt", "one\n", "chore: base");
+        commit_file(repo, "file.txt", "one\ntwo\n", "feat: change");
+
+        run_git_factor(repo, &["--exec", "true"], GitFactorExpectation::default());
+
+        let (wrap_dir, wrap_bin) = make_git_wrapper_named(
+            "git",
+            #[expect(
+                clippy::literal_string_with_formatting_args,
+                reason = "shell script contains braces like ${1:-}"
+            )]
+            r#"if [ "${1:-}" = "commit" ]; then
+  exit 1
+fi
+"#,
+        );
+
+        let original_path = env::var_os("PATH").expect("PATH");
+        let prefixed_path = {
+            let mut joined = OsString::new();
+            joined.push(wrap_bin.as_os_str());
+            joined.push(OsStr::new(":"));
+            joined.push(original_path);
+            joined
+        };
+
+        git(repo, &["add", "--all"]);
+
+        let _keep_alive = wrap_dir;
+        run_git_factor_with_prefixed_path(
+            repo,
+            &["--continue", "--message", "test: split"],
+            GitFactorExpectation::default()
+                .code(EXIT_SOFTWARE)
+                .stderr("git command failed: git commit failed (exit 1)\n"),
+            prefixed_path,
+        );
+    }
+
+    #[test]
+    fn start_reports_missing_git_binary_from_git_output() {
+        let dir = init_repo();
+        let repo = dir.path();
+
+        commit_file(repo, "file.txt", "one\n", "chore: base");
+
+        run_git_factor_with_env(
+            repo,
+            &["--exec", "true", "HEAD"],
+            GitFactorExpectation::default().code(EXIT_DATAERR).stderr(
+                "failed to determine git directory: No such file or directory (os error 2)\n",
+            ),
+            "PATH",
+            "",
+        );
+    }
+
+    #[test]
+    fn start_reports_nonzero_git_output_status_with_stderr_message() {
+        let dir = init_repo();
+        let repo = dir.path();
+
+        commit_file(repo, "file.txt", "one\n", "chore: base");
+
+        let (wrap_dir, wrap_bin) = make_git_wrapper_named(
+            "git",
+            #[expect(
+                clippy::literal_string_with_formatting_args,
+                reason = "shell script contains braces like ${1:-}"
+            )]
+            r#"if [ "${1:-}" = "rev-parse" ] && [ "${2:-}" = "--short" ]; then
+  echo "fatal: short lookup failed" 1>&2
+  exit 42
+fi
+"#,
+        );
+        let _keep_alive = wrap_dir;
+        let wrapped_path = format!("{}:{}", wrap_bin.display(), env::var("PATH").expect("PATH"));
+
+        run_git_factor_with_env(
+            repo,
+            &["--exec", "true", "HEAD"],
+            GitFactorExpectation::default()
+                .code(EXIT_SOFTWARE)
+                .stderr("git command failed: fatal: short lookup failed\n"),
+            "PATH",
+            wrapped_path,
+        );
+    }
+
+    #[test]
+    fn continue_reports_tree_hash_mismatch_when_cherry_pick_cannot_apply() {
+        let dir = init_repo();
+        let repo = dir.path();
+
+        // Base repo state.
+        commit_file(repo, "file.txt", "base\n", "chore: base");
+
+        // Original commit adds `conflict` file.
+        commit_file(repo, "conflict", "theirs\n", "feat: add conflict file");
+        let expected_tree_hash = git(repo, &["rev-parse", "HEAD^{tree}"]);
+
+        start_session(repo);
+
+        // Stage a slice that introduces a directory where the original commit has a file.
+        fs::remove_file(repo.join("conflict")).expect("remove conflict file");
+        fs::create_dir_all(repo.join("conflict")).expect("create conflict dir");
+        write_file(repo, "conflict/nested.txt", "ours\n");
+        git(repo, &["add", "--all"]);
+        let actual_tree_hash = git(repo, &["write-tree"]);
+
+        run_git_factor(
+            repo,
+            &["--continue", "--message", "test: dir conflict"],
+            GitFactorExpectation::default()
+                .code(EXIT_TEMPFAIL)
+                .stderr_suffix(format!(
+                    "tree hash mismatch: expected {expected_tree_hash}, got {actual_tree_hash}\n"
+                )),
+        );
+    }
+
+    #[test]
+    fn continue_reports_rehydrate_conflicts_when_exec_gate_fails() {
+        let dir = init_repo();
+        let repo = dir.path();
+
+        commit_file(repo, "file.txt", "base\n", "chore: base");
+        commit_file(repo, "conflict", "theirs\n", "feat: add conflict file");
+        let commit_short_sha = git(repo, &["rev-parse", "--short", "HEAD"]);
+
+        // Force exec failure so rehydrate runs.
+        start_session_with_exec(repo, "false");
+
+        fs::remove_file(repo.join("conflict")).expect("remove conflict file");
+        fs::create_dir_all(repo.join("conflict")).expect("create conflict dir");
+        write_file(repo, "conflict/nested.txt", "ours\n");
+        git(repo, &["add", "--all"]);
+
+        run_git_factor(
+            repo,
+            &["--continue", "--message", "test: slice"],
+            GitFactorExpectation::default()
+                .code(EXIT_SOFTWARE)
+                .stderr_suffix(format!(
+                    "git command failed: rehydrate cherry-pick left conflicts:\nconflict~{commit_short_sha} (feat: add conflict file)\n"
+                )),
+        );
+    }
+
+    #[test]
