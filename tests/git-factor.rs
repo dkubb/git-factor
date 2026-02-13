@@ -1886,3 +1886,167 @@ fi
         commit_file(repo, "file.txt", "one\ntwo\n", "feat: change");
         let head_short_sha = git(repo, &["rev-parse", "--short", "HEAD"]);
 
+        run_git_factor(
+            repo,
+            &["--exec", "true", "HEAD"],
+            GitFactorExpectation::default()
+                .rebase_apply_exists(false)
+                .rebase_merge_exists(false)
+                .requires_rebase(false)
+                .stdout(expected_single_commit_start_stdout(
+                    head_short_sha.as_str(),
+                    "feat: change",
+                )),
+        );
+
+        git(repo, &["add", "--all"]);
+        run_git_factor(
+            repo,
+            &["--finish", "--message", "test: done"],
+            GitFactorExpectation::default().stdout_suffix(expected_completion_stdout_suffix(1)),
+        );
+    }
+
+    #[test]
+    fn finish_preserves_empty_commits() {
+        let dir = init_repo();
+        let repo = dir.path();
+
+        commit_file(repo, "file.txt", "one\n", "chore: base");
+        git(
+            repo,
+            &["commit", "--allow-empty", "--message", "feat: placeholder"],
+        );
+
+        let expected_tree = git(repo, &["rev-parse", "HEAD^{tree}"]);
+        let expected_subject = git(repo, &["log", "-1", "--format=%s"]);
+
+        start_session(repo);
+
+        run_git_factor(
+            repo,
+            &["--finish"],
+            GitFactorExpectation::default()
+                .git_output(&["rev-parse", "HEAD^{tree}"], expected_tree)
+                .git_output(&["log", "-1", "--format=%s"], expected_subject),
+        );
+    }
+
+    #[test]
+    fn finish_uses_allow_empty_when_original_commit_is_empty() {
+        let dir = init_repo();
+        let repo = dir.path();
+
+        commit_file(repo, "file.txt", "one\n", "chore: base");
+        git(
+            repo,
+            &[
+                "commit",
+                "--allow-empty",
+                "--message",
+                "feat: empty original",
+            ],
+        );
+
+        start_session(repo);
+
+        let (wrap_dir, wrap_bin) = make_git_wrapper_named(
+            "git",
+            #[expect(
+                clippy::literal_string_with_formatting_args,
+                reason = "shell script contains ${1:-} expansions"
+            )]
+            r#"if [ "${1:-}" = "commit" ]; then
+  for arg in "$@"; do
+    if [ "$arg" = "--allow-empty" ]; then
+      exit 1
+    fi
+  done
+fi
+"#,
+        );
+        let _keep_alive = wrap_dir;
+
+        let original_path = env::var_os("PATH").expect("PATH");
+        let prefixed_path = {
+            let mut joined = OsString::new();
+            joined.push(wrap_bin.as_os_str());
+            joined.push(OsStr::new(":"));
+            joined.push(original_path);
+            joined
+        };
+
+        run_git_factor_with_prefixed_path(
+            repo,
+            &["--finish"],
+            GitFactorExpectation::default()
+                .code(EXIT_SOFTWARE)
+                .stderr("git command failed: git commit failed (exit 1)\n"),
+            prefixed_path,
+        );
+    }
+
+    #[test]
+    fn finish_exec_failure_returns_tempfail_and_keeps_session_active() {
+        let dir = init_repo();
+        let repo = dir.path();
+
+        commit_file(repo, "file.txt", "one\n", "chore: base");
+        commit_file(repo, "file.txt", "one\ntwo\n", "feat: original");
+
+        start_session_with_exec(repo, "false");
+
+        run_git_factor(
+            repo,
+            &["--finish"],
+            GitFactorExpectation::default()
+                .code(EXIT_TEMPFAIL)
+                .stderr("exec gate failed: false (exit code 1)\n")
+                .factor_state_exists(true)
+                .git_status_porcelain_non_empty(),
+        );
+    }
+
+    #[test]
+    fn start_invokes_sequence_editor_when_bin_path_has_spaces() {
+        let dir = init_repo();
+        let repo = dir.path();
+
+        commit_file(repo, "file.txt", "one\n", "chore: base");
+        commit_file(repo, "file.txt", "one\ntwo\n", "feat: change");
+
+        let bin_root = TempDir::new().expect("tempdir");
+        let spaced = bin_root.path().join("with spaces");
+        fs::create_dir_all(&spaced).expect("create spaced dir");
+        let (factor, _editor) = copy_bins_to(&spaced);
+
+        run_git_factor_with_bin(
+            repo,
+            factor.as_path(),
+            &["--exec", "true", "HEAD"],
+            GitFactorExpectation::default(),
+        );
+    }
+
+    #[test]
+    fn start_invokes_sequence_editor_when_bin_path_has_single_quote() {
+        let dir = init_repo();
+        let repo = dir.path();
+
+        commit_file(repo, "file.txt", "one\n", "chore: base");
+        commit_file(repo, "file.txt", "one\ntwo\n", "feat: change");
+
+        let bin_root = TempDir::new().expect("tempdir");
+        let quoted = bin_root.path().join("with'quote");
+        fs::create_dir_all(&quoted).expect("create quoted dir");
+        let (factor, _editor) = copy_bins_to(&quoted);
+
+        run_git_factor_with_bin(
+            repo,
+            factor.as_path(),
+            &["--exec", "true", "HEAD~1"],
+            GitFactorExpectation::default(),
+        );
+    }
+
+    #[test]
