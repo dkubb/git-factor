@@ -933,7 +933,7 @@ fn git_commit_preserving_metadata(
     let committer_email = parts.next().expect("committer email from git log format");
     let committer_date = parts.next().expect("committer date from git log format");
 
-    let mut commit_args: Vec<&str> = vec!["commit"];
+    let mut commit_args: Vec<&str> = vec!["commit", "--quiet"];
     if allow_empty {
         commit_args.push("--allow-empty");
     }

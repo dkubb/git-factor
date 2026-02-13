@@ -1866,7 +1866,7 @@ fi
             repo,
             &["--continue", "--message", "test: slice a"],
             GitFactorExpectation::default()
-                .stdout_suffix(expected_continue_remaining_suffix())
+                .stdout(expected_continue_remaining_suffix())
                 .git_output(&["ls-files", "--others", "--exclude-standard"], "b.txt"),
         );
     }

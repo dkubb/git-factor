@@ -2392,7 +2392,7 @@ fn cmd_continue_errors_on_split_count_overflow() {
         )
         .with_status(
             "git",
-            &["commit", "--message", "test: message"],
+            &["commit", "--quiet", "--message", "test: message"],
             &envs,
             false,
             repo,
@@ -2486,7 +2486,7 @@ fn cmd_continue_propagates_restore_status_error() {
         )
         .with_status(
             "git",
-            &["commit", "--message", "test: message"],
+            &["commit", "--quiet", "--message", "test: message"],
             &envs,
             false,
             repo,
@@ -2601,7 +2601,7 @@ fn cmd_finish_errors_on_split_count_overflow() {
         )
         .with_status(
             "git",
-            &["commit", "--message", "test: message"],
+            &["commit", "--quiet", "--message", "test: message"],
             &envs,
             false,
             repo,
