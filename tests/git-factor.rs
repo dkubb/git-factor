@@ -2217,3 +2217,46 @@ fi
     }
 
     #[test]
+    fn abort_succeeds_when_rebase_apply_is_active() {
+        let dir = init_repo();
+        let repo = dir.path();
+
+        commit_file(repo, "file.txt", "one\n", "chore: base");
+        commit_file(repo, "file.txt", "one\ntwo\n", "feat: change");
+        commit_file(repo, "file.txt", "one\ntwo\nthree\n", "feat: latest");
+
+        run_git_factor(
+            repo,
+            &["--exec", "true", "HEAD~1"],
+            GitFactorExpectation::default().rebase_merge_exists(true),
+        );
+
+        let git_dir_path = git_dir(repo);
+        fs::remove_dir_all(git_dir_path.join("rebase-merge")).expect("remove rebase-merge");
+        fs::create_dir_all(git_dir_path.join("rebase-apply")).expect("create rebase-apply");
+
+        let (wrap_dir, wrap_bin) = make_git_wrapper_named(
+            "git",
+            #[expect(
+                clippy::literal_string_with_formatting_args,
+                reason = "shell script contains ${1:-} expansions"
+            )]
+            r#"if [ "${1:-}" = "rebase" ] && [ "${2:-}" = "--abort" ]; then
+  exit 0
+fi
+"#,
+        );
+        let _keep_alive = wrap_dir;
+
+        run_git_factor_with_env(
+            repo,
+            &["--abort"],
+            GitFactorExpectation::default()
+                .rebase_apply_exists(true)
+                .rebase_merge_exists(false),
+            "PATH",
+            format!("{}:{}", wrap_bin.display(), env::var("PATH").expect("PATH")),
+        );
+    }
+
+    #[test]
