@@ -1828,3 +1828,63 @@ fn advance_to_next_commit_prints_untracked_changes_when_present() {
     assert_eq!(io.stderr(), "");
 }
 
+#[test]
+fn advance_to_next_commit_propagates_io_error_when_outln_fails_mid_rebase() {
+    let dir = TempDir::new().expect("tempdir");
+    let repo = dir.path();
+    let git_dir = repo.join(".git");
+    fs::create_dir_all(git_dir.join("rebase-merge")).expect("create rebase-merge");
+
+    let state_dir = git_dir.join("factor");
+    fs::create_dir_all(&state_dir).expect("create factor dir");
+    fs::write(
+        state_dir.join("commits"),
+        format!("{}\n{}\n", "a".repeat(40), "b".repeat(40)),
+    )
+    .expect("write commits");
+    fs::write(state_dir.join("current_index"), "0\n").expect("write current_index");
+    fs::write(state_dir.join("split_count"), "3\n").expect("write split_count");
+
+    let runner = ScriptedRunner::default()
+        .with_status("git", &["rebase", "--continue"], &[], false, repo, 0)
+        .with_status("git", &["reset", "--mixed", "HEAD~1"], &[], false, repo, 0)
+        .with_output("git", &["rev-parse", "--git-dir"], repo, ".git\n")
+        .with_output(
+            "git",
+            &["show", "--format=%B", "--no-patch", &"b".repeat(40)],
+            repo,
+            "original message\n",
+        )
+        .with_output("git", &["diff", "--stat"], repo, "")
+        .with_output(
+            "git",
+            &["ls-files", "--others", "--exclude-standard"],
+            repo,
+            "",
+        )
+        .with_output(
+            "git",
+            &["rev-parse", "--short", &"b".repeat(40)],
+            repo,
+            "bbbbbbb\n",
+        );
+
+    let io = FailingIo;
+    let env = TestEnv {
+        cwd: repo.to_path_buf(),
+    };
+    let ctx = Ctx {
+        runner: &runner,
+        cwd: repo.to_path_buf(),
+        io: &io,
+        env: &env,
+        fs: &REAL_FS,
+    };
+
+    let err = advance_to_next_commit_in(&ctx, &state_dir).expect_err("expected io failure");
+    assert!(
+        matches!(&err, FactorError::Io(inner) if inner.to_string().contains("io fail")),
+        "err was: {err:?}"
+    );
+}
+
