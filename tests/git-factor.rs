@@ -2523,3 +2523,286 @@ fi
     }
 
     #[test]
+    fn continue_errors_when_session_exists_but_no_rebase_is_active() {
+        let dir = init_repo();
+        let repo = dir.path();
+        commit_file(repo, "file.txt", "one\n", "chore: base");
+
+        let factor_dir = git_dir(repo).join("factor");
+        fs::create_dir_all(&factor_dir).expect("create factor dir");
+        fs::write(
+            factor_dir.join("commits"),
+            format!("{}\n", git(repo, &["rev-parse", "HEAD"])),
+        )
+        .expect("write commits");
+        fs::write(factor_dir.join("current_index"), "0\n").expect("write current_index");
+        fs::write(factor_dir.join("exec"), "true\n").expect("write exec");
+        fs::write(factor_dir.join("split_count"), "0\n").expect("write split_count");
+
+        run_git_factor(
+            repo,
+            &["--continue", "--message", "test: msg"],
+            GitFactorExpectation::default()
+                .code(EXIT_SOFTWARE)
+                .stderr("git command failed: no rebase in progress\n"),
+        );
+    }
+
+    #[test]
+    fn finish_errors_when_session_exists_but_no_rebase_is_active() {
+        let dir = init_repo();
+        let repo = dir.path();
+        commit_file(repo, "file.txt", "one\n", "chore: base");
+
+        let factor_dir = git_dir(repo).join("factor");
+        fs::create_dir_all(&factor_dir).expect("create factor dir");
+        fs::write(
+            factor_dir.join("commits"),
+            format!("{}\n", git(repo, &["rev-parse", "HEAD"])),
+        )
+        .expect("write commits");
+        fs::write(factor_dir.join("current_index"), "0\n").expect("write current_index");
+        fs::write(factor_dir.join("exec"), "true\n").expect("write exec");
+        fs::write(factor_dir.join("split_count"), "0\n").expect("write split_count");
+
+        run_git_factor(
+            repo,
+            &["--finish"],
+            GitFactorExpectation::default()
+                .code(EXIT_SOFTWARE)
+                .stderr("git command failed: no rebase in progress\n"),
+        );
+    }
+
+    #[test]
+    fn continue_reports_corrupted_commits_state_file() {
+        let dir = init_repo();
+        let repo = dir.path();
+        commit_file(repo, "file.txt", "one\n", "chore: base");
+
+        // Fake an active session + rebase so cmd_continue attempts to read state.
+        let factor_dir = git_dir(repo).join("factor");
+        fs::create_dir_all(&factor_dir).expect("create factor dir");
+        fs::create_dir_all(git_dir(repo).join("rebase-merge")).expect("create rebase-merge");
+
+        // Empty commits file should be rejected.
+        fs::write(factor_dir.join("commits"), "\n").expect("write commits");
+        fs::write(factor_dir.join("current_index"), "0\n").expect("write current_index");
+        fs::write(factor_dir.join("exec"), "true\n").expect("write exec");
+        fs::write(factor_dir.join("split_count"), "0\n").expect("write split_count");
+
+        run_git_factor(
+            repo,
+            &["--continue", "--message", "test: msg"],
+            GitFactorExpectation::default()
+                .code(EXIT_SOFTWARE)
+                .stderr("git command failed: corrupted state file 'commits': file is empty\n"),
+        );
+    }
+
+    #[test]
+    fn continue_reports_corrupted_requires_rebase_state() {
+        let dir = init_repo();
+        let repo = dir.path();
+
+        commit_file(repo, "file.txt", "one\n", "chore: base");
+        commit_file(repo, "file.txt", "one\ntwo\n", "feat: change");
+
+        run_git_factor(repo, &["--exec", "true"], GitFactorExpectation::default());
+
+        fs::write(
+            git_dir(repo).join("factor/requires_rebase"),
+            "definitely-not-a-bool\n",
+        )
+        .expect("write corrupted requires_rebase state");
+
+        git(repo, &["add", "--all"]);
+        run_git_factor(
+                repo,
+                &["--continue", "--message", "test: split"],
+                GitFactorExpectation::default()
+                    .code(EXIT_SOFTWARE)
+                    .stderr("git command failed: corrupted state file 'requires_rebase': invalid value 'definitely-not-a-bool'\n"),
+            );
+    }
+
+    #[test]
+    fn finish_reports_corrupted_requires_rebase_state() {
+        let dir = init_repo();
+        let repo = dir.path();
+
+        commit_file(repo, "file.txt", "one\n", "chore: base");
+        commit_file(repo, "file.txt", "one\ntwo\n", "feat: change");
+
+        run_git_factor(repo, &["--exec", "true"], GitFactorExpectation::default());
+
+        fs::write(
+            git_dir(repo).join("factor/requires_rebase"),
+            "definitely-not-a-bool\n",
+        )
+        .expect("write corrupted requires_rebase state");
+
+        run_git_factor(
+                repo,
+                &["--finish", "--message", "test: final"],
+                GitFactorExpectation::default()
+                    .code(EXIT_SOFTWARE)
+                    .stderr("git command failed: corrupted state file 'requires_rebase': invalid value 'definitely-not-a-bool'\n"),
+            );
+    }
+
+    #[test]
+    fn continue_reports_unreadable_requires_rebase_state() {
+        let dir = init_repo();
+        let repo = dir.path();
+
+        commit_file(repo, "file.txt", "one\n", "chore: base");
+        commit_file(repo, "file.txt", "one\ntwo\n", "feat: change");
+
+        run_git_factor(repo, &["--exec", "true"], GitFactorExpectation::default());
+
+        let unreadable_path = git_dir(repo).join("factor/requires_rebase");
+        fs::remove_file(&unreadable_path).expect("remove requires_rebase state file");
+        fs::create_dir_all(&unreadable_path).expect("replace requires_rebase with directory");
+
+        git(repo, &["add", "--all"]);
+        run_git_factor(
+            repo,
+            &["--continue", "--message", "test: split"],
+            GitFactorExpectation::default()
+                .code(EXIT_SOFTWARE)
+                .stderr("failed to read state: Is a directory (os error 21)\n"),
+        );
+    }
+
+    #[test]
+    fn finish_reports_unreadable_requires_rebase_state() {
+        let dir = init_repo();
+        let repo = dir.path();
+
+        commit_file(repo, "file.txt", "one\n", "chore: base");
+        commit_file(repo, "file.txt", "one\ntwo\n", "feat: change");
+
+        run_git_factor(repo, &["--exec", "true"], GitFactorExpectation::default());
+
+        let unreadable_path = git_dir(repo).join("factor/requires_rebase");
+        fs::remove_file(&unreadable_path).expect("remove requires_rebase state file");
+        fs::create_dir_all(&unreadable_path).expect("replace requires_rebase with directory");
+
+        run_git_factor(
+            repo,
+            &["--finish", "--message", "test: final"],
+            GitFactorExpectation::default()
+                .code(EXIT_SOFTWARE)
+                .stderr("failed to read state: Is a directory (os error 21)\n"),
+        );
+    }
+
+    #[test]
+    fn reports_invalid_numeric_state_files() {
+        let dir = init_repo();
+        let repo = dir.path();
+        commit_file(repo, "file.txt", "one\n", "chore: base");
+
+        // Fake an active session + rebase so cmd_continue attempts to read state.
+        let factor_dir = git_dir(repo).join("factor");
+        fs::create_dir_all(&factor_dir).expect("create factor dir");
+        fs::create_dir_all(git_dir(repo).join("rebase-merge")).expect("create rebase-merge");
+
+        fs::write(
+            factor_dir.join("commits"),
+            format!("{}\n", git(repo, &["rev-parse", "HEAD"])),
+        )
+        .expect("write commits");
+        fs::write(factor_dir.join("current_index"), "not-a-number\n").expect("write current_index");
+        fs::write(factor_dir.join("exec"), "true\n").expect("write exec");
+        fs::write(factor_dir.join("split_count"), "0\n").expect("write split_count");
+
+        run_git_factor(
+                repo,
+                &["--continue", "--message", "test: msg"],
+                GitFactorExpectation::default()
+                    .code(EXIT_SOFTWARE)
+                    .stderr("git command failed: corrupted state file 'current_index': invalid value 'not-a-number'\n"),
+            );
+    }
+
+    #[test]
+    fn reports_out_of_range_commit_index() {
+        let dir = init_repo();
+        let repo = dir.path();
+        commit_file(repo, "file.txt", "one\n", "chore: base");
+
+        // Fake an active session + rebase so cmd_continue attempts to read state.
+        let factor_dir = git_dir(repo).join("factor");
+        fs::create_dir_all(&factor_dir).expect("create factor dir");
+        fs::create_dir_all(git_dir(repo).join("rebase-merge")).expect("create rebase-merge");
+
+        fs::write(
+            factor_dir.join("commits"),
+            format!("{}\n", git(repo, &["rev-parse", "HEAD"])),
+        )
+        .expect("write commits");
+        fs::write(factor_dir.join("current_index"), "1\n").expect("write current_index");
+        fs::write(factor_dir.join("exec"), "true\n").expect("write exec");
+        fs::write(factor_dir.join("split_count"), "0\n").expect("write split_count");
+
+        run_git_factor(
+            repo,
+            &["--continue", "--message", "test: msg"],
+            GitFactorExpectation::default()
+                .code(EXIT_SOFTWARE)
+                .stderr("git command failed: commit index 1 out of range (have 1 commits)\n"),
+        );
+    }
+
+    #[test]
+    fn continue_validates_exec_gate_against_staged_index_state() {
+        let dir = init_repo();
+        let repo = dir.path();
+
+        // Original commit has a file that does NOT satisfy the exec gate.
+        commit_file(repo, "file.txt", "bad\n", "chore: base");
+        commit_file(repo, "file.txt", "bad\nstill bad\n", "feat: change");
+
+        // Note: command substitution strips trailing newlines, so compare to "good".
+        start_session_with_exec(repo, "test \"$(cat file.txt)\" = \"good\"");
+
+        // Stage the gated content; the worktree will be cleaned back to HEAD
+        // inside --continue, so the tool must materialize the index into the
+        // filesystem before running the gate.
+        write_file(repo, "file.txt", "good\n");
+        git(repo, &["add", "file.txt"]);
+
+        run_git_factor(
+            repo,
+            &["--continue", "--message", "test: slice"],
+            GitFactorExpectation::default(),
+        );
+    }
+
+    #[test]
+    fn continue_materializes_index_by_removing_staged_deletions_from_worktree() {
+        let dir = init_repo();
+        let repo = dir.path();
+
+        // Stage a deletion in the slice by splitting a commit that *removes*
+        // a tracked file (so `git add -u` can stage the removal).
+        commit_file(repo, "keep.txt", "keep\n", "chore: base");
+        commit_file(repo, "delete-me.txt", "gone\n", "chore: add delete-me");
+        git(repo, &["rm", "--quiet", "delete-me.txt"]);
+        git(repo, &["commit", "--message", "feat: delete delete-me"]);
+
+        start_session(repo);
+
+        // Stage a deletion as the slice.
+        git(repo, &["add", "--update", "--", "delete-me.txt"]);
+
+        run_git_factor(
+            repo,
+            &["--continue", "--message", "test: delete"],
+            GitFactorExpectation::default(),
+        );
+    }
+
+    #[test]
