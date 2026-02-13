@@ -2136,3 +2136,56 @@ fi
     }
 
     #[test]
+    fn prints_claude_hints_and_reference_path_when_present() {
+        let dir = init_repo();
+        let repo = dir.path();
+
+        commit_file(repo, "file.txt", "one\n", "chore: base");
+        commit_file(repo, "file.txt", "one\ntwo\n", "feat: change");
+        let head_short_sha = git(repo, &["rev-parse", "--short", "HEAD"]);
+        fs::create_dir_all(repo.join("references")).expect("create references dir");
+        write_file(repo, "references/rust.md", "# rust\n");
+        let reference_path = repo
+            .join("references/rust.md")
+            .canonicalize()
+            .expect("canonical reference path");
+
+        run_git_factor_with_env(
+            repo,
+            &["--exec", "true", "HEAD"],
+            GitFactorExpectation::default().stdout(
+                expected_single_commit_start_with_reference_and_claude_stdout(
+                    head_short_sha.as_str(),
+                    "feat: change",
+                    reference_path.as_path(),
+                ),
+            ),
+            "CLAUDECODE",
+            "1",
+        );
+    }
+
+    #[test]
+    fn prints_claude_hints_without_reference_path_when_missing() {
+        let dir = init_repo();
+        let repo = dir.path();
+
+        commit_file(repo, "file.txt", "one\n", "chore: base");
+        commit_file(repo, "file.txt", "one\ntwo\n", "feat: change");
+        let head_short_sha = git(repo, &["rev-parse", "--short", "HEAD"]);
+
+        run_git_factor_with_env(
+            repo,
+            &["--exec", "true", "HEAD"],
+            GitFactorExpectation::default().stdout(
+                expected_single_commit_start_with_claude_no_reference_stdout(
+                    head_short_sha.as_str(),
+                    "feat: change",
+                ),
+            ),
+            "CLAUDECODE",
+            "1",
+        );
+    }
+
+    #[test]
