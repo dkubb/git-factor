@@ -1921,3 +1921,67 @@ fn advance_to_next_commit_propagates_io_error_when_outln_fails_after_rebase_fini
         "err was: {err:?}"
     );
 }
+
+#[test]
+fn advance_to_next_commit_errors_on_current_index_overflow() {
+    let dir = TempDir::new().expect("tempdir");
+    let repo = dir.path();
+    let git_dir = repo.join(".git");
+    fs::create_dir_all(git_dir.join("rebase-merge")).expect("create rebase-merge");
+
+    let state_dir = git_dir.join("factor");
+    fs::create_dir_all(&state_dir).expect("create factor dir");
+    fs::write(state_dir.join("split_count"), "0\n").expect("write split_count");
+    fs::write(state_dir.join("current_index"), format!("{}\n", usize::MAX))
+        .expect("write current_index");
+
+    let runner = ScriptedRunner::default()
+        .with_status("git", &["rebase", "--continue"], &[], false, repo, 0)
+        .with_output("git", &["rev-parse", "--git-dir"], repo, ".git\n");
+    let io = TestIo::default();
+    let env = TestEnv {
+        cwd: repo.to_path_buf(),
+    };
+    let ctx = Ctx {
+        runner: &runner,
+        cwd: repo.to_path_buf(),
+        io: &io,
+        env: &env,
+        fs: &REAL_FS,
+    };
+
+    let err = advance_to_next_commit_in(&ctx, &state_dir).expect_err("expected overflow");
+    assert_eq!(
+        err.to_string(),
+        "git command failed: current_index overflow"
+    );
+}
+
+#[test]
+fn advance_to_next_commit_errors_when_rebase_is_required_but_not_in_progress() {
+    let dir = TempDir::new().expect("tempdir");
+    let repo = dir.path();
+    let git_dir = repo.join(".git");
+    fs::create_dir_all(&git_dir).expect("create git dir");
+
+    let state_dir = git_dir.join("factor");
+    fs::create_dir_all(&state_dir).expect("create factor dir");
+    fs::write(state_dir.join("split_count"), "0\n").expect("write split_count");
+
+    let runner = ScriptedRunner::default();
+    let io = TestIo::default();
+    let env = TestEnv {
+        cwd: repo.to_path_buf(),
+    };
+    let ctx = Ctx {
+        runner: &runner,
+        cwd: repo.to_path_buf(),
+        io: &io,
+        env: &env,
+        fs: &REAL_FS,
+    };
+
+    let err = advance_to_next_commit_in(&ctx, &state_dir).expect_err("expected no rebase error");
+    assert_eq!(err.to_string(), "git command failed: no rebase in progress");
+}
+
