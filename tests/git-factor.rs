@@ -1382,3 +1382,172 @@ fi
     }
 
     #[test]
+    fn start_accepts_root_commit_ref_in_non_head_mode() {
+        let dir = init_repo();
+        let repo = dir.path();
+
+        commit_file(repo, "file.txt", "one\n", "feat: root");
+        commit_file(repo, "file.txt", "one\ntwo\n", "feat: head");
+
+        let root_sha = git(repo, &["rev-list", "--max-parents=0", "HEAD"]);
+
+        run_git_factor(
+            repo,
+            &["--exec", "true", root_sha.as_str()],
+            GitFactorExpectation::default()
+                .factor_state_exists(true)
+                .requires_rebase(true)
+                .rebase_merge_exists(true),
+        );
+    }
+
+    #[test]
+    fn start_cleans_state_when_git_rebase_fails() {
+        let dir = init_repo();
+        let repo = dir.path();
+
+        commit_file(repo, "file.txt", "one\n", "chore: base");
+        commit_file(repo, "file.txt", "one\ntwo\n", "feat: change");
+
+        let (wrap_dir, wrap_bin) = make_git_wrapper_named(
+            "git",
+            #[expect(
+                clippy::literal_string_with_formatting_args,
+                reason = "shell script contains ${1:-} expansions"
+            )]
+            r#"if [ "${1:-}" = "rebase" ]; then
+  exit 1
+fi
+"#,
+        );
+        let _keep_alive = wrap_dir;
+
+        let original_path = env::var_os("PATH").expect("PATH");
+        let prefixed_path = {
+            let mut joined = OsString::new();
+            joined.push(wrap_bin.as_os_str());
+            joined.push(OsStr::new(":"));
+            joined.push(original_path);
+            joined
+        };
+
+        run_git_factor_with_prefixed_path(
+            repo,
+            &["--exec", "true", "HEAD~1"],
+            GitFactorExpectation::default()
+                .code(EXIT_SOFTWARE)
+                .stderr("git command failed: git rebase failed (exit 1)\n")
+                .factor_state_exists(false),
+            prefixed_path,
+        );
+    }
+
+    #[test]
+    fn start_reports_error_when_commit_message_lookup_fails() {
+        let dir = init_repo();
+        let repo = dir.path();
+
+        commit_file(repo, "file.txt", "one\n", "chore: base");
+        commit_file(repo, "file.txt", "one\ntwo\n", "feat: change");
+
+        let (wrap_dir, wrap_bin) = make_git_wrapper_named(
+            "git",
+            #[expect(
+                clippy::literal_string_with_formatting_args,
+                reason = "shell script contains ${1:-} expansions"
+            )]
+            r#"if [ "${1:-}" = "show" ] && [ "${2:-}" = "--format=%B" ] && [ "${3:-}" = "--no-patch" ]; then
+  echo "mock show failure" >&2
+  exit 1
+fi
+"#,
+        );
+        let _keep_alive = wrap_dir;
+
+        let original_path = env::var_os("PATH").expect("PATH");
+        let prefixed_path = {
+            let mut joined = OsString::new();
+            joined.push(wrap_bin.as_os_str());
+            joined.push(OsStr::new(":"));
+            joined.push(original_path);
+            joined
+        };
+
+        run_git_factor_with_prefixed_path(
+            repo,
+            &["--exec", "true", "HEAD"],
+            GitFactorExpectation::default()
+                .code(EXIT_SOFTWARE)
+                .stderr("git command failed: mock show failure\n"),
+            prefixed_path,
+        );
+    }
+
+    #[test]
+    fn start_reports_error_when_short_sha_lookup_for_sequence_editor_fails() {
+        let dir = init_repo();
+        let repo = dir.path();
+
+        commit_file(repo, "file.txt", "one\n", "feat: one");
+        commit_file(repo, "file.txt", "one\ntwo\n", "feat: two");
+        let head_sha = git(repo, &["rev-parse", "HEAD"]);
+
+        let (wrap_dir, wrap_bin) = make_git_wrapper_named(
+            "git",
+            format!(
+                r#"if [ "${{1:-}}" = "rev-parse" ] && [ "${{2:-}}" = "--short" ] && [ "${{3:-}}" = "{head_sha}" ]; then
+  echo "mock short failure" >&2
+  exit 1
+fi
+"#
+            )
+            .as_str(),
+        );
+        let _keep_alive = wrap_dir;
+
+        let original_path = env::var_os("PATH").expect("PATH");
+        let prefixed_path = {
+            let mut joined = OsString::new();
+            joined.push(wrap_bin.as_os_str());
+            joined.push(OsStr::new(":"));
+            joined.push(original_path);
+            joined
+        };
+
+        run_git_factor_with_prefixed_path(
+            repo,
+            &["--exec", "true", "HEAD~1..HEAD"],
+            GitFactorExpectation::default()
+                .code(EXIT_SOFTWARE)
+                .stderr("git command failed: mock short failure\n"),
+            prefixed_path,
+        );
+    }
+
+    #[test]
+    fn start_reports_error_when_hint_diff_stat_fails() {
+        let dir = init_repo();
+        let repo = dir.path();
+
+        commit_file(repo, "file.txt", "one\n", "chore: base");
+        commit_file(repo, "file.txt", "one\ntwo\n", "feat: change");
+
+        let (wrap_dir, wrap_bin) = make_git_wrapper_named(
+            "git",
+            #[expect(
+                clippy::literal_string_with_formatting_args,
+                reason = "shell script contains ${VAR:-default} expansions"
+            )]
+            r#"if [ "${1:-}" = "diff" ] && [ "${2:-}" = "--stat" ]; then
+  count_file="$(dirname "$0")/.diff_stat_count"
+  count=0
+  if [ -f "$count_file" ]; then
+    count="$(cat "$count_file")"
+  fi
+  count="$((count + 1))"
+  printf "%s" "$count" > "$count_file"
+  if [ "$count" -ge 2 ]; then
+    echo "mock diff stat failure" >&2
+    exit 1
+  fi
+fi
