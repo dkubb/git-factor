@@ -316,8 +316,21 @@ fn cmd_abort_in(ctx: &Ctx<'_>) -> Result<i32, FactorError> {
     }
 
     let state_dir = factor_dir_in(ctx)?;
-    let target_commit = current_commit_from_state(ctx, &state_dir)?;
-    run_git(ctx, &["reset", "--hard", "--quiet", target_commit.as_str()])?;
+    let fallback_requires_rebase =
+        read_state_bool_or_default(ctx, &state_dir, "requires_rebase", false)?;
+    let started_rebase =
+        read_state_bool_or_default(ctx, &state_dir, "started_rebase", fallback_requires_rebase)?;
+    if started_rebase && is_mid_rebase_in(ctx) {
+        run_git_non_interactive(ctx, &["rebase", "--abort"])?;
+    }
+    let reset_target = match read_state(ctx, &state_dir, "start_head") {
+        Ok(start_head) => start_head.to_string(),
+        Err(FactorError::StateRead(err)) if err.kind() == io::ErrorKind::NotFound => {
+            current_commit_from_state(ctx, &state_dir)?.to_string()
+        }
+        Err(err) => return Err(err),
+    };
+    run_git(ctx, &["reset", "--hard", "--quiet", reset_target.as_str()])?;
     run_git(ctx, &["clean", "--force", "--quiet", "-d"])?;
     drop(ctx.fs.remove_dir_all(&state_dir));
 
@@ -417,7 +430,10 @@ fn advance_to_next_commit_in(ctx: &Ctx<'_>, state_dir: &Path) -> Result<bool, Fa
             write_state_pairs(
                 ctx,
                 state_dir,
-                &[("current_index", current_index.as_str()), ("split_count", "0")],
+                &[
+                    ("current_index", current_index.as_str()),
+                    ("split_count", "0"),
+                ],
             )?;
 
             run_git(ctx, &["reset", "--quiet", "HEAD~1"])?;
@@ -878,12 +894,15 @@ fn cmd_start_in(
         .map_err(FactorError::StateWrite)?;
     let is_root = is_root_commit_in(ctx, base_sha);
     let requires_rebase = if single_head_session { "false" } else { "true" };
+    let started_rebase = if single_head_session { "false" } else { "true" };
     let is_root_value = if is_root { "true" } else { "false" };
     let session_state_pairs = [
         ("current_index", "0"),
         ("exec", exec_combined.as_str()),
         ("split_count", "0"),
         ("requires_rebase", requires_rebase),
+        ("started_rebase", started_rebase),
+        ("start_head", head_commit.as_str()),
         ("is_root", is_root_value),
     ];
     let commits_content: Vec<&str> = resolved_commits.iter().map(CommitSha::as_str).collect();
