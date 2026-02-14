@@ -18,16 +18,47 @@ use std::io::Write as _;
 use std::path::Path;
 use std::process;
 
+#[cfg(test)]
+use std::sync::atomic::{AtomicU8, Ordering};
+
 use clap::Parser as _;
 
 use self::cli::Cli;
 use self::todo::{build_requested_actions, rewrite_todo, todo_shas_in, validate_todo_format};
 
+#[cfg(test)]
+static WRITE_FAIL_POINT: AtomicU8 = AtomicU8::new(0);
+
+#[cfg(test)]
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum WriteFailPoint {
+    None = 0,
+    Write = 1,
+    Sync = 2,
+}
+
+#[cfg(test)]
+fn set_write_fail_point(value: WriteFailPoint) {
+    WRITE_FAIL_POINT.store(value as u8, Ordering::SeqCst);
+}
+
+#[cfg(test)]
+fn write_fail_point() -> WriteFailPoint {
+    match WRITE_FAIL_POINT.load(Ordering::SeqCst) {
+        1 => WriteFailPoint::Write,
+        2 => WriteFailPoint::Sync,
+        _ => WriteFailPoint::None,
+    }
+}
+
 /// Writes `content` to `path` atomically via a same-directory temp file and rename.
 fn write_file_atomic(path: &Path, content: &str) -> Result<(), String> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| format!("failed to determine parent directory for: {}", path.display()))?;
+    let parent = path.parent().ok_or_else(|| {
+        format!(
+            "failed to determine parent directory for: {}",
+            path.display()
+        )
+    })?;
     let file_name = path
         .file_name()
         .ok_or_else(|| format!("failed to determine file name for: {}", path.display()))?;
@@ -54,7 +85,17 @@ fn write_file_atomic(path: &Path, content: &str) -> Result<(), String> {
             }
         };
 
-        if let Err(err) = file.write_all(content.as_bytes()) {
+        #[cfg(test)]
+        let write_result: Result<(), std::io::Error> =
+            if write_fail_point() == WriteFailPoint::Write {
+                Err(std::io::Error::other("injected write failure"))
+            } else {
+                file.write_all(content.as_bytes())
+            };
+        #[cfg(not(test))]
+        let write_result = file.write_all(content.as_bytes());
+
+        if let Err(err) = write_result {
             let _ignored = fs::remove_file(&temp_path);
             return Err(format!(
                 "failed to write temporary todo file for {}: {err}",
@@ -62,7 +103,17 @@ fn write_file_atomic(path: &Path, content: &str) -> Result<(), String> {
             ));
         }
 
-        if let Err(err) = file.sync_all() {
+        #[cfg(test)]
+        let sync_result: Result<(), std::io::Error> = if write_fail_point() == WriteFailPoint::Sync
+        {
+            Err(std::io::Error::other("injected sync failure"))
+        } else {
+            file.sync_all()
+        };
+        #[cfg(not(test))]
+        let sync_result = file.sync_all();
+
+        if let Err(err) = sync_result {
             let _ignored = fs::remove_file(&temp_path);
             return Err(format!(
                 "failed to sync temporary todo file for {}: {err}",
@@ -248,6 +299,107 @@ exec echo hi\n\
         let err = run_for(&cli).expect_err("must fail for missing todo file");
         assert!(
             err.starts_with("failed to read todo file:"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn write_file_atomic_rejects_paths_without_parent_or_file_name() {
+        set_write_fail_point(WriteFailPoint::None);
+        let no_parent = write_file_atomic(Path::new(""), "content")
+            .expect_err("empty path should fail parent lookup");
+        assert!(
+            no_parent.contains("failed to determine parent directory"),
+            "unexpected error: {no_parent}"
+        );
+
+        let no_file_name = write_file_atomic(Path::new("."), "content")
+            .expect_err("root path should fail file name lookup");
+        assert!(
+            no_file_name.contains("failed to determine file name"),
+            "unexpected error: {no_file_name}"
+        );
+    }
+
+    #[test]
+    fn write_file_atomic_reports_temp_create_failure_for_missing_parent() {
+        set_write_fail_point(WriteFailPoint::None);
+        let dir = TempDir::new().expect("tempdir");
+        let path = dir.path().join("missing").join("todo");
+        let err = write_file_atomic(&path, "content").expect_err("should fail creating temp file");
+        assert!(
+            err.contains("failed to create temporary todo file"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn write_file_atomic_reports_write_and_sync_failpoints() {
+        set_write_fail_point(WriteFailPoint::None);
+        let dir = TempDir::new().expect("tempdir");
+        let path = dir.path().join("todo");
+
+        set_write_fail_point(WriteFailPoint::Write);
+        let write_err = write_file_atomic(&path, "content").expect_err("write failpoint");
+        assert!(
+            write_err.contains("failed to write temporary todo file"),
+            "unexpected error: {write_err}"
+        );
+
+        set_write_fail_point(WriteFailPoint::Sync);
+        let sync_err = write_file_atomic(&path, "content").expect_err("sync failpoint");
+        assert!(
+            sync_err.contains("failed to sync temporary todo file"),
+            "unexpected error: {sync_err}"
+        );
+
+        set_write_fail_point(WriteFailPoint::None);
+    }
+
+    #[test]
+    fn write_file_atomic_reports_rename_failure_for_directory_target() {
+        set_write_fail_point(WriteFailPoint::None);
+        let dir = TempDir::new().expect("tempdir");
+        let target = dir.path().join("todo");
+        fs::create_dir_all(&target).expect("create directory target");
+
+        let err = write_file_atomic(&target, "content").expect_err("rename should fail");
+        assert!(
+            err.contains("failed to atomically replace todo file"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn write_file_atomic_skips_existing_temp_slot_and_succeeds() {
+        set_write_fail_point(WriteFailPoint::None);
+        let dir = TempDir::new().expect("tempdir");
+        let path = dir.path().join("todo");
+        fs::write(&path, "pick abc1234 old\n").expect("seed todo");
+
+        let pid = process::id();
+        fs::write(dir.path().join(format!("todo.tmp{pid}.0")), "taken")
+            .expect("reserve first temp slot");
+
+        write_file_atomic(&path, "pick abc1234 new\n").expect("write should succeed");
+        let actual = fs::read_to_string(&path).expect("read rewritten todo");
+        assert_eq!(actual, "pick abc1234 new\n");
+    }
+
+    #[test]
+    fn write_file_atomic_reports_exhausted_temp_names() {
+        set_write_fail_point(WriteFailPoint::None);
+        let dir = TempDir::new().expect("tempdir");
+        let path = dir.path().join("todo");
+        let pid = process::id();
+        for attempt in 0_u32..1024 {
+            let name = format!("todo.tmp{pid}.{attempt}");
+            fs::write(dir.path().join(name), "taken").expect("precreate temp slot");
+        }
+
+        let err = write_file_atomic(&path, "content").expect_err("should exhaust temp slots");
+        assert!(
+            err.contains("failed to create a unique temporary file"),
             "unexpected error: {err}"
         );
     }
