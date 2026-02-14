@@ -1,0 +1,5 @@
+error: expected `message = "..."`
+ --> tests/ui/expect-fail-unknown-key.rs:3:15
+  |
+3 | #[expect_fail(unexpected = "boom")]
+  |               ^^^^^^^^^^

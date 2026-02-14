@@ -1,0 +1,7 @@
+error: missing `message = "..."`
+ --> tests/ui/expect-fail-missing-message.rs:3:1
+  |
+3 | #[expect_fail]
+  | ^^^^^^^^^^^^^^
+  |
+  = note: this error originates in the attribute macro `expect_fail` (in Nightly builds, run with -Z macro-backtrace for more info)

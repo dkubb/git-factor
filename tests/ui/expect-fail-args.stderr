@@ -1,0 +1,5 @@
+error: expect_fail test functions must not take arguments
+ --> tests/ui/expect-fail-args.rs:4:4
+  |
+4 | fn sample(value: i32) {
+  |    ^^^^^^
