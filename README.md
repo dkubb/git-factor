@@ -69,6 +69,24 @@ git factor --exec 'npm test' abc1234 def5678
 `--exec` is required and accepts one or more shell commands. Multiple
 `--exec` flags are joined with `&&`.
 
+### Group commits first (`--group`, planned)
+
+```bash
+# Squash a contiguous range first, then split the grouped result
+git factor --group --exec 'make check' HEAD~3..HEAD
+```
+
+`--group` is intended for cases where contiguous commits should be
+treated as one factoring unit. The grouped commit is then split using
+the same `--continue` / `--finish` flow as a normal `HEAD` session.
+
+Expected behavior:
+
+- Valid only when starting a session (same mode as `--exec`).
+- Requires at least two contiguous commits.
+- Runs the exec gate before entering the split loop.
+- `git factor --abort` restores the repository to the pre-start `HEAD`.
+
 ### Continue (commit one slice)
 
 ```bash
