@@ -49,7 +49,9 @@ pub(super) enum FactorError {
     NoActiveSession,
 
     /// No staged changes to commit.
-    #[error("no staged changes to commit")]
+    #[error(
+        "no staged changes to commit\nNEXT: stage exactly one atomic change, then rerun:\n  git factor --continue --message \"type: description\""
+    )]
     NoStagedChanges,
 
     /// Invalid CLI usage not covered by clap parsing.
