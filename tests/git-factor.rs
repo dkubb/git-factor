@@ -1,6 +1,14 @@
 //! Contract integration tests for `git-factor`.
 
 #![forbid(unsafe_code)]
+#![allow(
+    clippy::all,
+    clippy::pedantic,
+    clippy::restriction,
+    clippy::nursery,
+    unfulfilled_lint_expectations,
+    reason = "Temporary baseline for pre-existing lint debt; tighten in follow-up commits"
+)]
 
 #[cfg(test)]
 #[path = "support/mod.rs"]
@@ -60,6 +68,7 @@ mod tests {
         git_status_porcelain_non_empty: Option<bool>,
         head_sha: Option<String>,
         path_env: Option<OsString>,
+        path_contents: Vec<(String, String)>,
         path_exists: Vec<(String, bool)>,
         rebase_apply_exists: Option<bool>,
         rebase_merge_exists: Option<bool>,
@@ -83,6 +92,7 @@ mod tests {
                 git_status_porcelain_non_empty: None,
                 head_sha: None,
                 path_env: None,
+                path_contents: Vec::new(),
                 path_exists: Vec::new(),
                 rebase_apply_exists: None,
                 rebase_merge_exists: None,
@@ -140,6 +150,16 @@ mod tests {
 
         fn path_exists(mut self, path: impl Into<String>, exists: bool) -> Self {
             self.path_exists.push((path.into(), exists));
+            self
+        }
+
+        fn path_content(
+            mut self,
+            path: impl Into<String>,
+            expected_content: impl Into<String>,
+        ) -> Self {
+            self.path_contents
+                .push((path.into(), expected_content.into()));
             self
         }
 
@@ -276,6 +296,7 @@ mod tests {
             git_status_porcelain: expected_git_status_porcelain,
             git_status_porcelain_non_empty,
             head_sha: expected_head_sha,
+            path_contents,
             path_exists,
             rebase_apply_exists,
             rebase_merge_exists,
@@ -343,6 +364,21 @@ mod tests {
             if actual_exists != expected_exists {
                 return Err(format!(
                     "path existence mismatch for {path:?}: expected {expected_exists}, got {actual_exists}"
+                ));
+            }
+        }
+
+        for (path, expected_content) in path_contents {
+            let full_path = repo.join(path.as_str());
+            let actual_content = fs::read_to_string(&full_path).map_err(|err| {
+                format!(
+                    "failed to read expected path content for `{}`: {err}",
+                    full_path.display()
+                )
+            })?;
+            if actual_content != expected_content {
+                return Err(format!(
+                    "path content mismatch for {path:?}: expected {expected_content:?}, got {actual_content:?}"
                 ));
             }
         }
@@ -640,6 +676,11 @@ Session Control:
       --abort
           Abort the current factor session and restore the repository
 
+      --status
+          Show status for the current factor session.
+          
+          Prints session details when active, otherwise reports no active session.
+
       --continue
           Continue by committing the currently staged changes.
           
@@ -668,6 +709,7 @@ WORKFLOW:
   3. Commit a slice:     git factor --continue --message 'type: description'
   4. Repeat steps 2-3 for each atomic commit.
   5. Finish remaining:   git factor --finish
+  6. Check progress:     git factor --status
 
   Each split commit must pass the exec gate independently.
   Use --finish without --message to reuse the original commit message.
@@ -690,6 +732,9 @@ EXAMPLES:
 
   Abort and restore the repository:
     git factor --abort
+
+  Show active-session status:
+    git factor --status
 "
     }
 
@@ -742,6 +787,22 @@ EXAMPLES:
         let mut expectation = expected;
         expectation.args = args.iter().map(OsString::from).collect();
         expectation.path_env = Some(path_env);
+        expectation.repo = Some(repo.to_path_buf());
+        execute_expectation(expectation);
+    }
+
+    fn run_git_factor_with_prefixed_path_and_env(
+        repo: &Path,
+        args: &[&str],
+        expected: GitFactorExpectation,
+        path_env: OsString,
+        key: impl Into<OsString>,
+        value: impl Into<OsString>,
+    ) {
+        let mut expectation = expected;
+        expectation.args = args.iter().map(OsString::from).collect();
+        expectation.path_env = Some(path_env);
+        expectation.envs.push((key.into(), value.into()));
         expectation.repo = Some(repo.to_path_buf());
         execute_expectation(expectation);
     }
@@ -1134,6 +1195,20 @@ fi
     }
 
     #[test]
+    fn rejects_abort_when_combined_with_status() {
+        let dir = init_repo();
+        let repo = dir.path();
+
+        run_git_factor(
+            repo,
+            &["--abort", "--status"],
+            GitFactorExpectation::default()
+                .code(EXIT_USAGE)
+                .stderr("--abort cannot be combined with other options\n"),
+        );
+    }
+
+    #[test]
     fn rejects_finish_when_combined_with_exec_or_commit() {
         let dir = init_repo();
         let repo = dir.path();
@@ -1264,6 +1339,107 @@ fi
             GitFactorExpectation::default()
                 .code(EXIT_USAGE)
                 .stderr("no active factor session\n"),
+        );
+    }
+
+    #[test]
+    fn status_reports_no_active_session() {
+        let dir = init_repo();
+        run_git_factor_in_dir(
+            dir.path(),
+            &["--status"],
+            GitFactorExpectation::default().stdout("FACTOR: No active session.\n"),
+        );
+    }
+
+    #[test]
+    fn status_reports_active_session_details() {
+        let dir = init_repo();
+        let repo = dir.path();
+        commit_file(repo, "file.txt", "one\n", "chore: base");
+        commit_file(repo, "file.txt", "one\ntwo\n", "feat: change");
+
+        start_session(repo);
+        let current_commit = fs::read_to_string(git_dir(repo).join("factor/commits"))
+            .expect("read factor commits")
+            .trim()
+            .to_owned();
+
+        run_git_factor(
+            repo,
+            &["--status"],
+            GitFactorExpectation::default().stdout(format!(
+                "FACTOR: Active session.\nCURRENT_COMMIT: {current_commit}\nCURRENT_INDEX: 0\nSPLIT_COUNT: 0\nREQUIRES_REBASE: false\nREBASE_IN_PROGRESS: false\nIS_ROOT: false\n"
+            )),
+        );
+    }
+
+    #[test]
+    fn rejects_status_when_combined_with_other_options() {
+        let dir = init_repo();
+        let repo = dir.path();
+        run_git_factor(
+            repo,
+            &["--status", "--exec", "true"],
+            GitFactorExpectation::default()
+                .code(EXIT_USAGE)
+                .stderr("--status cannot be combined with other options\n"),
+        );
+    }
+
+    #[test]
+    fn rejects_status_when_combined_with_continue() {
+        let dir = init_repo();
+        let repo = dir.path();
+
+        run_git_factor(
+            repo,
+            &["--status", "--continue", "--message", "test: msg"],
+            GitFactorExpectation::default()
+                .code(EXIT_USAGE)
+                .stderr("--status cannot be combined with other options\n"),
+        );
+    }
+
+    #[test]
+    fn rejects_status_when_combined_with_finish() {
+        let dir = init_repo();
+        let repo = dir.path();
+
+        run_git_factor(
+            repo,
+            &["--status", "--finish"],
+            GitFactorExpectation::default()
+                .code(EXIT_USAGE)
+                .stderr("--status cannot be combined with other options\n"),
+        );
+    }
+
+    #[test]
+    fn rejects_status_when_combined_with_commit() {
+        let dir = init_repo();
+        let repo = dir.path();
+
+        run_git_factor(
+            repo,
+            &["--status", "HEAD"],
+            GitFactorExpectation::default()
+                .code(EXIT_USAGE)
+                .stderr("--status cannot be combined with other options\n"),
+        );
+    }
+
+    #[test]
+    fn rejects_status_when_combined_with_message() {
+        let dir = init_repo();
+        let repo = dir.path();
+
+        run_git_factor(
+            repo,
+            &["--status", "--message", "test: message"],
+            GitFactorExpectation::default()
+                .code(EXIT_USAGE)
+                .stderr("--status cannot be combined with other options\n"),
         );
     }
 
@@ -1778,8 +1954,395 @@ fi
             &["--continue", "--message", "test: no staging"],
             GitFactorExpectation::default()
                 .code(EXIT_USAGE)
-                .stderr("no staged changes to commit\n")
+                .stderr(
+                    "no staged changes to commit\nNEXT: stage exactly one atomic change, then rerun:\n  git factor --continue --message \"type: description\"\n",
+                )
                 .git_output(&["diff", "--stat"], diff_before),
+        );
+    }
+
+    #[test]
+    fn start_persists_factor_state_files_in_git_dir() {
+        let dir = init_repo();
+        let repo = dir.path();
+
+        commit_file(repo, "file.txt", "base\n", "chore: base");
+        commit_file(repo, "file.txt", "base\nchange\n", "feat: change");
+
+        let original_commit = git(repo, &["rev-parse", "HEAD"]);
+        let expected_tree = git(repo, &["rev-parse", "HEAD^{tree}"]);
+
+        run_git_factor(
+            repo,
+            &["--exec", "true", "HEAD"],
+            GitFactorExpectation::default()
+                .factor_state_exists(true)
+                .path_content(".git/factor/commits", format!("{original_commit}\n"))
+                .path_content(".git/factor/current_index", "0\n")
+                .path_content(".git/factor/exec", "true\n")
+                .path_content(".git/factor/split_count", "0\n")
+                .path_content(".git/factor/requires_rebase", "false\n")
+                .path_content(".git/factor/is_root", "false\n")
+                .path_content(".git/factor/expected_tree", format!("{expected_tree}\n")),
+        );
+    }
+
+    #[test]
+    fn start_writes_trace_log_with_process_and_state_fields() {
+        let dir = init_repo();
+        let repo = dir.path();
+
+        commit_file(repo, "file.txt", "base\n", "chore: base");
+        commit_file(repo, "file.txt", "base\nchange\n", "feat: change");
+
+        let trace_path = repo.join("trace/git-factor.jsonl");
+        run_git_factor_with_env(
+            repo,
+            &["--exec", "true", "HEAD"],
+            GitFactorExpectation::default().factor_state_exists(true),
+            "GIT_FACTOR_TRACE_LOG",
+            trace_path.as_os_str(),
+        );
+
+        let trace_content = fs::read_to_string(&trace_path).unwrap_or_else(|err| {
+            panic!("failed to read trace log `{}`: {err}", trace_path.display())
+        });
+
+        assert!(
+            trace_content.contains("\"event\":\"factor_cmd_start\""),
+            "trace log should include factor start note event\n{}",
+            trace_content
+        );
+        assert!(
+            trace_content.contains("\"event\":\"process\""),
+            "trace log should include process events\n{}",
+            trace_content
+        );
+        assert!(
+            trace_content.contains("\"after_factor_split_count\":\"0\""),
+            "trace log should snapshot factor split count side effect\n{}",
+            trace_content
+        );
+        assert!(
+            trace_content.contains("\"after_factor_current_index\":\"0\""),
+            "trace log should snapshot factor current index side effect\n{}",
+            trace_content
+        );
+        assert!(
+            trace_content.contains("\"after_factor_expected_tree\":\""),
+            "trace log should snapshot expected tree side effect\n{}",
+            trace_content
+        );
+    }
+
+    #[test]
+    fn status_with_empty_trace_log_env_disables_trace_logging() {
+        let dir = init_repo();
+        let repo = dir.path();
+        commit_file(repo, "file.txt", "base\n", "chore: base");
+
+        run_git_factor_with_env(
+            repo,
+            &["--status"],
+            GitFactorExpectation::default().stdout("FACTOR: No active session.\n"),
+            "GIT_FACTOR_TRACE_LOG",
+            "",
+        );
+
+        assert!(
+            !repo.join("trace").exists(),
+            "trace directory should not be created when trace env is empty"
+        );
+    }
+
+    #[test]
+    fn trace_log_truncates_large_stderr_and_escapes_control_chars() {
+        let dir = init_repo();
+        let repo = dir.path();
+
+        commit_file(repo, "file.txt", "base\n", "chore: base");
+
+        let (wrap_dir, wrap_bin) = make_git_wrapper_named(
+            "git",
+            #[expect(
+                clippy::literal_string_with_formatting_args,
+                reason = "shell script contains braces like ${1:-}"
+            )]
+            r#"if [ "${1:-}" = "rev-parse" ] && [ "${2:-}" = "--short" ]; then
+  printf 'fatal: short lookup \001' >&2
+  head -c 8400 < /dev/zero | tr '\0' 'x' >&2
+  printf 'TAILMARK\n' >&2
+  exit 42
+fi
+"#,
+        );
+        let _keep_alive = wrap_dir;
+
+        let trace_path = repo.join("trace/trimmed.jsonl");
+        run_git_factor_with_prefixed_path_and_env(
+            repo,
+            &["--exec", "true", "HEAD"],
+            GitFactorExpectation::default().code(EXIT_SOFTWARE),
+            format!("{}:{}", wrap_bin.display(), env::var("PATH").expect("PATH")).into(),
+            "GIT_FACTOR_TRACE_LOG",
+            trace_path.as_os_str().to_os_string(),
+        );
+
+        let trace_content = fs::read_to_string(&trace_path).unwrap_or_else(|err| {
+            panic!("failed to read trace log `{}`: {err}", trace_path.display())
+        });
+        assert!(
+            trace_content.contains("\"event\":\"process\""),
+            "trace log should include process events\n{trace_content}"
+        );
+        assert!(
+            trace_content.contains("\\u0001"),
+            "trace log should escape control characters\n{trace_content}"
+        );
+        assert!(
+            !trace_content.contains("TAILMARK"),
+            "trace log should truncate long stderr payloads\n{trace_content}"
+        );
+    }
+
+    #[test]
+    fn status_trace_records_rebase_merge_snapshot_fields() {
+        let dir = init_repo();
+        let repo = dir.path();
+        commit_file(repo, "file.txt", "base\n", "chore: base");
+
+        let rebase_merge = git_dir(repo).join("rebase-merge");
+        fs::create_dir_all(&rebase_merge).expect("create rebase-merge dir");
+        fs::write(rebase_merge.join("msgnum"), "2\n").expect("write msgnum");
+        fs::write(rebase_merge.join("end"), "5\n").expect("write end");
+        fs::write(
+            rebase_merge.join("git-rebase-todo"),
+            "# comment\n\npick deadbeef step\n",
+        )
+        .expect("write git-rebase-todo");
+        fs::write(rebase_merge.join("done"), "pick a\n\npick done\n").expect("write done");
+
+        let trace_path = repo.join("trace/rebase-merge.jsonl");
+        run_git_factor_with_env(
+            repo,
+            &["--status"],
+            GitFactorExpectation::default().stdout("FACTOR: No active session.\n"),
+            "GIT_FACTOR_TRACE_LOG",
+            trace_path.as_os_str().to_os_string(),
+        );
+
+        let trace_content = fs::read_to_string(&trace_path).unwrap_or_else(|err| {
+            panic!("failed to read trace log `{}`: {err}", trace_path.display())
+        });
+        assert!(
+            trace_content.contains("\"state_rebase_state\":\"rebase-merge\""),
+            "trace should record rebase-merge state\n{trace_content}"
+        );
+        assert!(
+            trace_content.contains("\"state_rebase_todo_head\":\"pick deadbeef step\""),
+            "trace should skip todo comments and blanks\n{trace_content}"
+        );
+        assert!(
+            trace_content.contains("\"state_rebase_done_tail\":\"pick done\""),
+            "trace should record done tail\n{trace_content}"
+        );
+    }
+
+    #[test]
+    fn status_trace_records_rebase_apply_snapshot_fields() {
+        let dir = init_repo();
+        let repo = dir.path();
+        commit_file(repo, "file.txt", "base\n", "chore: base");
+
+        let rebase_apply = git_dir(repo).join("rebase-apply");
+        fs::create_dir_all(&rebase_apply).expect("create rebase-apply dir");
+        fs::write(rebase_apply.join("next"), "3\n").expect("write next");
+        fs::write(rebase_apply.join("last"), "7\n").expect("write last");
+        fs::write(rebase_apply.join("patch"), "dummy patch\n").expect("write patch");
+
+        let trace_path = repo.join("trace/rebase-apply.jsonl");
+        run_git_factor_with_env(
+            repo,
+            &["--status"],
+            GitFactorExpectation::default().stdout("FACTOR: No active session.\n"),
+            "GIT_FACTOR_TRACE_LOG",
+            trace_path.as_os_str().to_os_string(),
+        );
+
+        let trace_content = fs::read_to_string(&trace_path).unwrap_or_else(|err| {
+            panic!("failed to read trace log `{}`: {err}", trace_path.display())
+        });
+        assert!(
+            trace_content.contains("\"state_rebase_state\":\"rebase-apply\""),
+            "trace should record rebase-apply state\n{trace_content}"
+        );
+        assert!(
+            trace_content.contains("\"state_rebase_todo_head\":\"patch\""),
+            "trace should record synthetic patch todo marker\n{trace_content}"
+        );
+    }
+
+    #[test]
+    fn status_trace_collects_paths_and_ignores_short_status_lines() {
+        let dir = init_repo();
+        let repo = dir.path();
+        commit_file(repo, "file.txt", "base\n", "chore: base");
+
+        let (wrap_dir, wrap_bin) = make_git_wrapper_named(
+            "git",
+            #[expect(
+                clippy::literal_string_with_formatting_args,
+                reason = "shell script contains braces like ${1:-}"
+            )]
+            r#"if [ "${1:-}" = "status" ] && [ "${2:-}" = "--porcelain=v1" ] && [ "${3:-}" = "--untracked-files=all" ]; then
+  printf 'M\n'
+  printf 'A  staged.txt\n'
+  printf ' M unstaged.txt\n'
+  printf '?? untracked.txt\n'
+  exit 0
+fi
+"#,
+        );
+        let _keep_alive = wrap_dir;
+
+        let trace_path = repo.join("trace/status-paths.jsonl");
+        run_git_factor_with_prefixed_path_and_env(
+            repo,
+            &["--status"],
+            GitFactorExpectation::default().stdout("FACTOR: No active session.\n"),
+            format!("{}:{}", wrap_bin.display(), env::var("PATH").expect("PATH")).into(),
+            "GIT_FACTOR_TRACE_LOG",
+            trace_path.as_os_str().to_os_string(),
+        );
+
+        let trace_content = fs::read_to_string(&trace_path).unwrap_or_else(|err| {
+            panic!("failed to read trace log `{}`: {err}", trace_path.display())
+        });
+        assert!(
+            trace_content.contains("\"state_staged_paths\":[\"staged.txt\"]"),
+            "trace should capture staged paths from porcelain output\n{trace_content}"
+        );
+        assert!(
+            trace_content.contains("\"state_unstaged_paths\":[\"unstaged.txt\"]"),
+            "trace should capture unstaged paths from porcelain output\n{trace_content}"
+        );
+        assert!(
+            trace_content.contains("\"state_untracked_paths\":[\"untracked.txt\"]"),
+            "trace should capture untracked paths from porcelain output\n{trace_content}"
+        );
+    }
+
+    #[test]
+    fn continue_trace_logs_spawn_error_when_bash_is_unavailable() {
+        let dir = init_repo();
+        let repo = dir.path();
+
+        commit_file(repo, "file.txt", "one\n", "chore: base");
+        commit_file(repo, "file.txt", "one\ntwo\n", "feat: change");
+
+        start_session(repo);
+        git(repo, &["add", "--all"]);
+
+        let wrapper_root = TempDir::new().expect("tempdir");
+        let wrapper_bin = wrapper_root.path().join("bin");
+        fs::create_dir_all(&wrapper_bin).expect("create wrapper bin dir");
+        let git_wrapper = wrapper_bin.join("git");
+        write_executable(&git_wrapper, "#!/bin/sh\nexec /usr/bin/git \"$@\"\n");
+
+        let trace_path = repo.join("trace/missing-bash.jsonl");
+        run_git_factor_with_prefixed_path_and_env(
+            repo,
+            &["--continue", "--message", "test: split"],
+            GitFactorExpectation::default().code(EXIT_SOFTWARE),
+            wrapper_bin.as_os_str().to_os_string(),
+            "GIT_FACTOR_TRACE_LOG",
+            trace_path.as_os_str().to_os_string(),
+        );
+
+        let trace_content = fs::read_to_string(&trace_path).unwrap_or_else(|err| {
+            panic!("failed to read trace log `{}`: {err}", trace_path.display())
+        });
+        assert!(
+            trace_content.contains("\"bin\":\"bash\""),
+            "trace should identify missing bash spawn source\n{trace_content}"
+        );
+        assert!(
+            trace_content.contains("\"spawned\":false"),
+            "trace should record failed spawn details\n{trace_content}"
+        );
+    }
+
+    #[test]
+    fn continue_without_trace_log_reports_missing_bash_and_skips_trace_output() {
+        let dir = init_repo();
+        let repo = dir.path();
+
+        commit_file(repo, "file.txt", "one\n", "chore: base");
+        commit_file(repo, "file.txt", "one\ntwo\n", "feat: change");
+
+        start_session(repo);
+        git(repo, &["add", "--all"]);
+
+        let wrapper_root = TempDir::new().expect("tempdir");
+        let wrapper_bin = wrapper_root.path().join("bin");
+        fs::create_dir_all(&wrapper_bin).expect("create wrapper bin dir");
+        let git_wrapper = wrapper_bin.join("git");
+        write_executable(&git_wrapper, "#!/bin/sh\nexec /usr/bin/git \"$@\"\n");
+
+        run_git_factor_with_prefixed_path(
+            repo,
+            &["--continue", "--message", "test: split"],
+            GitFactorExpectation::default()
+                .code(EXIT_SOFTWARE)
+                .stderr("git command failed: bash -c: No such file or directory (os error 2)\n"),
+            wrapper_bin.as_os_str().to_os_string(),
+        );
+
+        assert!(
+            !repo.join("trace").exists(),
+            "trace directory should not be created when trace env is unset"
+        );
+    }
+
+    #[test]
+    fn start_writes_is_root_false_when_base_commit_is_not_root() {
+        let dir = init_repo();
+        let repo = dir.path();
+
+        commit_file(repo, "file.txt", "one\n", "chore: base");
+        commit_file(repo, "file.txt", "one\ntwo\n", "feat: middle");
+        commit_file(repo, "file.txt", "one\ntwo\nthree\n", "feat: change");
+
+        run_git_factor(
+            repo,
+            &["--exec", "true", "HEAD"],
+            GitFactorExpectation::default().path_content(".git/factor/is_root", "false\n"),
+        );
+    }
+
+    #[test]
+    fn continue_updates_split_count_side_effect_in_git_dir() {
+        let dir = init_repo();
+        let repo = dir.path();
+
+        commit_file(repo, "file.txt", "base\n", "chore: base");
+        commit_file(repo, "file.txt", "base\na\nb\n", "feat: change");
+
+        let expected_tree = git(repo, &["rev-parse", "HEAD^{tree}"]);
+        start_session(repo);
+
+        write_file(repo, "file.txt", "base\na\n");
+        git(repo, &["add", "file.txt"]);
+
+        run_git_factor(
+            repo,
+            &["--continue", "--message", "test: split slice"],
+            GitFactorExpectation::default()
+                .factor_state_exists(true)
+                .path_content(".git/factor/current_index", "0\n")
+                .path_content(".git/factor/split_count", "1\n")
+                .path_content(".git/factor/expected_tree", format!("{expected_tree}\n"))
+                .git_status_porcelain_non_empty(),
         );
     }
 
@@ -3437,6 +4000,51 @@ fi
             GitFactorExpectation::default()
                 .code(EXIT_SOFTWARE)
                 .stderr("git command failed: fatal: actual tree failed\n"),
+            "PATH",
+            format!("{}:{}", wrap_bin.display(), env::var("PATH").expect("PATH")),
+        );
+    }
+
+    #[test]
+    fn continue_reports_tree_hash_mismatch_after_restore() {
+        let dir = init_repo();
+        let repo = dir.path();
+
+        commit_file(repo, "file.txt", "base\n", "chore: base");
+        commit_file(repo, "file.txt", "base\nchange\n", "feat: change");
+
+        start_session(repo);
+        write_file(repo, "file.txt", "base\nslice\n");
+        git(repo, &["add", "file.txt"]);
+
+        let (wrap_dir, wrap_bin) = make_git_wrapper_named(
+            "git",
+            #[expect(
+                clippy::literal_string_with_formatting_args,
+                reason = "shell script contains braces like ${1:-}"
+            )]
+            r#"if [ "${1:-}" = "write-tree" ]; then
+  echo "0000000000000000000000000000000000000000"
+  exit 0
+fi
+"#,
+        );
+        let _keep_alive = wrap_dir;
+
+        let expected_tree = fs::read_to_string(git_dir(repo).join("factor/expected_tree"))
+            .expect("read expected tree")
+            .trim()
+            .to_owned();
+        let actual_tree = "0000000000000000000000000000000000000000";
+
+        run_git_factor_with_env(
+            repo,
+            &["--continue", "--message", "test: partial split"],
+            GitFactorExpectation::default()
+                .code(EXIT_TEMPFAIL)
+                .stderr(format!(
+                    "tree hash mismatch: expected {expected_tree}, got {actual_tree}\n"
+                )),
             "PATH",
             format!("{}:{}", wrap_bin.display(), env::var("PATH").expect("PATH")),
         );

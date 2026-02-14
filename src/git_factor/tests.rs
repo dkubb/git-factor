@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::env;
 use std::ffi::OsString;
 use std::path::Path;
 use std::path::PathBuf;
@@ -94,6 +95,149 @@ impl Fs for FailingRequiresRebaseWriteFs {
     }
 }
 
+struct FailingIsRootWriteFs;
+
+impl Fs for FailingIsRootWriteFs {
+    fn create_dir_all(&self, path: &Path) -> io::Result<()> {
+        REAL_FS.create_dir_all(path)
+    }
+
+    fn remove_dir_all(&self, path: &Path) -> io::Result<()> {
+        REAL_FS.remove_dir_all(path)
+    }
+
+    fn remove_file(&self, path: &Path) -> io::Result<()> {
+        REAL_FS.remove_file(path)
+    }
+
+    fn read_to_string(&self, path: &Path) -> io::Result<String> {
+        REAL_FS.read_to_string(path)
+    }
+
+    fn write_string(&self, path: &Path, content: &str) -> io::Result<()> {
+        if path.file_name().is_some_and(|name| name == "is_root") {
+            return Err(io::Error::other("is_root write failed"));
+        }
+        REAL_FS.write_string(path, content)
+    }
+
+    fn canonicalize(&self, path: &Path) -> io::Result<PathBuf> {
+        REAL_FS.canonicalize(path)
+    }
+
+    fn is_dir(&self, path: &Path) -> bool {
+        REAL_FS.is_dir(path)
+    }
+
+    fn exists(&self, path: &Path) -> bool {
+        REAL_FS.exists(path)
+    }
+}
+
+struct FailingWriteForFileFs {
+    file_name: &'static str,
+    message: &'static str,
+}
+
+impl Fs for FailingWriteForFileFs {
+    fn create_dir_all(&self, path: &Path) -> io::Result<()> {
+        REAL_FS.create_dir_all(path)
+    }
+
+    fn remove_dir_all(&self, path: &Path) -> io::Result<()> {
+        REAL_FS.remove_dir_all(path)
+    }
+
+    fn remove_file(&self, path: &Path) -> io::Result<()> {
+        REAL_FS.remove_file(path)
+    }
+
+    fn read_to_string(&self, path: &Path) -> io::Result<String> {
+        REAL_FS.read_to_string(path)
+    }
+
+    fn write_string(&self, path: &Path, content: &str) -> io::Result<()> {
+        if path.file_name().is_some_and(|name| name == self.file_name) {
+            return Err(io::Error::other(self.message));
+        }
+        REAL_FS.write_string(path, content)
+    }
+
+    fn canonicalize(&self, path: &Path) -> io::Result<PathBuf> {
+        REAL_FS.canonicalize(path)
+    }
+
+    fn is_dir(&self, path: &Path) -> bool {
+        REAL_FS.is_dir(path)
+    }
+
+    fn exists(&self, path: &Path) -> bool {
+        REAL_FS.exists(path)
+    }
+}
+
+struct NthReadFailureFs {
+    file_name: &'static str,
+    fail_at: usize,
+    message: &'static str,
+    reads: Mutex<usize>,
+}
+
+impl NthReadFailureFs {
+    fn new(file_name: &'static str, fail_at: usize, message: &'static str) -> Self {
+        Self {
+            file_name,
+            fail_at,
+            message,
+            reads: Mutex::new(0),
+        }
+    }
+}
+
+impl Fs for NthReadFailureFs {
+    fn create_dir_all(&self, path: &Path) -> io::Result<()> {
+        REAL_FS.create_dir_all(path)
+    }
+
+    fn remove_dir_all(&self, path: &Path) -> io::Result<()> {
+        REAL_FS.remove_dir_all(path)
+    }
+
+    fn remove_file(&self, path: &Path) -> io::Result<()> {
+        REAL_FS.remove_file(path)
+    }
+
+    fn read_to_string(&self, path: &Path) -> io::Result<String> {
+        if path
+            .file_name()
+            .is_some_and(|name| name == self.file_name)
+        {
+            let mut reads = self.reads.lock().expect("nth-read lock");
+            *reads = reads.saturating_add(1);
+            if *reads == self.fail_at {
+                return Err(io::Error::other(self.message));
+            }
+        }
+        REAL_FS.read_to_string(path)
+    }
+
+    fn write_string(&self, path: &Path, content: &str) -> io::Result<()> {
+        REAL_FS.write_string(path, content)
+    }
+
+    fn canonicalize(&self, path: &Path) -> io::Result<PathBuf> {
+        REAL_FS.canonicalize(path)
+    }
+
+    fn is_dir(&self, path: &Path) -> bool {
+        REAL_FS.is_dir(path)
+    }
+
+    fn exists(&self, path: &Path) -> bool {
+        REAL_FS.exists(path)
+    }
+}
+
 fn ctx_for(path: &Path) -> Ctx<'static> {
     Ctx {
         runner: &REAL_RUNNER,
@@ -104,13 +248,21 @@ fn ctx_for(path: &Path) -> Ctx<'static> {
     }
 }
 
+fn is_forced_runner_failure(err: &FactorError) -> bool {
+    matches!(
+        err,
+        FactorError::GitDir(msg) | FactorError::GitCommand(msg)
+            if msg.contains("forced runner failure")
+    )
+}
+
 #[cfg(unix)]
 fn exit_status(code: i32) -> ExitStatus {
     use std::os::unix::process::ExitStatusExt as _;
     ExitStatus::from_raw(code)
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct ScriptedRunner {
     outputs: HashMap<String, Output>,
     statuses: HashMap<String, ExitStatus>,
@@ -194,6 +346,51 @@ impl Runner for ScriptedRunner {
             .get(&key)
             .copied()
             .ok_or_else(|| io::Error::other(format!("unexpected status call: {key}")))
+    }
+}
+
+struct NthRunnerFailure {
+    inner: ScriptedRunner,
+    fail_at: usize,
+    calls: Mutex<usize>,
+}
+
+impl NthRunnerFailure {
+    fn new(inner: ScriptedRunner, fail_at: usize) -> Self {
+        Self {
+            inner,
+            fail_at,
+            calls: Mutex::new(0),
+        }
+    }
+
+    fn should_fail(&self) -> bool {
+        let mut calls = self.calls.lock().expect("runner calls lock");
+        *calls = calls.saturating_add(1);
+        *calls == self.fail_at
+    }
+}
+
+impl Runner for NthRunnerFailure {
+    fn output(&self, bin: &str, args: &[&str], cwd: &Path) -> io::Result<Output> {
+        if self.should_fail() {
+            return Err(io::Error::other("forced runner failure"));
+        }
+        self.inner.output(bin, args, cwd)
+    }
+
+    fn status(
+        &self,
+        bin: &str,
+        args: &[&str],
+        envs: &[(&str, &str)],
+        quiet: bool,
+        cwd: &Path,
+    ) -> io::Result<ExitStatus> {
+        if self.should_fail() {
+            return Err(io::Error::other("forced runner failure"));
+        }
+        self.inner.status(bin, args, envs, quiet, cwd)
     }
 }
 
@@ -415,6 +612,44 @@ impl Io for FailingIo {
     }
 }
 
+struct NthIoFailure {
+    fail_at: usize,
+    calls: Mutex<usize>,
+}
+
+impl NthIoFailure {
+    fn new(fail_at: usize) -> Self {
+        Self {
+            fail_at,
+            calls: Mutex::new(0),
+        }
+    }
+
+    fn maybe_fail(&self) -> io::Result<()> {
+        let mut calls = self.calls.lock().expect("io calls lock");
+        *calls = calls.saturating_add(1);
+        if *calls == self.fail_at {
+            Err(io::Error::other("io fail"))
+        } else {
+            Ok(())
+        }
+    }
+}
+
+#[expect(
+    clippy::missing_trait_methods,
+    reason = "Test helper uses Io default line methods to exercise out/err call sites"
+)]
+impl Io for NthIoFailure {
+    fn out(&self, _text: &str) -> io::Result<()> {
+        self.maybe_fail()
+    }
+
+    fn err(&self, _text: &str) -> io::Result<()> {
+        self.maybe_fail()
+    }
+}
+
 #[test]
 fn failing_io_out_is_reachable_for_coverage() {
     let io = FailingIo;
@@ -432,6 +667,13 @@ fn failing_io_err_is_reachable_for_coverage() {
 #[test]
 fn failing_io_errln_is_reachable_for_coverage() {
     let io = FailingIo;
+    let err = io.errln("io fail").expect_err("expected io failure");
+    assert!(err.to_string().contains("io fail"), "err was: {err:?}");
+}
+
+#[test]
+fn nth_io_failure_errln_is_reachable_for_coverage() {
+    let io = NthIoFailure::new(2);
     let err = io.errln("io fail").expect_err("expected io failure");
     assert!(err.to_string().contains("io fail"), "err was: {err:?}");
 }
@@ -1577,6 +1819,123 @@ fn cmd_start_propagates_requires_rebase_state_write_failure() {
 #[test]
 #[expect(
     clippy::too_many_lines,
+    reason = "Full cmd_start scripted runner setup with failing state write path"
+)]
+fn cmd_start_propagates_is_root_state_write_failure() {
+    let dir = TempDir::new().expect("tempdir");
+    let repo = dir.path();
+    let fs = FailingIsRootWriteFs;
+
+    let mkdir = repo.join("mkdir");
+    fs.create_dir_all(&mkdir).expect("mkdir");
+    assert!(fs.is_dir(&mkdir));
+    assert!(fs.exists(&mkdir));
+
+    let write_read = repo.join("write-read.txt");
+    fs.write_string(&write_read, "hello").expect("write hello");
+    let content = fs.read_to_string(&write_read).expect("read hello");
+    assert_eq!(content, "hello");
+
+    let canonical = fs.canonicalize(&mkdir).expect("canonicalize mkdir");
+    assert!(canonical.exists());
+
+    let rm_file = repo.join("rm-file.txt");
+    fs.write_string(&rm_file, "x").expect("write rm file");
+    fs.remove_file(&rm_file).expect("remove rm file");
+    assert!(!fs.exists(&rm_file));
+
+    let rm_dir = repo.join("rm-dir");
+    fs.create_dir_all(&rm_dir).expect("create rm dir");
+    fs.remove_dir_all(&rm_dir).expect("remove rm dir");
+    assert!(!fs.exists(&rm_dir));
+
+    let sha = "a".repeat(40);
+    let runner = ScriptedRunner::default()
+        .with_output("git", &["rev-parse", "--git-dir"], repo, ".git\n")
+        .with_output(
+            "git",
+            &["rev-parse", "--verify", "HEAD"],
+            repo,
+            &format!("{sha}\n"),
+        )
+        .with_output(
+            "git",
+            &["rev-list", "--reverse", "--topo-order", &sha],
+            repo,
+            &format!("{sha}\n"),
+        )
+        .with_status(
+            "git",
+            &["merge-base", "--is-ancestor", &sha, "HEAD"],
+            &[],
+            true,
+            repo,
+            0,
+        )
+        .with_status(
+            "git",
+            &["rev-parse", "--quiet", "--verify", &format!("{sha}^2")],
+            &[],
+            true,
+            repo,
+            1,
+        )
+        .with_output("git", &["rev-parse", "--short", &sha], repo, "aaaaaaa\n")
+        .with_output(
+            "git",
+            &["show", "--format=%B", "--no-patch", &sha],
+            repo,
+            "msg\n",
+        )
+        .with_status(
+            "bash",
+            &["--norc", "--noprofile", "-n", "-c", "true"],
+            &[],
+            true,
+            repo,
+            0,
+        )
+        .with_status("bash", &["-c", "true"], &[], false, repo, 0)
+        .with_status(
+            "git",
+            &["rev-parse", "--quiet", "--verify", &format!("{sha}^")],
+            &[],
+            true,
+            repo,
+            0,
+        );
+    let io = TestIo::default();
+    let env = TestEnv {
+        cwd: repo.to_path_buf(),
+    };
+    let ctx = Ctx {
+        runner: &runner,
+        cwd: repo.to_path_buf(),
+        io: &io,
+        env: &env,
+        fs: &fs,
+    };
+
+    let err = run_with_args_vec(
+        &ctx,
+        vec![
+            OsString::from("git-factor"),
+            OsString::from("--exec"),
+            OsString::from("true"),
+            OsString::from("HEAD"),
+        ],
+    )
+    .expect_err("expected is_root write failure");
+
+    assert_eq!(
+        err.to_string(),
+        "failed to write state: is_root write failed"
+    );
+}
+
+#[test]
+#[expect(
+    clippy::too_many_lines,
     reason = "Full cmd_start scripted runner setup; splitting further would reduce readability"
 )]
 fn cmd_start_range_ref_inserts_shas_and_propagates_io_error_on_multi_commit_banner() {
@@ -1693,7 +2052,10 @@ fn cmd_start_range_ref_inserts_shas_and_propagates_io_error_on_multi_commit_bann
                 "true",
                 &format!("{sha_a}^"),
             ],
-            &[("GIT_EDITOR", "false"), ("GIT_SEQUENCE_EDITOR", &seq_editor)],
+            &[
+                ("GIT_EDITOR", "false"),
+                ("GIT_SEQUENCE_EDITOR", &seq_editor),
+            ],
             false,
             repo,
             0,
@@ -1754,6 +2116,145 @@ fn main_entry_with_prints_error_when_ctx_cannot_be_built() {
 }
 
 #[test]
+fn cmd_abort_reports_rebase_hint_when_rebase_still_active() {
+    let dir = TempDir::new().expect("tempdir");
+    let repo = dir.path();
+    let git_dir = repo.join(".git");
+    let state_dir = git_dir.join("factor");
+    fs::create_dir_all(&state_dir).expect("create factor dir");
+    fs::create_dir_all(git_dir.join("rebase-merge")).expect("create rebase-merge");
+
+    let sha = "a".repeat(40);
+    fs::write(state_dir.join("commits"), format!("{sha}\n")).expect("write commits");
+    fs::write(state_dir.join("current_index"), "0\n").expect("write current index");
+
+    let runner = ScriptedRunner::default()
+        .with_output("git", &["rev-parse", "--git-dir"], repo, ".git\n")
+        .with_status(
+            "git",
+            &["reset", "--hard", "--quiet", &sha],
+            &[],
+            false,
+            repo,
+            0,
+        )
+        .with_status(
+            "git",
+            &["clean", "--force", "--quiet", "-d"],
+            &[],
+            false,
+            repo,
+            0,
+        );
+    let io = TestIo::default();
+    let env = TestEnv {
+        cwd: repo.to_path_buf(),
+    };
+    let ctx = Ctx {
+        runner: &runner,
+        cwd: repo.to_path_buf(),
+        io: &io,
+        env: &env,
+        fs: &REAL_FS,
+    };
+
+    let code = cmd_abort_in(&ctx).expect("abort should succeed");
+
+    assert_eq!(code, EXIT_OK);
+    assert_eq!(
+        io.stdout(),
+        concat!(
+            "FACTOR: Session aborted for current commit step.\n",
+            "FACTOR: Rebase still active. To abort full rebase, run: git rebase --abort\n"
+        )
+    );
+    assert!(io.stderr().is_empty(), "stderr should be empty");
+    assert!(
+        !state_dir.exists(),
+        "factor state dir should be removed after abort"
+    );
+}
+
+#[test]
+fn cmd_status_reports_no_active_session_message() {
+    let dir = TempDir::new().expect("tempdir");
+    let repo = dir.path();
+    let git_dir = repo.join(".git");
+    fs::create_dir_all(&git_dir).expect("create git dir");
+
+    let runner =
+        ScriptedRunner::default().with_output("git", &["rev-parse", "--git-dir"], repo, ".git\n");
+    let io = TestIo::default();
+    let env = TestEnv {
+        cwd: repo.to_path_buf(),
+    };
+    let ctx = Ctx {
+        runner: &runner,
+        cwd: repo.to_path_buf(),
+        io: &io,
+        env: &env,
+        fs: &REAL_FS,
+    };
+
+    let code = cmd_status_in(&ctx).expect("status should succeed");
+
+    assert_eq!(code, EXIT_OK);
+    assert_eq!(io.stdout(), "FACTOR: No active session.\n");
+    assert!(io.stderr().is_empty(), "stderr should be empty");
+}
+
+#[test]
+fn cmd_status_reports_active_session_fields() {
+    let dir = TempDir::new().expect("tempdir");
+    let repo = dir.path();
+    let git_dir = repo.join(".git");
+    let state_dir = git_dir.join("factor");
+    fs::create_dir_all(&state_dir).expect("create factor dir");
+    fs::create_dir_all(git_dir.join("rebase-merge")).expect("create rebase-merge");
+
+    let sha = "a".repeat(40);
+    fs::write(state_dir.join("commits"), format!("{sha}\n")).expect("write commits");
+    fs::write(state_dir.join("current_index"), "0\n").expect("write current index");
+    fs::write(state_dir.join("split_count"), "2\n").expect("write split count");
+    fs::write(state_dir.join("requires_rebase"), "false\n").expect("write requires rebase");
+    fs::write(state_dir.join("is_root"), "true\n").expect("write is root");
+
+    let runner =
+        ScriptedRunner::default().with_output("git", &["rev-parse", "--git-dir"], repo, ".git\n");
+    let io = TestIo::default();
+    let env = TestEnv {
+        cwd: repo.to_path_buf(),
+    };
+    let ctx = Ctx {
+        runner: &runner,
+        cwd: repo.to_path_buf(),
+        io: &io,
+        env: &env,
+        fs: &REAL_FS,
+    };
+
+    let code = cmd_status_in(&ctx).expect("status should succeed");
+
+    assert_eq!(code, EXIT_OK);
+    assert_eq!(
+        io.stdout(),
+        format!(
+            concat!(
+                "FACTOR: Active session.\n",
+                "CURRENT_COMMIT: {}\n",
+                "CURRENT_INDEX: 0\n",
+                "SPLIT_COUNT: 2\n",
+                "REQUIRES_REBASE: false\n",
+                "REBASE_IN_PROGRESS: true\n",
+                "IS_ROOT: true\n"
+            ),
+            sha
+        )
+    );
+    assert!(io.stderr().is_empty(), "stderr should be empty");
+}
+
+#[test]
 fn advance_to_next_commit_prints_untracked_changes_when_present() {
     let dir = TempDir::new().expect("tempdir");
     let repo = dir.path();
@@ -1771,7 +2272,15 @@ fn advance_to_next_commit_prints_untracked_changes_when_present() {
     fs::write(state_dir.join("split_count"), "3\n").expect("write split_count");
 
     let runner = ScriptedRunner::default()
-        .with_status("git", &["rebase", "--continue"], &[("GIT_EDITOR", "false"), ("GIT_SEQUENCE_EDITOR", "false")], false, repo, 0)
+        .with_output("git", &["rev-parse", "--git-dir"], repo, ".git\n")
+        .with_status(
+            "git",
+            &["rebase", "--continue"],
+            &[("GIT_EDITOR", "false"), ("GIT_SEQUENCE_EDITOR", "false")],
+            false,
+            repo,
+            0,
+        )
         .with_output("git", &["rev-parse", "HEAD^{tree}"], repo, "head_tree\n")
         .with_status("git", &["reset", "--quiet", "HEAD~1"], &[], false, repo, 0)
         .with_output("git", &["rev-parse", "--git-dir"], repo, ".git\n")
@@ -1867,7 +2376,15 @@ fn advance_to_next_commit_propagates_io_error_when_outln_fails_mid_rebase() {
     fs::write(state_dir.join("split_count"), "3\n").expect("write split_count");
 
     let runner = ScriptedRunner::default()
-        .with_status("git", &["rebase", "--continue"], &[("GIT_EDITOR", "false"), ("GIT_SEQUENCE_EDITOR", "false")], false, repo, 0)
+        .with_output("git", &["rev-parse", "--git-dir"], repo, ".git\n")
+        .with_status(
+            "git",
+            &["rebase", "--continue"],
+            &[("GIT_EDITOR", "false"), ("GIT_SEQUENCE_EDITOR", "false")],
+            false,
+            repo,
+            0,
+        )
         .with_output("git", &["rev-parse", "HEAD^{tree}"], repo, "head_tree\n")
         .with_status("git", &["reset", "--quiet", "HEAD~1"], &[], false, repo, 0)
         .with_output("git", &["rev-parse", "--git-dir"], repo, ".git\n")
@@ -1957,7 +2474,15 @@ fn advance_to_next_commit_errors_on_current_index_overflow() {
         .expect("write current_index");
 
     let runner = ScriptedRunner::default()
-        .with_status("git", &["rebase", "--continue"], &[("GIT_EDITOR", "false"), ("GIT_SEQUENCE_EDITOR", "false")], false, repo, 0)
+        .with_output("git", &["rev-parse", "--git-dir"], repo, ".git\n")
+        .with_status(
+            "git",
+            &["rebase", "--continue"],
+            &[("GIT_EDITOR", "false"), ("GIT_SEQUENCE_EDITOR", "false")],
+            false,
+            repo,
+            0,
+        )
         .with_output("git", &["rev-parse", "HEAD^{tree}"], repo, "head_tree\n")
         .with_output("git", &["rev-parse", "--git-dir"], repo, ".git\n");
     let io = TestIo::default();
@@ -2025,7 +2550,14 @@ fn advance_to_next_commit_omits_untracked_section_when_empty() {
     fs::write(state_dir.join("split_count"), "1\n").expect("write split_count");
 
     let runner = ScriptedRunner::default()
-        .with_status("git", &["rebase", "--continue"], &[("GIT_EDITOR", "false"), ("GIT_SEQUENCE_EDITOR", "false")], false, repo, 0)
+        .with_status(
+            "git",
+            &["rebase", "--continue"],
+            &[("GIT_EDITOR", "false"), ("GIT_SEQUENCE_EDITOR", "false")],
+            false,
+            repo,
+            0,
+        )
         .with_output("git", &["rev-parse", "HEAD^{tree}"], repo, "head_tree\n")
         .with_status("git", &["reset", "--quiet", "HEAD~1"], &[], false, repo, 0)
         .with_output("git", &["rev-parse", "--git-dir"], repo, ".git\n")
@@ -2178,6 +2710,344 @@ fn rehydrate_pool_preserving_index_propagates_cherry_pick_status_error() {
 }
 
 #[test]
+fn rehydrate_pool_preserving_index_reports_conflicts_when_unmerged_paths_exist() {
+    let dir = TempDir::new().expect("tempdir");
+    let repo = dir.path();
+
+    let runner = ScriptedRunner::default()
+        .with_output("git", &["write-tree"], repo, "deadbeef\n")
+        .with_status(
+            "git",
+            &[
+                "cherry-pick",
+                "--no-commit",
+                "--strategy-option",
+                "theirs",
+                &"a".repeat(40),
+            ],
+            &[],
+            false,
+            repo,
+            1,
+        )
+        .with_output(
+            "git",
+            &["diff", "--name-only", "--diff-filter=U"],
+            repo,
+            "conflict.txt\n",
+        );
+
+    let io = TestIo::default();
+    let env = TestEnv {
+        cwd: repo.to_path_buf(),
+    };
+    let ctx = Ctx {
+        runner: &runner,
+        cwd: repo.to_path_buf(),
+        io: &io,
+        env: &env,
+        fs: &REAL_FS,
+    };
+
+    let commit = CommitSha::new("a".repeat(40)).expect("sha");
+    let err = rehydrate_pool_preserving_index(&ctx, &commit).expect_err("expected conflict error");
+
+    assert_eq!(
+        err.to_string(),
+        "git command failed: rehydrate cherry-pick left conflicts:\nconflict.txt"
+    );
+}
+
+#[test]
+fn rehydrate_pool_preserving_index_reports_quit_failure_after_cherry_pick_failure() {
+    let dir = TempDir::new().expect("tempdir");
+    let repo = dir.path();
+
+    let runner = ScriptedRunner::default()
+        .with_output("git", &["write-tree"], repo, "deadbeef\n")
+        .with_status(
+            "git",
+            &[
+                "cherry-pick",
+                "--no-commit",
+                "--strategy-option",
+                "theirs",
+                &"a".repeat(40),
+            ],
+            &[],
+            false,
+            repo,
+            1,
+        )
+        .with_output("git", &["diff", "--name-only", "--diff-filter=U"], repo, "")
+        .with_status("git", &["cherry-pick", "--quit"], &[], false, repo, 128);
+
+    let io = TestIo::default();
+    let env = TestEnv {
+        cwd: repo.to_path_buf(),
+    };
+    let ctx = Ctx {
+        runner: &runner,
+        cwd: repo.to_path_buf(),
+        io: &io,
+        env: &env,
+        fs: &REAL_FS,
+    };
+
+    let commit = CommitSha::new("a".repeat(40)).expect("sha");
+    let err = rehydrate_pool_preserving_index(&ctx, &commit).expect_err("expected quit error");
+
+    assert!(
+        matches!(err, FactorError::GitCommand(ref msg) if msg.contains("git cherry-pick --quit failed (exit ")),
+        "unexpected error: {err:?}"
+    );
+}
+
+#[test]
+fn rehydrate_pool_preserving_index_reports_read_tree_failure() {
+    let dir = TempDir::new().expect("tempdir");
+    let repo = dir.path();
+
+    let runner = ScriptedRunner::default()
+        .with_output("git", &["write-tree"], repo, "deadbeef\n")
+        .with_status(
+            "git",
+            &[
+                "cherry-pick",
+                "--no-commit",
+                "--strategy-option",
+                "theirs",
+                &"a".repeat(40),
+            ],
+            &[],
+            false,
+            repo,
+            0,
+        )
+        .with_status("git", &["cherry-pick", "--quit"], &[], false, repo, 0)
+        .with_status("git", &["read-tree", "deadbeef"], &[], false, repo, 2);
+
+    let io = TestIo::default();
+    let env = TestEnv {
+        cwd: repo.to_path_buf(),
+    };
+    let ctx = Ctx {
+        runner: &runner,
+        cwd: repo.to_path_buf(),
+        io: &io,
+        env: &env,
+        fs: &REAL_FS,
+    };
+
+    let commit = CommitSha::new("a".repeat(40)).expect("sha");
+    let err = rehydrate_pool_preserving_index(&ctx, &commit).expect_err("expected read-tree error");
+
+    assert!(
+        matches!(err, FactorError::GitCommand(ref msg) if msg.contains("git read-tree failed (exit ")),
+        "unexpected error: {err:?}"
+    );
+}
+
+#[test]
+fn rehydrate_pool_preserving_index_reports_write_tree_output_error() {
+    let dir = TempDir::new().expect("tempdir");
+    let repo = dir.path();
+
+    let runner = ScriptedRunner::default();
+    let io = TestIo::default();
+    let env = TestEnv {
+        cwd: repo.to_path_buf(),
+    };
+    let ctx = Ctx {
+        runner: &runner,
+        cwd: repo.to_path_buf(),
+        io: &io,
+        env: &env,
+        fs: &REAL_FS,
+    };
+
+    let commit = CommitSha::new("a".repeat(40)).expect("sha");
+    let err = rehydrate_pool_preserving_index(&ctx, &commit).expect_err("expected write-tree error");
+
+    assert!(
+        matches!(&err, FactorError::GitCommand(msg) if msg.contains("git write-tree:") && msg.contains("unexpected output call")),
+        "err was: {err:?}"
+    );
+}
+
+#[test]
+fn rehydrate_pool_preserving_index_propagates_unmerged_query_error() {
+    let dir = TempDir::new().expect("tempdir");
+    let repo = dir.path();
+
+    let runner = ScriptedRunner::default()
+        .with_output("git", &["write-tree"], repo, "deadbeef\n")
+        .with_status(
+            "git",
+            &[
+                "cherry-pick",
+                "--no-commit",
+                "--strategy-option",
+                "theirs",
+                &"a".repeat(40),
+            ],
+            &[],
+            false,
+            repo,
+            1,
+        );
+
+    let io = TestIo::default();
+    let env = TestEnv {
+        cwd: repo.to_path_buf(),
+    };
+    let ctx = Ctx {
+        runner: &runner,
+        cwd: repo.to_path_buf(),
+        io: &io,
+        env: &env,
+        fs: &REAL_FS,
+    };
+
+    let commit = CommitSha::new("a".repeat(40)).expect("sha");
+    let err =
+        rehydrate_pool_preserving_index(&ctx, &commit).expect_err("expected unmerged query error");
+
+    assert!(
+        matches!(&err, FactorError::GitCommand(msg) if msg.contains("git diff:") && msg.contains("unexpected output call")),
+        "err was: {err:?}"
+    );
+}
+
+#[test]
+fn increment_split_count_in_state_propagates_state_write_error() {
+    let dir = TempDir::new().expect("tempdir");
+    let repo = dir.path();
+    let state_dir = repo.join(".git").join("factor");
+    fs::create_dir_all(&state_dir).expect("create state dir");
+    fs::write(state_dir.join("split_count"), "0\n").expect("write split_count");
+
+    let io = TestIo::default();
+    let env = TestEnv {
+        cwd: repo.to_path_buf(),
+    };
+    let fs = FailingWriteForFileFs {
+        file_name: "split_count",
+        message: "split_count write failed",
+    };
+    let ctx = Ctx {
+        runner: &REAL_RUNNER,
+        cwd: repo.to_path_buf(),
+        io: &io,
+        env: &env,
+        fs: &fs,
+    };
+
+    let err =
+        increment_split_count_in_state(&ctx, &state_dir).expect_err("expected state write error");
+    assert!(
+        matches!(&err, FactorError::StateWrite(inner) if inner.to_string().contains("split_count write failed")),
+        "err was: {err:?}"
+    );
+}
+
+#[test]
+fn capture_expected_tree_in_state_propagates_git_output_error() {
+    let dir = TempDir::new().expect("tempdir");
+    let repo = dir.path();
+    let state_dir = repo.join(".git").join("factor");
+    fs::create_dir_all(&state_dir).expect("create state dir");
+
+    let runner = ScriptedRunner::default();
+    let io = TestIo::default();
+    let env = TestEnv {
+        cwd: repo.to_path_buf(),
+    };
+    let ctx = Ctx {
+        runner: &runner,
+        cwd: repo.to_path_buf(),
+        io: &io,
+        env: &env,
+        fs: &REAL_FS,
+    };
+
+    let err =
+        capture_expected_tree_in_state(&ctx, &state_dir).expect_err("expected git output error");
+    assert!(
+        matches!(&err, FactorError::GitCommand(msg) if msg.contains("git rev-parse:") && msg.contains("unexpected output call")),
+        "err was: {err:?}"
+    );
+}
+
+#[test]
+fn capture_expected_tree_in_state_propagates_state_write_error() {
+    let dir = TempDir::new().expect("tempdir");
+    let repo = dir.path();
+    let state_dir = repo.join(".git").join("factor");
+    fs::create_dir_all(&state_dir).expect("create state dir");
+
+    let runner =
+        ScriptedRunner::default().with_output("git", &["rev-parse", "HEAD^{tree}"], repo, "tree\n");
+    let io = TestIo::default();
+    let env = TestEnv {
+        cwd: repo.to_path_buf(),
+    };
+    let fs = FailingWriteForFileFs {
+        file_name: "expected_tree",
+        message: "expected_tree write failed",
+    };
+    let ctx = Ctx {
+        runner: &runner,
+        cwd: repo.to_path_buf(),
+        io: &io,
+        env: &env,
+        fs: &fs,
+    };
+
+    let err =
+        capture_expected_tree_in_state(&ctx, &state_dir).expect_err("expected state write error");
+    assert!(
+        matches!(&err, FactorError::StateWrite(inner) if inner.to_string().contains("expected_tree write failed")),
+        "err was: {err:?}"
+    );
+}
+
+#[test]
+fn write_state_pairs_propagates_first_state_write_error() {
+    let dir = TempDir::new().expect("tempdir");
+    let repo = dir.path();
+    let state_dir = repo.join(".git").join("factor");
+    fs::create_dir_all(&state_dir).expect("create state dir");
+
+    let io = TestIo::default();
+    let env = TestEnv {
+        cwd: repo.to_path_buf(),
+    };
+    let fs = FailingWriteForFileFs {
+        file_name: "split_count",
+        message: "split_count write failed",
+    };
+    let ctx = Ctx {
+        runner: &REAL_RUNNER,
+        cwd: repo.to_path_buf(),
+        io: &io,
+        env: &env,
+        fs: &fs,
+    };
+
+    let err = write_state_pairs(
+        &ctx,
+        &state_dir,
+        &[("current_index", "0"), ("split_count", "1"), ("exec", "true")],
+    )
+    .expect_err("expected state write error");
+    assert!(
+        matches!(&err, FactorError::StateWrite(inner) if inner.to_string().contains("split_count write failed")),
+        "err was: {err:?}"
+    );
+}
+
+#[test]
 fn commit_sha_new_validates_length_and_hex() {
     assert!(
         CommitSha::new("a".repeat(40)).is_ok(),
@@ -2190,6 +3060,47 @@ fn commit_sha_new_validates_length_and_hex() {
     assert!(
         CommitSha::new("g".repeat(40)).is_err(),
         "non-hex should fail"
+    );
+}
+
+#[test]
+fn build_rebase_args_uses_parent_for_non_root_and_root_flag_for_root() {
+    let exec = NonEmpty::new(NonEmptyString::try_from("true".to_owned()).expect("non-empty"));
+
+    let non_root = build_rebase_args(&exec, "abc1234^", false);
+    assert_eq!(
+        non_root,
+        vec![
+            "rebase",
+            "--interactive",
+            "--no-autosquash",
+            "--no-autostash",
+            "--no-rebase-merges",
+            "--no-stat",
+            "--quiet",
+            "--reschedule-failed-exec",
+            "--exec",
+            "true",
+            "abc1234^",
+        ]
+    );
+
+    let root = build_rebase_args(&exec, "abc1234^", true);
+    assert_eq!(
+        root,
+        vec![
+            "rebase",
+            "--interactive",
+            "--no-autosquash",
+            "--no-autostash",
+            "--no-rebase-merges",
+            "--no-stat",
+            "--quiet",
+            "--reschedule-failed-exec",
+            "--exec",
+            "true",
+            "--root",
+        ]
     );
 }
 
@@ -2263,6 +3174,516 @@ fn run_with_args_maps_help_to_exit_ok() {
 }
 
 #[test]
+fn run_with_args_invalid_flag_writes_to_stderr_and_returns_usage() {
+    let dir = TempDir::new().expect("tempdir");
+    let io = TestIo::default();
+    let ctx = Ctx {
+        runner: &REAL_RUNNER,
+        cwd: dir.path().to_path_buf(),
+        io: &io,
+        env: &REAL_ENV,
+        fs: &REAL_FS,
+    };
+
+    let code = run_and_report_with_args_vec(
+        &ctx,
+        vec![
+            OsString::from("git-factor"),
+            OsString::from("--definitely-not-real"),
+        ],
+    );
+
+    assert_eq!(code, EXIT_USAGE);
+    assert!(
+        io.stderr()
+            .contains("unexpected argument '--definitely-not-real'"),
+        "stderr was: {}",
+        io.stderr()
+    );
+    assert!(io.stdout().is_empty(), "stdout should be empty");
+}
+
+#[test]
+fn run_with_args_rejects_abort_when_combined_with_status() {
+    let dir = TempDir::new().expect("tempdir");
+    let io = TestIo::default();
+    let ctx = Ctx {
+        runner: &REAL_RUNNER,
+        cwd: dir.path().to_path_buf(),
+        io: &io,
+        env: &REAL_ENV,
+        fs: &REAL_FS,
+    };
+
+    let err = run_with_args_vec(
+        &ctx,
+        vec![
+            OsString::from("git-factor"),
+            OsString::from("--abort"),
+            OsString::from("--status"),
+        ],
+    )
+    .expect_err("abort/status should be rejected");
+
+    assert_eq!(
+        err.to_string(),
+        "--abort cannot be combined with other options"
+    );
+}
+
+#[test]
+fn run_with_args_rejects_abort_when_combined_with_continue() {
+    let dir = TempDir::new().expect("tempdir");
+    let io = TestIo::default();
+    let ctx = Ctx {
+        runner: &REAL_RUNNER,
+        cwd: dir.path().to_path_buf(),
+        io: &io,
+        env: &REAL_ENV,
+        fs: &REAL_FS,
+    };
+
+    let err = run_with_args_vec(
+        &ctx,
+        vec![
+            OsString::from("git-factor"),
+            OsString::from("--abort"),
+            OsString::from("--continue"),
+        ],
+    )
+    .expect_err("abort/continue should be rejected");
+
+    assert_eq!(
+        err.to_string(),
+        "--abort cannot be combined with other options"
+    );
+}
+
+#[test]
+fn run_with_args_rejects_abort_when_combined_with_finish() {
+    let dir = TempDir::new().expect("tempdir");
+    let io = TestIo::default();
+    let ctx = Ctx {
+        runner: &REAL_RUNNER,
+        cwd: dir.path().to_path_buf(),
+        io: &io,
+        env: &REAL_ENV,
+        fs: &REAL_FS,
+    };
+
+    let err = run_with_args_vec(
+        &ctx,
+        vec![
+            OsString::from("git-factor"),
+            OsString::from("--abort"),
+            OsString::from("--finish"),
+        ],
+    )
+    .expect_err("abort/finish should be rejected");
+
+    assert_eq!(
+        err.to_string(),
+        "--abort cannot be combined with other options"
+    );
+}
+
+#[test]
+fn run_with_args_rejects_abort_when_combined_with_exec() {
+    let dir = TempDir::new().expect("tempdir");
+    let io = TestIo::default();
+    let ctx = Ctx {
+        runner: &REAL_RUNNER,
+        cwd: dir.path().to_path_buf(),
+        io: &io,
+        env: &REAL_ENV,
+        fs: &REAL_FS,
+    };
+
+    let err = run_with_args_vec(
+        &ctx,
+        vec![
+            OsString::from("git-factor"),
+            OsString::from("--abort"),
+            OsString::from("--exec"),
+            OsString::from("true"),
+        ],
+    )
+    .expect_err("abort/exec should be rejected");
+
+    assert_eq!(
+        err.to_string(),
+        "--abort cannot be combined with other options"
+    );
+}
+
+#[test]
+fn run_with_args_rejects_abort_when_combined_with_commit() {
+    let dir = TempDir::new().expect("tempdir");
+    let io = TestIo::default();
+    let ctx = Ctx {
+        runner: &REAL_RUNNER,
+        cwd: dir.path().to_path_buf(),
+        io: &io,
+        env: &REAL_ENV,
+        fs: &REAL_FS,
+    };
+
+    let err = run_with_args_vec(
+        &ctx,
+        vec![
+            OsString::from("git-factor"),
+            OsString::from("--abort"),
+            OsString::from("HEAD"),
+        ],
+    )
+    .expect_err("abort/commit should be rejected");
+
+    assert_eq!(
+        err.to_string(),
+        "--abort cannot be combined with other options"
+    );
+}
+
+#[test]
+fn run_with_args_rejects_status_when_combined_with_message() {
+    let dir = TempDir::new().expect("tempdir");
+    let io = TestIo::default();
+    let ctx = Ctx {
+        runner: &REAL_RUNNER,
+        cwd: dir.path().to_path_buf(),
+        io: &io,
+        env: &REAL_ENV,
+        fs: &REAL_FS,
+    };
+
+    let err = run_with_args_vec(
+        &ctx,
+        vec![
+            OsString::from("git-factor"),
+            OsString::from("--status"),
+            OsString::from("--message"),
+            OsString::from("msg"),
+        ],
+    )
+    .expect_err("status/message should be rejected");
+
+    assert_eq!(
+        err.to_string(),
+        "--status cannot be combined with other options"
+    );
+}
+
+#[test]
+fn run_with_args_rejects_status_when_combined_with_continue() {
+    let dir = TempDir::new().expect("tempdir");
+    let io = TestIo::default();
+    let ctx = Ctx {
+        runner: &REAL_RUNNER,
+        cwd: dir.path().to_path_buf(),
+        io: &io,
+        env: &REAL_ENV,
+        fs: &REAL_FS,
+    };
+
+    let err = run_with_args_vec(
+        &ctx,
+        vec![
+            OsString::from("git-factor"),
+            OsString::from("--status"),
+            OsString::from("--continue"),
+        ],
+    )
+    .expect_err("status/continue should be rejected");
+
+    assert_eq!(
+        err.to_string(),
+        "--status cannot be combined with other options"
+    );
+}
+
+#[test]
+fn run_with_args_rejects_status_when_combined_with_finish() {
+    let dir = TempDir::new().expect("tempdir");
+    let io = TestIo::default();
+    let ctx = Ctx {
+        runner: &REAL_RUNNER,
+        cwd: dir.path().to_path_buf(),
+        io: &io,
+        env: &REAL_ENV,
+        fs: &REAL_FS,
+    };
+
+    let err = run_with_args_vec(
+        &ctx,
+        vec![
+            OsString::from("git-factor"),
+            OsString::from("--status"),
+            OsString::from("--finish"),
+        ],
+    )
+    .expect_err("status/finish should be rejected");
+
+    assert_eq!(
+        err.to_string(),
+        "--status cannot be combined with other options"
+    );
+}
+
+#[test]
+fn run_with_args_rejects_status_when_combined_with_exec() {
+    let dir = TempDir::new().expect("tempdir");
+    let io = TestIo::default();
+    let ctx = Ctx {
+        runner: &REAL_RUNNER,
+        cwd: dir.path().to_path_buf(),
+        io: &io,
+        env: &REAL_ENV,
+        fs: &REAL_FS,
+    };
+
+    let err = run_with_args_vec(
+        &ctx,
+        vec![
+            OsString::from("git-factor"),
+            OsString::from("--status"),
+            OsString::from("--exec"),
+            OsString::from("true"),
+        ],
+    )
+    .expect_err("status/exec should be rejected");
+
+    assert_eq!(
+        err.to_string(),
+        "--status cannot be combined with other options"
+    );
+}
+
+#[test]
+fn run_with_args_rejects_status_when_combined_with_commit() {
+    let dir = TempDir::new().expect("tempdir");
+    let io = TestIo::default();
+    let ctx = Ctx {
+        runner: &REAL_RUNNER,
+        cwd: dir.path().to_path_buf(),
+        io: &io,
+        env: &REAL_ENV,
+        fs: &REAL_FS,
+    };
+
+    let err = run_with_args_vec(
+        &ctx,
+        vec![
+            OsString::from("git-factor"),
+            OsString::from("--status"),
+            OsString::from("HEAD"),
+        ],
+    )
+    .expect_err("status/commit should be rejected");
+
+    assert_eq!(
+        err.to_string(),
+        "--status cannot be combined with other options"
+    );
+}
+
+#[test]
+fn run_with_args_rejects_finish_when_combined_with_continue() {
+    let dir = TempDir::new().expect("tempdir");
+    let io = TestIo::default();
+    let ctx = Ctx {
+        runner: &REAL_RUNNER,
+        cwd: dir.path().to_path_buf(),
+        io: &io,
+        env: &REAL_ENV,
+        fs: &REAL_FS,
+    };
+
+    let err = run_with_args_vec(
+        &ctx,
+        vec![
+            OsString::from("git-factor"),
+            OsString::from("--finish"),
+            OsString::from("--continue"),
+        ],
+    )
+    .expect_err("finish/continue should be rejected");
+
+    assert_eq!(
+        err.to_string(),
+        "--finish cannot be combined with --continue, --exec, or COMMIT"
+    );
+}
+
+#[test]
+fn run_with_args_rejects_finish_when_combined_with_exec() {
+    let dir = TempDir::new().expect("tempdir");
+    let io = TestIo::default();
+    let ctx = Ctx {
+        runner: &REAL_RUNNER,
+        cwd: dir.path().to_path_buf(),
+        io: &io,
+        env: &REAL_ENV,
+        fs: &REAL_FS,
+    };
+
+    let err = run_with_args_vec(
+        &ctx,
+        vec![
+            OsString::from("git-factor"),
+            OsString::from("--finish"),
+            OsString::from("--exec"),
+            OsString::from("true"),
+        ],
+    )
+    .expect_err("finish/exec should be rejected");
+
+    assert_eq!(
+        err.to_string(),
+        "--finish cannot be combined with --continue, --exec, or COMMIT"
+    );
+}
+
+#[test]
+fn run_with_args_rejects_finish_when_combined_with_commit() {
+    let dir = TempDir::new().expect("tempdir");
+    let io = TestIo::default();
+    let ctx = Ctx {
+        runner: &REAL_RUNNER,
+        cwd: dir.path().to_path_buf(),
+        io: &io,
+        env: &REAL_ENV,
+        fs: &REAL_FS,
+    };
+
+    let err = run_with_args_vec(
+        &ctx,
+        vec![
+            OsString::from("git-factor"),
+            OsString::from("--finish"),
+            OsString::from("HEAD"),
+        ],
+    )
+    .expect_err("finish/commit should be rejected");
+
+    assert_eq!(
+        err.to_string(),
+        "--finish cannot be combined with --continue, --exec, or COMMIT"
+    );
+}
+
+#[test]
+fn run_with_args_rejects_continue_when_combined_with_exec() {
+    let dir = TempDir::new().expect("tempdir");
+    let io = TestIo::default();
+    let ctx = Ctx {
+        runner: &REAL_RUNNER,
+        cwd: dir.path().to_path_buf(),
+        io: &io,
+        env: &REAL_ENV,
+        fs: &REAL_FS,
+    };
+
+    let err = run_with_args_vec(
+        &ctx,
+        vec![
+            OsString::from("git-factor"),
+            OsString::from("--continue"),
+            OsString::from("--exec"),
+            OsString::from("true"),
+            OsString::from("--message"),
+            OsString::from("msg"),
+        ],
+    )
+    .expect_err("continue/exec should be rejected");
+
+    assert_eq!(
+        err.to_string(),
+        "--continue cannot be combined with --exec or COMMIT"
+    );
+}
+
+#[test]
+fn run_with_args_rejects_continue_when_combined_with_commit() {
+    let dir = TempDir::new().expect("tempdir");
+    let io = TestIo::default();
+    let ctx = Ctx {
+        runner: &REAL_RUNNER,
+        cwd: dir.path().to_path_buf(),
+        io: &io,
+        env: &REAL_ENV,
+        fs: &REAL_FS,
+    };
+
+    let err = run_with_args_vec(
+        &ctx,
+        vec![
+            OsString::from("git-factor"),
+            OsString::from("--continue"),
+            OsString::from("--message"),
+            OsString::from("msg"),
+            OsString::from("HEAD"),
+        ],
+    )
+    .expect_err("continue/commit should be rejected");
+
+    assert_eq!(
+        err.to_string(),
+        "--continue cannot be combined with --exec or COMMIT"
+    );
+}
+
+#[test]
+fn run_with_args_rejects_continue_without_message() {
+    let dir = TempDir::new().expect("tempdir");
+    let io = TestIo::default();
+    let ctx = Ctx {
+        runner: &REAL_RUNNER,
+        cwd: dir.path().to_path_buf(),
+        io: &io,
+        env: &REAL_ENV,
+        fs: &REAL_FS,
+    };
+
+    let err = run_with_args_vec(
+        &ctx,
+        vec![OsString::from("git-factor"), OsString::from("--continue")],
+    )
+    .expect_err("continue without message should be rejected");
+
+    assert_eq!(err.to_string(), "--continue requires --message <MSG>");
+}
+
+#[test]
+fn run_with_args_rejects_message_when_not_continuing_or_finishing() {
+    let dir = TempDir::new().expect("tempdir");
+    let io = TestIo::default();
+    let ctx = Ctx {
+        runner: &REAL_RUNNER,
+        cwd: dir.path().to_path_buf(),
+        io: &io,
+        env: &REAL_ENV,
+        fs: &REAL_FS,
+    };
+
+    let err = run_with_args_vec(
+        &ctx,
+        vec![
+            OsString::from("git-factor"),
+            OsString::from("--exec"),
+            OsString::from("true"),
+            OsString::from("--message"),
+            OsString::from("msg"),
+        ],
+    )
+    .expect_err("message without continue/finish should be rejected");
+
+    assert_eq!(
+        err.to_string(),
+        "--message can only be used with --continue or --finish"
+    );
+}
+
+#[test]
 fn run_with_args_errors_when_exec_is_missing() {
     let dir = TempDir::new().expect("tempdir");
     let io = TestIo::default();
@@ -2304,6 +3725,183 @@ fn run_with_args_defaults_missing_commit_to_head() {
     assert_eq!(code, EXIT_DATAERR);
     let stderr = io.stderr();
     assert_eq!(stderr, "not a git repository\n");
+}
+
+#[test]
+fn run_with_args_without_user_args_prints_help() {
+    let dir = TempDir::new().expect("tempdir");
+    let io = TestIo::default();
+    let ctx = Ctx {
+        runner: &REAL_RUNNER,
+        cwd: dir.path().to_path_buf(),
+        io: &io,
+        env: &REAL_ENV,
+        fs: &REAL_FS,
+    };
+    let code = run_and_report_with_args_vec(&ctx, vec![OsString::from("git-factor")]);
+    assert_eq!(code, EXIT_OK);
+    assert!(io.stdout().contains("WORKFLOW:"), "help should be printed");
+    assert!(io.stderr().is_empty(), "stderr should be empty");
+}
+
+#[test]
+fn run_with_args_abort_delegates_to_abort_handler() {
+    let dir = TempDir::new().expect("tempdir");
+    let repo = dir.path();
+    let runner =
+        ScriptedRunner::default().with_output("git", &["rev-parse", "--git-dir"], repo, ".git\n");
+    let io = TestIo::default();
+    let env = TestEnv {
+        cwd: repo.to_path_buf(),
+    };
+    let ctx = Ctx {
+        runner: &runner,
+        cwd: repo.to_path_buf(),
+        io: &io,
+        env: &env,
+        fs: &REAL_FS,
+    };
+
+    let err = run_with_args_vec(
+        &ctx,
+        vec![OsString::from("git-factor"), OsString::from("--abort")],
+    )
+    .expect_err("abort should delegate to command handler");
+    assert!(
+        matches!(err, FactorError::NoActiveSession),
+        "err was: {err:?}"
+    );
+}
+
+#[test]
+fn run_with_args_status_delegates_to_status_handler() {
+    let dir = TempDir::new().expect("tempdir");
+    let repo = dir.path();
+    let runner =
+        ScriptedRunner::default().with_output("git", &["rev-parse", "--git-dir"], repo, ".git\n");
+    let io = TestIo::default();
+    let env = TestEnv {
+        cwd: repo.to_path_buf(),
+    };
+    let ctx = Ctx {
+        runner: &runner,
+        cwd: repo.to_path_buf(),
+        io: &io,
+        env: &env,
+        fs: &REAL_FS,
+    };
+
+    let code = run_and_report_with_args_vec(
+        &ctx,
+        vec![OsString::from("git-factor"), OsString::from("--status")],
+    );
+    assert_eq!(code, EXIT_OK);
+    assert_eq!(io.stdout(), "FACTOR: No active session.\n");
+}
+
+#[test]
+fn run_with_args_finish_delegates_to_finish_handler() {
+    let dir = TempDir::new().expect("tempdir");
+    let repo = dir.path();
+    let runner =
+        ScriptedRunner::default().with_output("git", &["rev-parse", "--git-dir"], repo, ".git\n");
+    let io = TestIo::default();
+    let env = TestEnv {
+        cwd: repo.to_path_buf(),
+    };
+    let ctx = Ctx {
+        runner: &runner,
+        cwd: repo.to_path_buf(),
+        io: &io,
+        env: &env,
+        fs: &REAL_FS,
+    };
+
+    let err = run_with_args_vec(
+        &ctx,
+        vec![
+            OsString::from("git-factor"),
+            OsString::from("--finish"),
+            OsString::from("--message"),
+            OsString::from("test: final"),
+        ],
+    )
+    .expect_err("finish should delegate to command handler");
+    assert!(
+        matches!(err, FactorError::NoActiveSession),
+        "err was: {err:?}"
+    );
+}
+
+#[test]
+fn run_with_args_continue_delegates_to_continue_handler() {
+    let dir = TempDir::new().expect("tempdir");
+    let repo = dir.path();
+    let runner =
+        ScriptedRunner::default().with_output("git", &["rev-parse", "--git-dir"], repo, ".git\n");
+    let io = TestIo::default();
+    let env = TestEnv {
+        cwd: repo.to_path_buf(),
+    };
+    let ctx = Ctx {
+        runner: &runner,
+        cwd: repo.to_path_buf(),
+        io: &io,
+        env: &env,
+        fs: &REAL_FS,
+    };
+
+    let err = run_with_args_vec(
+        &ctx,
+        vec![
+            OsString::from("git-factor"),
+            OsString::from("--continue"),
+            OsString::from("--message"),
+            OsString::from("test: next"),
+        ],
+    )
+    .expect_err("continue should delegate to command handler");
+    assert!(
+        matches!(err, FactorError::NoActiveSession),
+        "err was: {err:?}"
+    );
+}
+
+#[test]
+fn run_with_args_start_accepts_explicit_commit_ref() {
+    let dir = TempDir::new().expect("tempdir");
+    let io = TestIo::default();
+    let ctx = Ctx {
+        runner: &REAL_RUNNER,
+        cwd: dir.path().to_path_buf(),
+        io: &io,
+        env: &REAL_ENV,
+        fs: &REAL_FS,
+    };
+    let code = run_and_report_with_args_vec(
+        &ctx,
+        vec![
+            OsString::from("git-factor"),
+            OsString::from("--exec"),
+            OsString::from("true"),
+            OsString::from("HEAD~1"),
+        ],
+    );
+    assert_eq!(code, EXIT_DATAERR);
+    assert_eq!(io.stderr(), "not a git repository\n");
+}
+
+#[test]
+fn real_ctx_returns_current_dir() {
+    let cwd = env::current_dir().expect("current_dir");
+    let ctx = real_ctx().expect("real_ctx");
+    assert_eq!(ctx.cwd, cwd);
+}
+
+#[test]
+fn main_entry_is_callable() {
+    let code = main_entry();
+    assert!((0..=255).contains(&code), "exit code should be in range");
 }
 
 #[test]
@@ -2362,7 +3960,14 @@ fn cmd_continue_errors_on_split_count_overflow() {
     let runner = ScriptedRunner::default()
         .with_output("git", &["rev-parse", "--git-dir"], repo, ".git\n")
         .with_status("git", &["diff", "--quiet", "--staged"], &[], false, repo, 1)
-        .with_status("git", &["checkout", "--quiet", "--", "."], &[], false, repo, 0)
+        .with_status(
+            "git",
+            &["checkout", "--quiet", "--", "."],
+            &[],
+            false,
+            repo,
+            0,
+        )
         .with_status(
             "git",
             &["clean", "--force", "--quiet", "-d"],
@@ -2456,7 +4061,14 @@ fn cmd_continue_propagates_restore_status_error() {
     let runner = ScriptedRunner::default()
         .with_output("git", &["rev-parse", "--git-dir"], repo, ".git\n")
         .with_status("git", &["diff", "--quiet", "--staged"], &[], false, repo, 1)
-        .with_status("git", &["checkout", "--quiet", "--", "."], &[], false, repo, 0)
+        .with_status(
+            "git",
+            &["checkout", "--quiet", "--", "."],
+            &[],
+            false,
+            repo,
+            0,
+        )
         .with_status(
             "git",
             &["clean", "--force", "--quiet", "-d"],
@@ -2568,7 +4180,14 @@ fn cmd_finish_errors_on_split_count_overflow() {
             repo,
             expected_tree_output,
         )
-        .with_status("git", &["checkout", "--quiet", "--", "."], &[], false, repo, 0)
+        .with_status(
+            "git",
+            &["checkout", "--quiet", "--", "."],
+            &[],
+            false,
+            repo,
+            0,
+        )
         .with_status(
             "git",
             &["clean", "--force", "--quiet", "-d"],
@@ -2661,7 +4280,14 @@ fn cmd_finish_propagates_final_cherry_pick_status_error() {
             repo,
             expected_tree_output,
         )
-        .with_status("git", &["checkout", "--quiet", "--", "."], &[], false, repo, 0)
+        .with_status(
+            "git",
+            &["checkout", "--quiet", "--", "."],
+            &[],
+            false,
+            repo,
+            0,
+        )
         .with_status(
             "git",
             &["clean", "--force", "--quiet", "-d"],
@@ -2721,7 +4347,14 @@ fn cmd_finish_propagates_git_commit_preserving_metadata_error() {
             repo,
             expected_tree_output,
         )
-        .with_status("git", &["checkout", "--quiet", "--", "."], &[], false, repo, 0)
+        .with_status(
+            "git",
+            &["checkout", "--quiet", "--", "."],
+            &[],
+            false,
+            repo,
+            0,
+        )
         .with_status(
             "git",
             &["clean", "--force", "--quiet", "-d"],
@@ -2768,6 +4401,3612 @@ fn cmd_finish_propagates_git_commit_preserving_metadata_error() {
             FactorError::GitCommand(msg)
                 if msg.contains("git show:") && msg.contains("unexpected output call")
         ),
+        "err was: {err:?}"
+    );
+}
+
+#[test]
+fn cmd_abort_errors_when_no_active_session() {
+    let dir = TempDir::new().expect("tempdir");
+    let repo = dir.path();
+    let runner =
+        ScriptedRunner::default().with_output("git", &["rev-parse", "--git-dir"], repo, ".git\n");
+    let io = TestIo::default();
+    let env = TestEnv {
+        cwd: repo.to_path_buf(),
+    };
+    let ctx = Ctx {
+        runner: &runner,
+        cwd: repo.to_path_buf(),
+        io: &io,
+        env: &env,
+        fs: &REAL_FS,
+    };
+
+    let err = cmd_abort_in(&ctx).expect_err("expected no active session");
+    assert!(
+        matches!(err, FactorError::NoActiveSession),
+        "err was: {err:?}"
+    );
+}
+
+#[test]
+fn cmd_continue_errors_when_no_staged_changes() {
+    let dir = TempDir::new().expect("tempdir");
+    let repo = dir.path();
+    let git_dir = repo.join(".git");
+    let state_dir = git_dir.join("factor");
+    fs::create_dir_all(&state_dir).expect("create factor dir");
+    fs::write(state_dir.join("commits"), format!("{}\n", "a".repeat(40))).expect("write commits");
+    fs::write(state_dir.join("current_index"), "0\n").expect("write current_index");
+    fs::write(state_dir.join("split_count"), "0\n").expect("write split_count");
+    fs::write(state_dir.join("exec"), "true\n").expect("write exec");
+    fs::write(state_dir.join("requires_rebase"), "false\n").expect("write requires_rebase");
+
+    let message = NonEmptyString::try_from("test: message".to_owned()).expect("non-empty");
+    let messages = NonEmpty::new(message);
+
+    let runner = ScriptedRunner::default()
+        .with_output("git", &["rev-parse", "--git-dir"], repo, ".git\n")
+        .with_status("git", &["diff", "--quiet", "--staged"], &[], false, repo, 0);
+    let io = TestIo::default();
+    let env = TestEnv {
+        cwd: repo.to_path_buf(),
+    };
+    let ctx = Ctx {
+        runner: &runner,
+        cwd: repo.to_path_buf(),
+        io: &io,
+        env: &env,
+        fs: &REAL_FS,
+    };
+
+    let err = cmd_continue_in(&ctx, &messages).expect_err("expected no staged changes");
+    assert!(
+        matches!(err, FactorError::NoStagedChanges),
+        "err was: {err:?}"
+    );
+}
+
+#[test]
+fn cmd_finish_errors_when_no_active_session() {
+    let dir = TempDir::new().expect("tempdir");
+    let repo = dir.path();
+    let runner =
+        ScriptedRunner::default().with_output("git", &["rev-parse", "--git-dir"], repo, ".git\n");
+    let io = TestIo::default();
+    let env = TestEnv {
+        cwd: repo.to_path_buf(),
+    };
+    let ctx = Ctx {
+        runner: &runner,
+        cwd: repo.to_path_buf(),
+        io: &io,
+        env: &env,
+        fs: &REAL_FS,
+    };
+
+    let err = cmd_finish_in(&ctx, &[]).expect_err("expected no active session");
+    assert!(
+        matches!(err, FactorError::NoActiveSession),
+        "err was: {err:?}"
+    );
+}
+
+#[test]
+fn cmd_start_errors_when_factor_session_is_already_active() {
+    let dir = TempDir::new().expect("tempdir");
+    let repo = dir.path();
+    fs::create_dir_all(repo.join(".git").join("factor")).expect("create active factor dir");
+
+    let runner =
+        ScriptedRunner::default().with_output("git", &["rev-parse", "--git-dir"], repo, ".git\n");
+    let io = TestIo::default();
+    let env = TestEnv {
+        cwd: repo.to_path_buf(),
+    };
+    let ctx = Ctx {
+        runner: &runner,
+        cwd: repo.to_path_buf(),
+        io: &io,
+        env: &env,
+        fs: &REAL_FS,
+    };
+
+    let exec = NonEmpty::new(NonEmptyString::try_from("true".to_owned()).expect("exec"));
+    let commits = NonEmpty::new(NonEmptyString::try_from("HEAD".to_owned()).expect("commit"));
+
+    let err = cmd_start_in(&ctx, &exec, &commits).expect_err("expected active session error");
+    assert!(
+        matches!(err, FactorError::ActiveSession),
+        "err was: {err:?}"
+    );
+}
+
+#[test]
+fn cmd_start_errors_when_rebase_is_already_active() {
+    let dir = TempDir::new().expect("tempdir");
+    let repo = dir.path();
+    fs::create_dir_all(repo.join(".git").join("rebase-merge")).expect("create rebase-merge");
+
+    let runner =
+        ScriptedRunner::default().with_output("git", &["rev-parse", "--git-dir"], repo, ".git\n");
+    let io = TestIo::default();
+    let env = TestEnv {
+        cwd: repo.to_path_buf(),
+    };
+    let ctx = Ctx {
+        runner: &runner,
+        cwd: repo.to_path_buf(),
+        io: &io,
+        env: &env,
+        fs: &REAL_FS,
+    };
+
+    let exec = NonEmpty::new(NonEmptyString::try_from("true".to_owned()).expect("exec"));
+    let commits = NonEmpty::new(NonEmptyString::try_from("HEAD".to_owned()).expect("commit"));
+
+    let err = cmd_start_in(&ctx, &exec, &commits).expect_err("expected active rebase error");
+    assert!(matches!(err, FactorError::ActiveRebase), "err was: {err:?}");
+}
+
+#[test]
+fn expected_tree_for_current_step_prefers_state_file() {
+    let dir = TempDir::new().expect("tempdir");
+    let repo = dir.path();
+    let state_dir = repo.join(".git").join("factor");
+    fs::create_dir_all(&state_dir).expect("create factor dir");
+    fs::write(state_dir.join("expected_tree"), "tree-from-state\n").expect("write expected_tree");
+
+    let runner = ScriptedRunner::default();
+    let io = TestIo::default();
+    let env = TestEnv {
+        cwd: repo.to_path_buf(),
+    };
+    let ctx = Ctx {
+        runner: &runner,
+        cwd: repo.to_path_buf(),
+        io: &io,
+        env: &env,
+        fs: &REAL_FS,
+    };
+    let original = CommitSha::new("a".repeat(40)).expect("sha");
+
+    let tree = expected_tree_for_current_step(&ctx, &state_dir, &original)
+        .expect("expected tree from state");
+    assert_eq!(tree, "tree-from-state");
+}
+
+#[test]
+fn expected_tree_for_current_step_falls_back_to_original_commit_tree() {
+    let dir = TempDir::new().expect("tempdir");
+    let repo = dir.path();
+    let state_dir = repo.join(".git").join("factor");
+    fs::create_dir_all(&state_dir).expect("create factor dir");
+
+    let original = "b".repeat(40);
+    let runner = ScriptedRunner::default().with_output(
+        "git",
+        &["rev-parse", &format!("{original}^{{tree}}")],
+        repo,
+        "tree-from-original\n",
+    );
+    let io = TestIo::default();
+    let env = TestEnv {
+        cwd: repo.to_path_buf(),
+    };
+    let ctx = Ctx {
+        runner: &runner,
+        cwd: repo.to_path_buf(),
+        io: &io,
+        env: &env,
+        fs: &REAL_FS,
+    };
+    let original = CommitSha::new(original).expect("sha");
+
+    let tree = expected_tree_for_current_step(&ctx, &state_dir, &original)
+        .expect("expected tree fallback");
+    assert_eq!(tree, "tree-from-original");
+}
+
+#[test]
+fn git_commit_preserving_metadata_supports_allow_empty() {
+    let dir = TempDir::new().expect("tempdir");
+    let repo = dir.path();
+    let original = "a".repeat(40);
+    let commit_meta = "a\0b\0c\0d\0e\0f";
+    let message = NonEmptyString::try_from("feat: message".to_owned()).expect("non-empty");
+    let messages = NonEmpty::new(message);
+
+    let envs = [
+        ("GIT_AUTHOR_NAME", "a"),
+        ("GIT_AUTHOR_EMAIL", "b"),
+        ("GIT_AUTHOR_DATE", "c"),
+        ("GIT_COMMITTER_NAME", "d"),
+        ("GIT_COMMITTER_EMAIL", "e"),
+        ("GIT_COMMITTER_DATE", "f"),
+    ];
+    let runner = ScriptedRunner::default()
+        .with_output(
+            "git",
+            &[
+                "show",
+                "--format=%an%x00%ae%x00%aI%x00%cn%x00%ce%x00%cI",
+                "--no-patch",
+                original.as_str(),
+            ],
+            repo,
+            commit_meta,
+        )
+        .with_status(
+            "git",
+            &[
+                "commit",
+                "--quiet",
+                "--allow-empty",
+                "--message",
+                "feat: message",
+            ],
+            &envs,
+            false,
+            repo,
+            0,
+        );
+    let io = TestIo::default();
+    let env = TestEnv {
+        cwd: repo.to_path_buf(),
+    };
+    let ctx = Ctx {
+        runner: &runner,
+        cwd: repo.to_path_buf(),
+        io: &io,
+        env: &env,
+        fs: &REAL_FS,
+    };
+    let commit = CommitSha::new(original).expect("sha");
+
+    git_commit_preserving_metadata(&ctx, &commit, &messages, true).expect("allow-empty commit");
+}
+
+#[test]
+fn git_commit_preserving_metadata_errors_on_nonzero_commit_status() {
+    let dir = TempDir::new().expect("tempdir");
+    let repo = dir.path();
+    let original = "a".repeat(40);
+    let commit_meta = "a\0b\0c\0d\0e\0f";
+    let message = NonEmptyString::try_from("feat: message".to_owned()).expect("non-empty");
+    let messages = NonEmpty::new(message);
+
+    let envs = [
+        ("GIT_AUTHOR_NAME", "a"),
+        ("GIT_AUTHOR_EMAIL", "b"),
+        ("GIT_AUTHOR_DATE", "c"),
+        ("GIT_COMMITTER_NAME", "d"),
+        ("GIT_COMMITTER_EMAIL", "e"),
+        ("GIT_COMMITTER_DATE", "f"),
+    ];
+    let runner = ScriptedRunner::default()
+        .with_output(
+            "git",
+            &[
+                "show",
+                "--format=%an%x00%ae%x00%aI%x00%cn%x00%ce%x00%cI",
+                "--no-patch",
+                original.as_str(),
+            ],
+            repo,
+            commit_meta,
+        )
+        .with_status(
+            "git",
+            &["commit", "--quiet", "--message", "feat: message"],
+            &envs,
+            false,
+            repo,
+            1,
+        );
+    let io = TestIo::default();
+    let env = TestEnv {
+        cwd: repo.to_path_buf(),
+    };
+    let ctx = Ctx {
+        runner: &runner,
+        cwd: repo.to_path_buf(),
+        io: &io,
+        env: &env,
+        fs: &REAL_FS,
+    };
+    let commit = CommitSha::new(original).expect("sha");
+
+    let err = git_commit_preserving_metadata(&ctx, &commit, &messages, false)
+        .expect_err("expected nonzero commit status");
+    assert!(
+        matches!(&err, FactorError::GitCommand(msg) if msg.starts_with("git commit failed (exit ")),
+        "err was: {err:?}"
+    );
+}
+
+#[test]
+fn cmd_continue_reports_tree_mismatch_after_restore() {
+    let dir = TempDir::new().expect("tempdir");
+    let repo = dir.path();
+    let git_dir = repo.join(".git");
+    let state_dir = git_dir.join("factor");
+    fs::create_dir_all(&state_dir).expect("create factor dir");
+    fs::write(state_dir.join("commits"), format!("{}\n", "a".repeat(40))).expect("write commits");
+    fs::write(state_dir.join("current_index"), "0\n").expect("write current_index");
+    fs::write(state_dir.join("split_count"), "0\n").expect("write split_count");
+    fs::write(state_dir.join("exec"), "true\n").expect("write exec");
+    fs::write(state_dir.join("requires_rebase"), "false\n").expect("write requires_rebase");
+
+    let original = "a".repeat(40);
+    let commit_meta = "a\0b\0c\0d\0e\0f";
+    let message = NonEmptyString::try_from("test: message".to_owned()).expect("non-empty");
+    let messages = NonEmpty::new(message);
+
+    let envs = [
+        ("GIT_AUTHOR_NAME", "a"),
+        ("GIT_AUTHOR_EMAIL", "b"),
+        ("GIT_AUTHOR_DATE", "c"),
+        ("GIT_COMMITTER_NAME", "d"),
+        ("GIT_COMMITTER_EMAIL", "e"),
+        ("GIT_COMMITTER_DATE", "f"),
+    ];
+
+    let runner = ScriptedRunner::default()
+        .with_output("git", &["rev-parse", "--git-dir"], repo, ".git\n")
+        .with_status("git", &["diff", "--quiet", "--staged"], &[], false, repo, 1)
+        .with_status(
+            "git",
+            &["checkout", "--quiet", "--", "."],
+            &[],
+            false,
+            repo,
+            0,
+        )
+        .with_status(
+            "git",
+            &["clean", "--force", "--quiet", "-d"],
+            &[],
+            false,
+            repo,
+            0,
+        )
+        .with_status(
+            "git",
+            &["checkout-index", "--all", "--force", "--quiet"],
+            &[],
+            false,
+            repo,
+            0,
+        )
+        .with_output(
+            "git",
+            &["diff", "--diff-filter=D", "--name-only", "--staged"],
+            repo,
+            "",
+        )
+        .with_status("bash", &["-c", "true"], &[], false, repo, 0)
+        .with_output(
+            "git",
+            &[
+                "show",
+                "--format=%an%x00%ae%x00%aI%x00%cn%x00%ce%x00%cI",
+                "--no-patch",
+                original.as_str(),
+            ],
+            repo,
+            commit_meta,
+        )
+        .with_status(
+            "git",
+            &["commit", "--quiet", "--message", "test: message"],
+            &envs,
+            false,
+            repo,
+            0,
+        )
+        .with_output("git", &["rev-parse", "HEAD^{tree}"], repo, "head_tree\n")
+        .with_output(
+            "git",
+            &["rev-parse", &format!("{original}^{{tree}}")],
+            repo,
+            "expected_tree\n",
+        )
+        .with_status(
+            "git",
+            &[
+                "restore",
+                "--source",
+                original.as_str(),
+                "--staged",
+                "--worktree",
+                "--",
+                ".",
+            ],
+            &[],
+            false,
+            repo,
+            0,
+        )
+        .with_output("git", &["write-tree"], repo, "restored_tree\n");
+    let io = TestIo::default();
+    let env = TestEnv {
+        cwd: repo.to_path_buf(),
+    };
+    let ctx = Ctx {
+        runner: &runner,
+        cwd: repo.to_path_buf(),
+        io: &io,
+        env: &env,
+        fs: &REAL_FS,
+    };
+
+    let err = cmd_continue_in(&ctx, &messages).expect_err("expected tree mismatch");
+    assert!(
+        matches!(
+            &err,
+            FactorError::TreeHashMismatch { actual, expected }
+                if actual == "restored_tree" && expected == "expected_tree"
+        ),
+        "err was: {err:?}"
+    );
+}
+
+#[test]
+fn cmd_abort_io_failures_cover_output_paths() {
+    let dir = TempDir::new().expect("tempdir");
+    let repo = dir.path();
+    let git_dir = repo.join(".git");
+    let state_dir = git_dir.join("factor");
+    fs::create_dir_all(&state_dir).expect("create factor dir");
+    fs::create_dir_all(git_dir.join("rebase-merge")).expect("create rebase-merge");
+
+    let sha = "a".repeat(40);
+    fs::write(state_dir.join("commits"), format!("{sha}\n")).expect("write commits");
+    fs::write(state_dir.join("current_index"), "0\n").expect("write current index");
+
+    let base_runner = ScriptedRunner::default()
+        .with_output("git", &["rev-parse", "--git-dir"], repo, ".git\n")
+        .with_status(
+            "git",
+            &["reset", "--hard", "--quiet", &sha],
+            &[],
+            false,
+            repo,
+            0,
+        )
+        .with_status(
+            "git",
+            &["clean", "--force", "--quiet", "-d"],
+            &[],
+            false,
+            repo,
+            0,
+        );
+    let env = TestEnv {
+        cwd: repo.to_path_buf(),
+    };
+
+    for fail_at in 1..=4 {
+        fs::create_dir_all(&state_dir).expect("recreate factor dir");
+        fs::write(state_dir.join("commits"), format!("{sha}\n")).expect("rewrite commits");
+        fs::write(state_dir.join("current_index"), "0\n").expect("rewrite current index");
+
+        let runner = NthRunnerFailure::new(base_runner.clone(), usize::MAX);
+        let io = NthIoFailure::new(fail_at);
+        let ctx = Ctx {
+            runner: &runner,
+            cwd: repo.to_path_buf(),
+            io: &io,
+            env: &env,
+            fs: &REAL_FS,
+        };
+
+        let err = cmd_abort_in(&ctx).expect_err("expected io failure");
+        assert!(
+            matches!(&err, FactorError::Io(inner) if inner.to_string().contains("io fail")),
+            "err was: {err:?}"
+        );
+    }
+}
+
+#[test]
+fn cmd_status_io_failures_cover_active_session_output_paths() {
+    let dir = TempDir::new().expect("tempdir");
+    let repo = dir.path();
+    let git_dir = repo.join(".git");
+    let state_dir = git_dir.join("factor");
+    fs::create_dir_all(&state_dir).expect("create factor dir");
+    fs::create_dir_all(git_dir.join("rebase-merge")).expect("create rebase-merge");
+
+    let sha = "a".repeat(40);
+    fs::write(state_dir.join("commits"), format!("{sha}\n")).expect("write commits");
+    fs::write(state_dir.join("current_index"), "0\n").expect("write current index");
+    fs::write(state_dir.join("split_count"), "2\n").expect("write split count");
+    fs::write(state_dir.join("requires_rebase"), "false\n").expect("write requires rebase");
+    fs::write(state_dir.join("is_root"), "true\n").expect("write is root");
+
+    let base_runner =
+        ScriptedRunner::default().with_output("git", &["rev-parse", "--git-dir"], repo, ".git\n");
+    let env = TestEnv {
+        cwd: repo.to_path_buf(),
+    };
+
+    for fail_at in 1..=14 {
+        let runner = NthRunnerFailure::new(base_runner.clone(), usize::MAX);
+        let io = NthIoFailure::new(fail_at);
+        let ctx = Ctx {
+            runner: &runner,
+            cwd: repo.to_path_buf(),
+            io: &io,
+            env: &env,
+            fs: &REAL_FS,
+        };
+
+        let err = cmd_status_in(&ctx).expect_err("expected io failure");
+        assert!(
+            matches!(&err, FactorError::Io(inner) if inner.to_string().contains("io fail")),
+            "err was: {err:?}"
+        );
+    }
+}
+
+#[test]
+fn advance_to_next_commit_runner_failures_cover_command_error_paths() {
+    let dir = TempDir::new().expect("tempdir");
+    let repo = dir.path();
+    let git_dir = repo.join(".git");
+    fs::create_dir_all(git_dir.join("rebase-merge")).expect("create rebase-merge");
+
+    let state_dir = git_dir.join("factor");
+    fs::create_dir_all(&state_dir).expect("create factor dir");
+    fs::write(
+        state_dir.join("commits"),
+        format!("{}\n{}\n", "a".repeat(40), "b".repeat(40)),
+    )
+    .expect("write commits");
+    fs::write(state_dir.join("current_index"), "0\n").expect("write current_index");
+    fs::write(state_dir.join("split_count"), "3\n").expect("write split_count");
+
+    let base_runner = ScriptedRunner::default()
+        .with_status(
+            "git",
+            &["rebase", "--continue"],
+            &[("GIT_EDITOR", "false"), ("GIT_SEQUENCE_EDITOR", "false")],
+            false,
+            repo,
+            0,
+        )
+        .with_output("git", &["rev-parse", "HEAD^{tree}"], repo, "head_tree\n")
+        .with_status("git", &["reset", "--quiet", "HEAD~1"], &[], false, repo, 0)
+        .with_output("git", &["rev-parse", "--git-dir"], repo, ".git\n")
+        .with_output(
+            "git",
+            &["show", "--format=%B", "--no-patch", &"b".repeat(40)],
+            repo,
+            "original message\n",
+        )
+        .with_output(
+            "git",
+            &["diff", "--stat"],
+            repo,
+            "file.txt | 1 +\n1 file changed, 1 insertion(+)\n",
+        )
+        .with_output(
+            "git",
+            &["ls-files", "--others", "--exclude-standard"],
+            repo,
+            "newfile.txt\n",
+        )
+        .with_output(
+            "git",
+            &["rev-parse", "--short", &"b".repeat(40)],
+            repo,
+            "bbbbbbb\n",
+        )
+        .with_output(
+            "git",
+            &["rev-parse", "--show-toplevel"],
+            repo,
+            repo.to_string_lossy().as_ref(),
+        );
+    let io = TestIo::default();
+    let env = TestEnv {
+        cwd: repo.to_path_buf(),
+    };
+
+    for fail_at in [2_usize, 4, 5, 6, 7, 8, 9, 10, 11] {
+        fs::write(state_dir.join("current_index"), "0\n").expect("reset current_index");
+        fs::write(state_dir.join("split_count"), "3\n").expect("reset split_count");
+
+        let runner = NthRunnerFailure::new(base_runner.clone(), fail_at);
+        let ctx = Ctx {
+            runner: &runner,
+            cwd: repo.to_path_buf(),
+            io: &io,
+            env: &env,
+            fs: &REAL_FS,
+        };
+        let err = advance_to_next_commit_in(&ctx, &state_dir)
+            .expect_err("expected forced runner failure");
+        assert!(is_forced_runner_failure(&err), "err was: {err:?}");
+    }
+}
+
+#[test]
+fn advance_to_next_commit_io_failures_cover_output_paths() {
+    let dir = TempDir::new().expect("tempdir");
+    let repo = dir.path();
+    let git_dir = repo.join(".git");
+    fs::create_dir_all(git_dir.join("rebase-merge")).expect("create rebase-merge");
+
+    let state_dir = git_dir.join("factor");
+    fs::create_dir_all(&state_dir).expect("create factor dir");
+    fs::write(
+        state_dir.join("commits"),
+        format!("{}\n{}\n", "a".repeat(40), "b".repeat(40)),
+    )
+    .expect("write commits");
+    fs::write(state_dir.join("current_index"), "0\n").expect("write current_index");
+    fs::write(state_dir.join("split_count"), "3\n").expect("write split_count");
+
+    let base_runner = ScriptedRunner::default()
+        .with_status(
+            "git",
+            &["rebase", "--continue"],
+            &[("GIT_EDITOR", "false"), ("GIT_SEQUENCE_EDITOR", "false")],
+            false,
+            repo,
+            0,
+        )
+        .with_output("git", &["rev-parse", "HEAD^{tree}"], repo, "head_tree\n")
+        .with_status("git", &["reset", "--quiet", "HEAD~1"], &[], false, repo, 0)
+        .with_output("git", &["rev-parse", "--git-dir"], repo, ".git\n")
+        .with_output(
+            "git",
+            &["show", "--format=%B", "--no-patch", &"b".repeat(40)],
+            repo,
+            "original message\n",
+        )
+        .with_output(
+            "git",
+            &["diff", "--stat"],
+            repo,
+            "file.txt | 1 +\n1 file changed, 1 insertion(+)\n",
+        )
+        .with_output(
+            "git",
+            &["ls-files", "--others", "--exclude-standard"],
+            repo,
+            "newfile.txt\n",
+        )
+        .with_output(
+            "git",
+            &["rev-parse", "--short", &"b".repeat(40)],
+            repo,
+            "bbbbbbb\n",
+        )
+        .with_output(
+            "git",
+            &["rev-parse", "--show-toplevel"],
+            repo,
+            repo.to_string_lossy().as_ref(),
+        );
+    let env = TestEnv {
+        cwd: repo.to_path_buf(),
+    };
+
+    let mut io_failures = 0_u32;
+    for fail_at in 1..=40 {
+        fs::write(state_dir.join("current_index"), "0\n").expect("reset current_index");
+        fs::write(state_dir.join("split_count"), "3\n").expect("reset split_count");
+
+        let runner = NthRunnerFailure::new(base_runner.clone(), usize::MAX);
+        let io = NthIoFailure::new(fail_at);
+        let ctx = Ctx {
+            runner: &runner,
+            cwd: repo.to_path_buf(),
+            io: &io,
+            env: &env,
+            fs: &REAL_FS,
+        };
+
+        match advance_to_next_commit_in(&ctx, &state_dir) {
+            Err(FactorError::Io(inner)) => {
+                io_failures = io_failures.saturating_add(1);
+                assert!(inner.to_string().contains("io fail"), "inner was: {inner}");
+            }
+            Ok(has_next) => {
+                assert!(has_next, "expected to stay in rebase for this fixture");
+            }
+            Err(err) => panic!("unexpected error: {err:?}"),
+        }
+    }
+    assert!(io_failures > 0, "expected at least one io failure");
+}
+
+#[test]
+fn cmd_continue_runner_failures_cover_command_error_paths() {
+    let dir = TempDir::new().expect("tempdir");
+    let repo = dir.path();
+    let git_dir = repo.join(".git");
+    let state_dir = git_dir.join("factor");
+    fs::create_dir_all(&state_dir).expect("create factor dir");
+    fs::write(state_dir.join("commits"), format!("{}\n", "a".repeat(40))).expect("write commits");
+    fs::write(state_dir.join("current_index"), "0\n").expect("write current_index");
+    fs::write(state_dir.join("split_count"), "0\n").expect("write split_count");
+    fs::write(state_dir.join("exec"), "true\n").expect("write exec");
+    fs::write(state_dir.join("requires_rebase"), "false\n").expect("write requires_rebase");
+    fs::write(state_dir.join("expected_tree"), "expected_tree\n").expect("write expected_tree");
+
+    let original = "a".repeat(40);
+    let commit_meta = "a\0b\0c\0d\0e\0f";
+    let message = NonEmptyString::try_from("test: message".to_owned()).expect("non-empty");
+    let messages = NonEmpty::new(message);
+
+    let envs = [
+        ("GIT_AUTHOR_NAME", "a"),
+        ("GIT_AUTHOR_EMAIL", "b"),
+        ("GIT_AUTHOR_DATE", "c"),
+        ("GIT_COMMITTER_NAME", "d"),
+        ("GIT_COMMITTER_EMAIL", "e"),
+        ("GIT_COMMITTER_DATE", "f"),
+    ];
+
+    let base_runner = ScriptedRunner::default()
+        .with_output("git", &["rev-parse", "--git-dir"], repo, ".git\n")
+        .with_status("git", &["diff", "--quiet", "--staged"], &[], false, repo, 1)
+        .with_status(
+            "git",
+            &["checkout", "--quiet", "--", "."],
+            &[],
+            false,
+            repo,
+            0,
+        )
+        .with_status(
+            "git",
+            &["clean", "--force", "--quiet", "-d"],
+            &[],
+            false,
+            repo,
+            0,
+        )
+        .with_status(
+            "git",
+            &["checkout-index", "--all", "--force", "--quiet"],
+            &[],
+            false,
+            repo,
+            0,
+        )
+        .with_output(
+            "git",
+            &["diff", "--diff-filter=D", "--name-only", "--staged"],
+            repo,
+            "",
+        )
+        .with_status("bash", &["-c", "true"], &[], false, repo, 0)
+        .with_output(
+            "git",
+            &[
+                "show",
+                "--format=%an%x00%ae%x00%aI%x00%cn%x00%ce%x00%cI",
+                "--no-patch",
+                original.as_str(),
+            ],
+            repo,
+            commit_meta,
+        )
+        .with_status(
+            "git",
+            &["commit", "--quiet", "--message", "test: message"],
+            &envs,
+            false,
+            repo,
+            0,
+        )
+        .with_output("git", &["rev-parse", "HEAD^{tree}"], repo, "head_tree\n")
+        .with_status(
+            "git",
+            &[
+                "restore",
+                "--source",
+                original.as_str(),
+                "--staged",
+                "--worktree",
+                "--",
+                ".",
+            ],
+            &[],
+            false,
+            repo,
+            0,
+        )
+        .with_output("git", &["write-tree"], repo, "expected_tree\n")
+        .with_status("git", &["reset", "--quiet"], &[], false, repo, 0)
+        .with_output("git", &["diff", "--stat"], repo, "file.txt | 1 +\n")
+        .with_output(
+            "git",
+            &["ls-files", "--others", "--exclude-standard"],
+            repo,
+            "newfile.txt\n",
+        )
+        .with_output(
+            "git",
+            &["rev-parse", "--show-toplevel"],
+            repo,
+            repo.to_string_lossy().as_ref(),
+        );
+    let io = TestIo::default();
+    let env = TestEnv {
+        cwd: repo.to_path_buf(),
+    };
+
+    for fail_at in 4..=16 {
+        fs::write(state_dir.join("split_count"), "0\n").expect("reset split_count");
+        let runner = NthRunnerFailure::new(base_runner.clone(), fail_at);
+        let ctx = Ctx {
+            runner: &runner,
+            cwd: repo.to_path_buf(),
+            io: &io,
+            env: &env,
+            fs: &REAL_FS,
+        };
+
+        let err = cmd_continue_in(&ctx, &messages).expect_err("expected forced runner failure");
+        assert!(is_forced_runner_failure(&err), "err was: {err:?}");
+    }
+}
+
+#[test]
+fn cmd_continue_io_failures_cover_exec_gate_failure_output_paths() {
+    let dir = TempDir::new().expect("tempdir");
+    let repo = dir.path();
+    let git_dir = repo.join(".git");
+    let state_dir = git_dir.join("factor");
+    fs::create_dir_all(&state_dir).expect("create factor dir");
+    fs::write(state_dir.join("commits"), format!("{}\n", "a".repeat(40))).expect("write commits");
+    fs::write(state_dir.join("current_index"), "0\n").expect("write current_index");
+    fs::write(state_dir.join("split_count"), "0\n").expect("write split_count");
+    fs::write(state_dir.join("exec"), "false\n").expect("write exec");
+    fs::write(state_dir.join("requires_rebase"), "false\n").expect("write requires_rebase");
+
+    let message = NonEmptyString::try_from("test: message".to_owned()).expect("non-empty");
+    let messages = NonEmpty::new(message);
+
+    let base_runner = ScriptedRunner::default()
+        .with_output("git", &["rev-parse", "--git-dir"], repo, ".git\n")
+        .with_status("git", &["diff", "--quiet", "--staged"], &[], false, repo, 1)
+        .with_status(
+            "git",
+            &["checkout", "--quiet", "--", "."],
+            &[],
+            false,
+            repo,
+            0,
+        )
+        .with_status(
+            "git",
+            &["clean", "--force", "--quiet", "-d"],
+            &[],
+            false,
+            repo,
+            0,
+        )
+        .with_status(
+            "git",
+            &["checkout-index", "--all", "--force", "--quiet"],
+            &[],
+            false,
+            repo,
+            0,
+        )
+        .with_output(
+            "git",
+            &["diff", "--diff-filter=D", "--name-only", "--staged"],
+            repo,
+            "",
+        )
+        .with_status("bash", &["-c", "false"], &[], false, repo, 1)
+        .with_output("git", &["write-tree"], repo, "deadbeef\n")
+        .with_status(
+            "git",
+            &[
+                "cherry-pick",
+                "--no-commit",
+                "--strategy-option",
+                "theirs",
+                &"a".repeat(40),
+            ],
+            &[],
+            false,
+            repo,
+            0,
+        )
+        .with_status("git", &["cherry-pick", "--quit"], &[], false, repo, 0)
+        .with_status("git", &["read-tree", "deadbeef"], &[], false, repo, 0);
+    let env = TestEnv {
+        cwd: repo.to_path_buf(),
+    };
+
+    let mut io_failures = 0_u32;
+    for fail_at in 1..=20 {
+        let runner = NthRunnerFailure::new(base_runner.clone(), usize::MAX);
+        let io = NthIoFailure::new(fail_at);
+        let ctx = Ctx {
+            runner: &runner,
+            cwd: repo.to_path_buf(),
+            io: &io,
+            env: &env,
+            fs: &REAL_FS,
+        };
+
+        match cmd_continue_in(&ctx, &messages) {
+            Err(FactorError::Io(inner)) => {
+                io_failures = io_failures.saturating_add(1);
+                assert!(inner.to_string().contains("io fail"), "inner was: {inner}");
+            }
+            Err(FactorError::ExecFailed { .. }) => {}
+            Err(err) => panic!("unexpected error: {err:?}"),
+            Ok(code) => panic!("unexpected success code {code}"),
+        }
+    }
+    assert!(io_failures > 0, "expected at least one io failure");
+}
+
+#[test]
+fn cmd_continue_io_failures_cover_remaining_output_paths() {
+    let dir = TempDir::new().expect("tempdir");
+    let repo = dir.path();
+    let git_dir = repo.join(".git");
+    let state_dir = git_dir.join("factor");
+    fs::create_dir_all(&state_dir).expect("create factor dir");
+    fs::write(state_dir.join("commits"), format!("{}\n", "a".repeat(40))).expect("write commits");
+    fs::write(state_dir.join("current_index"), "0\n").expect("write current_index");
+    fs::write(state_dir.join("split_count"), "0\n").expect("write split_count");
+    fs::write(state_dir.join("exec"), "true\n").expect("write exec");
+    fs::write(state_dir.join("requires_rebase"), "false\n").expect("write requires_rebase");
+    fs::write(state_dir.join("expected_tree"), "expected_tree\n").expect("write expected_tree");
+
+    let original = "a".repeat(40);
+    let commit_meta = "a\0b\0c\0d\0e\0f";
+    let message = NonEmptyString::try_from("test: message".to_owned()).expect("non-empty");
+    let messages = NonEmpty::new(message);
+
+    let envs = [
+        ("GIT_AUTHOR_NAME", "a"),
+        ("GIT_AUTHOR_EMAIL", "b"),
+        ("GIT_AUTHOR_DATE", "c"),
+        ("GIT_COMMITTER_NAME", "d"),
+        ("GIT_COMMITTER_EMAIL", "e"),
+        ("GIT_COMMITTER_DATE", "f"),
+    ];
+
+    let base_runner = ScriptedRunner::default()
+        .with_output("git", &["rev-parse", "--git-dir"], repo, ".git\n")
+        .with_status("git", &["diff", "--quiet", "--staged"], &[], false, repo, 1)
+        .with_status(
+            "git",
+            &["checkout", "--quiet", "--", "."],
+            &[],
+            false,
+            repo,
+            0,
+        )
+        .with_status(
+            "git",
+            &["clean", "--force", "--quiet", "-d"],
+            &[],
+            false,
+            repo,
+            0,
+        )
+        .with_status(
+            "git",
+            &["checkout-index", "--all", "--force", "--quiet"],
+            &[],
+            false,
+            repo,
+            0,
+        )
+        .with_output(
+            "git",
+            &["diff", "--diff-filter=D", "--name-only", "--staged"],
+            repo,
+            "",
+        )
+        .with_status("bash", &["-c", "true"], &[], false, repo, 0)
+        .with_output(
+            "git",
+            &[
+                "show",
+                "--format=%an%x00%ae%x00%aI%x00%cn%x00%ce%x00%cI",
+                "--no-patch",
+                original.as_str(),
+            ],
+            repo,
+            commit_meta,
+        )
+        .with_status(
+            "git",
+            &["commit", "--quiet", "--message", "test: message"],
+            &envs,
+            false,
+            repo,
+            0,
+        )
+        .with_output("git", &["rev-parse", "HEAD^{tree}"], repo, "head_tree\n")
+        .with_status(
+            "git",
+            &[
+                "restore",
+                "--source",
+                original.as_str(),
+                "--staged",
+                "--worktree",
+                "--",
+                ".",
+            ],
+            &[],
+            false,
+            repo,
+            0,
+        )
+        .with_output("git", &["write-tree"], repo, "expected_tree\n")
+        .with_status("git", &["reset", "--quiet"], &[], false, repo, 0)
+        .with_output("git", &["diff", "--stat"], repo, "file.txt | 1 +\n")
+        .with_output(
+            "git",
+            &["ls-files", "--others", "--exclude-standard"],
+            repo,
+            "newfile.txt\n",
+        )
+        .with_output(
+            "git",
+            &["rev-parse", "--show-toplevel"],
+            repo,
+            repo.to_string_lossy().as_ref(),
+        );
+    let env = TestEnv {
+        cwd: repo.to_path_buf(),
+    };
+
+    let mut io_failures = 0_u32;
+    for fail_at in 1..=40 {
+        let runner = NthRunnerFailure::new(base_runner.clone(), usize::MAX);
+        let io = NthIoFailure::new(fail_at);
+        let ctx = Ctx {
+            runner: &runner,
+            cwd: repo.to_path_buf(),
+            io: &io,
+            env: &env,
+            fs: &REAL_FS,
+        };
+
+        match cmd_continue_in(&ctx, &messages) {
+            Err(FactorError::Io(inner)) => {
+                io_failures = io_failures.saturating_add(1);
+                assert!(inner.to_string().contains("io fail"), "inner was: {inner}");
+            }
+            Ok(code) => assert_eq!(code, EXIT_OK),
+            Err(err) => panic!("unexpected error: {err:?}"),
+        }
+    }
+    assert!(io_failures > 0, "expected at least one io failure");
+}
+
+#[test]
+fn cmd_finish_runner_failures_cover_command_error_paths() {
+    let dir = TempDir::new().expect("tempdir");
+    let repo = dir.path();
+    let git_dir = repo.join(".git");
+    let state_dir = git_dir.join("factor");
+    fs::create_dir_all(&state_dir).expect("create factor dir");
+    fs::write(state_dir.join("commits"), format!("{}\n", "a".repeat(40))).expect("write commits");
+    fs::write(state_dir.join("current_index"), "0\n").expect("write current_index");
+    fs::write(state_dir.join("split_count"), "0\n").expect("write split_count");
+    fs::write(state_dir.join("exec"), "true\n").expect("write exec");
+    fs::write(state_dir.join("requires_rebase"), "false\n").expect("write requires_rebase");
+    fs::write(state_dir.join("expected_tree"), "expected_tree\n").expect("write expected_tree");
+
+    let original = "a".repeat(40);
+    let commit_meta = "a\0b\0c\0d\0e\0f";
+    let message = NonEmptyString::try_from("test: message".to_owned()).expect("non-empty");
+    let messages = [message];
+
+    let envs = [
+        ("GIT_AUTHOR_NAME", "a"),
+        ("GIT_AUTHOR_EMAIL", "b"),
+        ("GIT_AUTHOR_DATE", "c"),
+        ("GIT_COMMITTER_NAME", "d"),
+        ("GIT_COMMITTER_EMAIL", "e"),
+        ("GIT_COMMITTER_DATE", "f"),
+    ];
+
+    let base_runner = ScriptedRunner::default()
+        .with_output("git", &["rev-parse", "--git-dir"], repo, ".git\n")
+        .with_status(
+            "git",
+            &["checkout", "--quiet", "--", "."],
+            &[],
+            false,
+            repo,
+            0,
+        )
+        .with_status(
+            "git",
+            &["clean", "--force", "--quiet", "-d"],
+            &[],
+            false,
+            repo,
+            0,
+        )
+        .with_status(
+            "git",
+            &[
+                "cherry-pick",
+                "--no-commit",
+                "--strategy-option",
+                "theirs",
+                original.as_str(),
+            ],
+            &[],
+            false,
+            repo,
+            0,
+        )
+        .with_status("git", &["cherry-pick", "--quit"], &[], false, repo, 0)
+        .with_output("git", &["write-tree"], repo, "expected_tree\n")
+        .with_status("git", &["diff", "--quiet", "--staged"], &[], false, repo, 1)
+        .with_status("bash", &["-c", "true"], &[], false, repo, 0)
+        .with_output(
+            "git",
+            &[
+                "show",
+                "--format=%an%x00%ae%x00%aI%x00%cn%x00%ce%x00%cI",
+                "--no-patch",
+                original.as_str(),
+            ],
+            repo,
+            commit_meta,
+        )
+        .with_status(
+            "git",
+            &["commit", "--quiet", "--message", "test: message"],
+            &envs,
+            false,
+            repo,
+            0,
+        );
+    let io = TestIo::default();
+    let env = TestEnv {
+        cwd: repo.to_path_buf(),
+    };
+
+    for fail_at in 3..=11 {
+        fs::write(state_dir.join("split_count"), "0\n").expect("reset split_count");
+        let runner = NthRunnerFailure::new(base_runner.clone(), fail_at);
+        let ctx = Ctx {
+            runner: &runner,
+            cwd: repo.to_path_buf(),
+            io: &io,
+            env: &env,
+            fs: &REAL_FS,
+        };
+
+        let err = cmd_finish_in(&ctx, &messages).expect_err("expected forced runner failure");
+        assert!(is_forced_runner_failure(&err), "err was: {err:?}");
+    }
+}
+
+#[test]
+fn cmd_finish_io_failures_cover_exec_gate_failure_output_paths() {
+    let dir = TempDir::new().expect("tempdir");
+    let repo = dir.path();
+    let git_dir = repo.join(".git");
+    let state_dir = git_dir.join("factor");
+    fs::create_dir_all(&state_dir).expect("create factor dir");
+    fs::write(state_dir.join("commits"), format!("{}\n", "a".repeat(40))).expect("write commits");
+    fs::write(state_dir.join("current_index"), "0\n").expect("write current_index");
+    fs::write(state_dir.join("split_count"), "0\n").expect("write split_count");
+    fs::write(state_dir.join("exec"), "false\n").expect("write exec");
+    fs::write(state_dir.join("requires_rebase"), "false\n").expect("write requires_rebase");
+    fs::write(state_dir.join("expected_tree"), "expected_tree\n").expect("write expected_tree");
+
+    let original = "a".repeat(40);
+    let message = NonEmptyString::try_from("test: message".to_owned()).expect("non-empty");
+    let messages = [message];
+
+    let base_runner = ScriptedRunner::default()
+        .with_output("git", &["rev-parse", "--git-dir"], repo, ".git\n")
+        .with_status(
+            "git",
+            &["checkout", "--quiet", "--", "."],
+            &[],
+            false,
+            repo,
+            0,
+        )
+        .with_status(
+            "git",
+            &["clean", "--force", "--quiet", "-d"],
+            &[],
+            false,
+            repo,
+            0,
+        )
+        .with_status(
+            "git",
+            &[
+                "cherry-pick",
+                "--no-commit",
+                "--strategy-option",
+                "theirs",
+                original.as_str(),
+            ],
+            &[],
+            false,
+            repo,
+            0,
+        )
+        .with_status("git", &["cherry-pick", "--quit"], &[], false, repo, 0)
+        .with_output("git", &["write-tree"], repo, "expected_tree\n")
+        .with_status("git", &["diff", "--quiet", "--staged"], &[], false, repo, 1)
+        .with_status("bash", &["-c", "false"], &[], false, repo, 1);
+    let env = TestEnv {
+        cwd: repo.to_path_buf(),
+    };
+
+    let mut io_failures = 0_u32;
+    for fail_at in 1..=20 {
+        let runner = NthRunnerFailure::new(base_runner.clone(), usize::MAX);
+        let io = NthIoFailure::new(fail_at);
+        let ctx = Ctx {
+            runner: &runner,
+            cwd: repo.to_path_buf(),
+            io: &io,
+            env: &env,
+            fs: &REAL_FS,
+        };
+
+        match cmd_finish_in(&ctx, &messages) {
+            Err(FactorError::Io(inner)) => {
+                io_failures = io_failures.saturating_add(1);
+                assert!(inner.to_string().contains("io fail"), "inner was: {inner}");
+            }
+            Err(FactorError::ExecFailed { .. }) => {}
+            Err(err) => panic!("unexpected error: {err:?}"),
+            Ok(code) => panic!("unexpected success code {code}"),
+        }
+    }
+    assert!(io_failures > 0, "expected at least one io failure");
+}
+
+#[test]
+fn cmd_abort_runner_failures_cover_internal_question_mark_paths() {
+    let dir = TempDir::new().expect("tempdir");
+    let repo = dir.path();
+    let git_dir = repo.join(".git");
+    let state_dir = git_dir.join("factor");
+    fs::create_dir_all(&state_dir).expect("create factor dir");
+
+    let sha = "a".repeat(40);
+    let base_runner = ScriptedRunner::default()
+        .with_output("git", &["rev-parse", "--git-dir"], repo, ".git\n")
+        .with_status(
+            "git",
+            &["reset", "--hard", "--quiet", &sha],
+            &[],
+            false,
+            repo,
+            0,
+        )
+        .with_status(
+            "git",
+            &["clean", "--force", "--quiet", "-d"],
+            &[],
+            false,
+            repo,
+            0,
+        );
+    let io = TestIo::default();
+    let env = TestEnv {
+        cwd: repo.to_path_buf(),
+    };
+
+    for fail_at in [2_usize, 3, 4] {
+        fs::create_dir_all(&state_dir).expect("recreate factor dir");
+        fs::write(state_dir.join("commits"), format!("{sha}\n")).expect("write commits");
+        fs::write(state_dir.join("current_index"), "0\n").expect("write current index");
+
+        let runner = NthRunnerFailure::new(base_runner.clone(), fail_at);
+        let ctx = Ctx {
+            runner: &runner,
+            cwd: repo.to_path_buf(),
+            io: &io,
+            env: &env,
+            fs: &REAL_FS,
+        };
+
+        let err = cmd_abort_in(&ctx).expect_err("expected forced runner failure");
+        assert!(is_forced_runner_failure(&err), "err was: {err:?}");
+    }
+}
+
+#[test]
+fn cmd_abort_errors_when_current_commit_state_is_missing() {
+    let dir = TempDir::new().expect("tempdir");
+    let repo = dir.path();
+    let git_dir = repo.join(".git");
+    let state_dir = git_dir.join("factor");
+    fs::create_dir_all(&state_dir).expect("create factor dir");
+    fs::write(state_dir.join("current_index"), "0\n").expect("write current index");
+
+    let runner =
+        ScriptedRunner::default().with_output("git", &["rev-parse", "--git-dir"], repo, ".git\n");
+    let io = TestIo::default();
+    let env = TestEnv {
+        cwd: repo.to_path_buf(),
+    };
+    let ctx = Ctx {
+        runner: &runner,
+        cwd: repo.to_path_buf(),
+        io: &io,
+        env: &env,
+        fs: &REAL_FS,
+    };
+
+    let err = cmd_abort_in(&ctx).expect_err("expected missing state file to fail");
+    assert!(
+        matches!(&err, FactorError::StateRead(inner) if inner.kind() == io::ErrorKind::NotFound),
+        "err was: {err:?}"
+    );
+}
+
+#[test]
+fn cmd_status_io_failure_on_no_active_session_covers_outln_error_path() {
+    let dir = TempDir::new().expect("tempdir");
+    let repo = dir.path();
+    fs::create_dir_all(repo.join(".git")).expect("create git dir");
+
+    let runner =
+        ScriptedRunner::default().with_output("git", &["rev-parse", "--git-dir"], repo, ".git\n");
+    let io = FailingIo;
+    let env = TestEnv {
+        cwd: repo.to_path_buf(),
+    };
+    let ctx = Ctx {
+        runner: &runner,
+        cwd: repo.to_path_buf(),
+        io: &io,
+        env: &env,
+        fs: &REAL_FS,
+    };
+
+    let err = cmd_status_in(&ctx).expect_err("expected io failure");
+    assert!(
+        matches!(&err, FactorError::Io(inner) if inner.to_string().contains("io fail")),
+        "err was: {err:?}"
+    );
+}
+
+#[test]
+fn cmd_status_state_failures_cover_internal_question_mark_paths() {
+    let dir = TempDir::new().expect("tempdir");
+    let repo = dir.path();
+    let git_dir = repo.join(".git");
+    let state_dir = git_dir.join("factor");
+    fs::create_dir_all(&state_dir).expect("create factor dir");
+    fs::write(state_dir.join("commits"), format!("{}\n", "a".repeat(40))).expect("write commits");
+    fs::write(state_dir.join("current_index"), "0\n").expect("write current index");
+    fs::write(state_dir.join("split_count"), "1\n").expect("write split count");
+    fs::write(state_dir.join("requires_rebase"), "false\n").expect("write requires_rebase");
+    fs::write(state_dir.join("is_root"), "false\n").expect("write is_root");
+
+    let base_runner =
+        ScriptedRunner::default().with_output("git", &["rev-parse", "--git-dir"], repo, ".git\n");
+    let io = TestIo::default();
+    let env = TestEnv {
+        cwd: repo.to_path_buf(),
+    };
+
+    let runner = NthRunnerFailure::new(base_runner.clone(), 2);
+    let ctx = Ctx {
+        runner: &runner,
+        cwd: repo.to_path_buf(),
+        io: &io,
+        env: &env,
+        fs: &REAL_FS,
+    };
+    let err = cmd_status_in(&ctx).expect_err("expected factor_dir_in failure");
+    assert!(
+        matches!(&err, FactorError::GitDir(msg) if msg.contains("forced runner failure")),
+        "err was: {err:?}"
+    );
+
+    fs::write(state_dir.join("commits"), format!("{}\n", "a".repeat(40))).expect("reset commits");
+    fs::write(state_dir.join("current_index"), "0\n").expect("reset current index");
+    fs::write(state_dir.join("split_count"), "1\n").expect("reset split count");
+    fs::write(state_dir.join("requires_rebase"), "false\n").expect("reset requires_rebase");
+    fs::write(state_dir.join("is_root"), "false\n").expect("reset is_root");
+    fs::remove_file(state_dir.join("commits")).expect("remove commits");
+    let ctx = Ctx {
+        runner: &base_runner,
+        cwd: repo.to_path_buf(),
+        io: &io,
+        env: &env,
+        fs: &REAL_FS,
+    };
+    let err = cmd_status_in(&ctx).expect_err("expected missing commits state");
+    assert!(
+        matches!(&err, FactorError::StateRead(inner) if inner.kind() == io::ErrorKind::NotFound),
+        "err was: {err:?}"
+    );
+
+    fs::write(state_dir.join("commits"), format!("{}\n", "a".repeat(40))).expect("restore commits");
+    fs::write(state_dir.join("current_index"), "not-a-number\n").expect("corrupt current_index");
+    let err = cmd_status_in(&ctx).expect_err("expected invalid current_index");
+    assert!(
+        matches!(&err, FactorError::GitCommand(msg) if msg.contains("current_index")),
+        "err was: {err:?}"
+    );
+
+    fs::write(state_dir.join("current_index"), "0\n").expect("restore current_index");
+    fs::write(state_dir.join("split_count"), "not-a-number\n").expect("corrupt split_count");
+    let err = cmd_status_in(&ctx).expect_err("expected invalid split_count");
+    assert!(
+        matches!(&err, FactorError::GitCommand(msg) if msg.contains("split_count")),
+        "err was: {err:?}"
+    );
+
+    fs::write(state_dir.join("split_count"), "1\n").expect("restore split_count");
+    fs::write(state_dir.join("requires_rebase"), "not-bool\n").expect("corrupt requires_rebase");
+    let err = cmd_status_in(&ctx).expect_err("expected invalid requires_rebase");
+    assert!(
+        matches!(&err, FactorError::GitCommand(msg) if msg.contains("requires_rebase")),
+        "err was: {err:?}"
+    );
+
+    fs::write(state_dir.join("requires_rebase"), "false\n").expect("restore requires_rebase");
+    fs::write(state_dir.join("is_root"), "not-bool\n").expect("corrupt is_root");
+    let err = cmd_status_in(&ctx).expect_err("expected invalid is_root");
+    assert!(
+        matches!(&err, FactorError::GitCommand(msg) if msg.contains("is_root")),
+        "err was: {err:?}"
+    );
+}
+
+#[test]
+fn cmd_continue_precondition_failures_cover_internal_question_mark_paths() {
+    let dir = TempDir::new().expect("tempdir");
+    let repo = dir.path();
+    let git_dir = repo.join(".git");
+    let state_dir = git_dir.join("factor");
+    fs::create_dir_all(&state_dir).expect("create factor dir");
+    let original = "a".repeat(40);
+    fs::write(state_dir.join("commits"), format!("{original}\n")).expect("write commits");
+    fs::write(state_dir.join("current_index"), "0\n").expect("write current_index");
+    fs::write(state_dir.join("split_count"), "0\n").expect("write split_count");
+    fs::write(state_dir.join("requires_rebase"), "false\n").expect("write requires_rebase");
+    fs::write(state_dir.join("exec"), "true\n").expect("write exec");
+
+    let message = NonEmptyString::try_from("test: message".to_owned()).expect("non-empty");
+    let messages = NonEmpty::new(message);
+    let base_runner = ScriptedRunner::default()
+        .with_output("git", &["rev-parse", "--git-dir"], repo, ".git\n")
+        .with_status("git", &["diff", "--quiet", "--staged"], &[], false, repo, 1);
+    let io = TestIo::default();
+    let env = TestEnv {
+        cwd: repo.to_path_buf(),
+    };
+
+    let runner = NthRunnerFailure::new(base_runner.clone(), 2);
+    let ctx = Ctx {
+        runner: &runner,
+        cwd: repo.to_path_buf(),
+        io: &io,
+        env: &env,
+        fs: &REAL_FS,
+    };
+    let err = cmd_continue_in(&ctx, &messages).expect_err("expected factor_dir_in failure");
+    assert!(
+        matches!(&err, FactorError::GitDir(msg) if msg.contains("forced runner failure")),
+        "err was: {err:?}"
+    );
+
+    let ctx = Ctx {
+        runner: &base_runner,
+        cwd: repo.to_path_buf(),
+        io: &io,
+        env: &env,
+        fs: &REAL_FS,
+    };
+    fs::remove_file(state_dir.join("exec")).expect("remove exec");
+    let err = cmd_continue_in(&ctx, &messages).expect_err("expected missing exec state");
+    assert!(
+        matches!(&err, FactorError::StateRead(inner) if inner.kind() == io::ErrorKind::NotFound),
+        "err was: {err:?}"
+    );
+
+    fs::write(state_dir.join("exec"), "true\n").expect("restore exec");
+    let runner = NthRunnerFailure::new(base_runner.clone(), 3);
+    let ctx = Ctx {
+        runner: &runner,
+        cwd: repo.to_path_buf(),
+        io: &io,
+        env: &env,
+        fs: &REAL_FS,
+    };
+    let err = cmd_continue_in(&ctx, &messages).expect_err("expected staged diff status failure");
+    assert!(
+        matches!(&err, FactorError::GitCommand(msg) if msg.contains("forced runner failure")),
+        "err was: {err:?}"
+    );
+}
+
+#[test]
+fn cmd_finish_precondition_failures_cover_internal_question_mark_paths() {
+    let dir = TempDir::new().expect("tempdir");
+    let repo = dir.path();
+    let git_dir = repo.join(".git");
+    let state_dir = git_dir.join("factor");
+    fs::create_dir_all(&state_dir).expect("create factor dir");
+    let original = "a".repeat(40);
+    fs::write(state_dir.join("commits"), format!("{original}\n")).expect("write commits");
+    fs::write(state_dir.join("current_index"), "0\n").expect("write current_index");
+    fs::write(state_dir.join("split_count"), "0\n").expect("write split_count");
+    fs::write(state_dir.join("requires_rebase"), "false\n").expect("write requires_rebase");
+    fs::write(state_dir.join("exec"), "true\n").expect("write exec");
+    fs::write(state_dir.join("expected_tree"), "tree\n").expect("write expected_tree");
+
+    let message = NonEmptyString::try_from("test: message".to_owned()).expect("non-empty");
+    let messages = [message];
+    let base_runner =
+        ScriptedRunner::default().with_output("git", &["rev-parse", "--git-dir"], repo, ".git\n");
+    let io = TestIo::default();
+    let env = TestEnv {
+        cwd: repo.to_path_buf(),
+    };
+
+    let runner = NthRunnerFailure::new(base_runner.clone(), 2);
+    let ctx = Ctx {
+        runner: &runner,
+        cwd: repo.to_path_buf(),
+        io: &io,
+        env: &env,
+        fs: &REAL_FS,
+    };
+    let err = cmd_finish_in(&ctx, &messages).expect_err("expected factor_dir_in failure");
+    assert!(
+        matches!(&err, FactorError::GitDir(msg) if msg.contains("forced runner failure")),
+        "err was: {err:?}"
+    );
+
+    let ctx = Ctx {
+        runner: &base_runner,
+        cwd: repo.to_path_buf(),
+        io: &io,
+        env: &env,
+        fs: &REAL_FS,
+    };
+    fs::remove_file(state_dir.join("commits")).expect("remove commits");
+    let err = cmd_finish_in(&ctx, &messages).expect_err("expected missing commits state");
+    assert!(
+        matches!(&err, FactorError::StateRead(inner) if inner.kind() == io::ErrorKind::NotFound),
+        "err was: {err:?}"
+    );
+
+    fs::write(state_dir.join("commits"), format!("{original}\n")).expect("restore commits");
+    fs::remove_file(state_dir.join("exec")).expect("remove exec");
+    let err = cmd_finish_in(&ctx, &messages).expect_err("expected missing exec state");
+    assert!(
+        matches!(&err, FactorError::StateRead(inner) if inner.kind() == io::ErrorKind::NotFound),
+        "err was: {err:?}"
+    );
+}
+
+#[test]
+fn cmd_abort_omits_rebase_hint_when_rebase_is_not_active() {
+    let dir = TempDir::new().expect("tempdir");
+    let repo = dir.path();
+    let git_dir = repo.join(".git");
+    let state_dir = git_dir.join("factor");
+    fs::create_dir_all(&state_dir).expect("create factor dir");
+
+    let sha = "a".repeat(40);
+    fs::write(state_dir.join("commits"), format!("{sha}\n")).expect("write commits");
+    fs::write(state_dir.join("current_index"), "0\n").expect("write current index");
+
+    let runner = ScriptedRunner::default()
+        .with_output("git", &["rev-parse", "--git-dir"], repo, ".git\n")
+        .with_status(
+            "git",
+            &["reset", "--hard", "--quiet", &sha],
+            &[],
+            false,
+            repo,
+            0,
+        )
+        .with_status(
+            "git",
+            &["clean", "--force", "--quiet", "-d"],
+            &[],
+            false,
+            repo,
+            0,
+        );
+    let io = TestIo::default();
+    let env = TestEnv {
+        cwd: repo.to_path_buf(),
+    };
+    let ctx = Ctx {
+        runner: &runner,
+        cwd: repo.to_path_buf(),
+        io: &io,
+        env: &env,
+        fs: &REAL_FS,
+    };
+
+    let code = cmd_abort_in(&ctx).expect("abort should succeed");
+    assert_eq!(code, EXIT_OK);
+    assert_eq!(
+        io.stdout(),
+        "FACTOR: Session aborted for current commit step.\n"
+    );
+    assert!(io.stderr().is_empty(), "stderr should be empty");
+}
+
+#[test]
+fn cmd_continue_errors_when_rebase_is_required_but_not_active() {
+    let dir = TempDir::new().expect("tempdir");
+    let repo = dir.path();
+    let git_dir = repo.join(".git");
+    let state_dir = git_dir.join("factor");
+    fs::create_dir_all(&state_dir).expect("create factor dir");
+    fs::write(state_dir.join("commits"), format!("{}\n", "a".repeat(40))).expect("write commits");
+    fs::write(state_dir.join("current_index"), "0\n").expect("write current index");
+    fs::write(state_dir.join("split_count"), "0\n").expect("write split_count");
+    fs::write(state_dir.join("exec"), "true\n").expect("write exec");
+    fs::write(state_dir.join("requires_rebase"), "true\n").expect("write requires_rebase");
+
+    let message = NonEmptyString::try_from("test: message".to_owned()).expect("non-empty");
+    let messages = NonEmpty::new(message);
+    let runner =
+        ScriptedRunner::default().with_output("git", &["rev-parse", "--git-dir"], repo, ".git\n");
+    let io = TestIo::default();
+    let env = TestEnv {
+        cwd: repo.to_path_buf(),
+    };
+    let ctx = Ctx {
+        runner: &runner,
+        cwd: repo.to_path_buf(),
+        io: &io,
+        env: &env,
+        fs: &REAL_FS,
+    };
+
+    let err = cmd_continue_in(&ctx, &messages).expect_err("expected no rebase error");
+    assert_eq!(err.to_string(), "git command failed: no rebase in progress");
+}
+
+#[test]
+fn cmd_finish_errors_when_rebase_is_required_but_not_active() {
+    let dir = TempDir::new().expect("tempdir");
+    let repo = dir.path();
+    let git_dir = repo.join(".git");
+    let state_dir = git_dir.join("factor");
+    fs::create_dir_all(&state_dir).expect("create factor dir");
+    fs::write(state_dir.join("commits"), format!("{}\n", "a".repeat(40))).expect("write commits");
+    fs::write(state_dir.join("current_index"), "0\n").expect("write current index");
+    fs::write(state_dir.join("split_count"), "0\n").expect("write split_count");
+    fs::write(state_dir.join("exec"), "true\n").expect("write exec");
+    fs::write(state_dir.join("requires_rebase"), "true\n").expect("write requires_rebase");
+
+    let message = NonEmptyString::try_from("test: message".to_owned()).expect("non-empty");
+    let messages = [message];
+    let runner =
+        ScriptedRunner::default().with_output("git", &["rev-parse", "--git-dir"], repo, ".git\n");
+    let io = TestIo::default();
+    let env = TestEnv {
+        cwd: repo.to_path_buf(),
+    };
+    let ctx = Ctx {
+        runner: &runner,
+        cwd: repo.to_path_buf(),
+        io: &io,
+        env: &env,
+        fs: &REAL_FS,
+    };
+
+    let err = cmd_finish_in(&ctx, &messages).expect_err("expected no rebase error");
+    assert_eq!(err.to_string(), "git command failed: no rebase in progress");
+}
+
+#[test]
+fn cmd_continue_converged_tree_completes_session_without_remainder() {
+    let dir = TempDir::new().expect("tempdir");
+    let repo = dir.path();
+    let git_dir = repo.join(".git");
+    let state_dir = git_dir.join("factor");
+    fs::create_dir_all(&state_dir).expect("create factor dir");
+    let original = "a".repeat(40);
+    fs::write(state_dir.join("commits"), format!("{original}\n")).expect("write commits");
+    fs::write(state_dir.join("current_index"), "0\n").expect("write current index");
+    fs::write(state_dir.join("split_count"), "0\n").expect("write split_count");
+    fs::write(state_dir.join("exec"), "true\n").expect("write exec");
+    fs::write(state_dir.join("requires_rebase"), "false\n").expect("write requires_rebase");
+    fs::write(state_dir.join("expected_tree"), "same_tree\n").expect("write expected_tree");
+
+    let message = NonEmptyString::try_from("test: message".to_owned()).expect("non-empty");
+    let messages = NonEmpty::new(message);
+
+    let commit_meta = "a\0b\0c\0d\0e\0f";
+    let envs = [
+        ("GIT_AUTHOR_NAME", "a"),
+        ("GIT_AUTHOR_EMAIL", "b"),
+        ("GIT_AUTHOR_DATE", "c"),
+        ("GIT_COMMITTER_NAME", "d"),
+        ("GIT_COMMITTER_EMAIL", "e"),
+        ("GIT_COMMITTER_DATE", "f"),
+    ];
+    let runner = ScriptedRunner::default()
+        .with_output("git", &["rev-parse", "--git-dir"], repo, ".git\n")
+        .with_status("git", &["diff", "--quiet", "--staged"], &[], false, repo, 1)
+        .with_status(
+            "git",
+            &["checkout", "--quiet", "--", "."],
+            &[],
+            false,
+            repo,
+            0,
+        )
+        .with_status(
+            "git",
+            &["clean", "--force", "--quiet", "-d"],
+            &[],
+            false,
+            repo,
+            0,
+        )
+        .with_status(
+            "git",
+            &["checkout-index", "--all", "--force", "--quiet"],
+            &[],
+            false,
+            repo,
+            0,
+        )
+        .with_output(
+            "git",
+            &["diff", "--diff-filter=D", "--name-only", "--staged"],
+            repo,
+            "",
+        )
+        .with_status("bash", &["-c", "true"], &[], false, repo, 0)
+        .with_output(
+            "git",
+            &[
+                "show",
+                "--format=%an%x00%ae%x00%aI%x00%cn%x00%ce%x00%cI",
+                "--no-patch",
+                original.as_str(),
+            ],
+            repo,
+            commit_meta,
+        )
+        .with_status(
+            "git",
+            &["commit", "--quiet", "--message", "test: message"],
+            &envs,
+            false,
+            repo,
+            0,
+        )
+        .with_output("git", &["rev-parse", "HEAD^{tree}"], repo, "same_tree\n");
+    let io = TestIo::default();
+    let env = TestEnv {
+        cwd: repo.to_path_buf(),
+    };
+    let ctx = Ctx {
+        runner: &runner,
+        cwd: repo.to_path_buf(),
+        io: &io,
+        env: &env,
+        fs: &REAL_FS,
+    };
+
+    let code = cmd_continue_in(&ctx, &messages).expect("continue should succeed");
+    assert_eq!(code, EXIT_OK);
+    assert_eq!(
+        io.stdout(),
+        "FACTOR: Complete. Final commit split into 1 commits.\n"
+    );
+    assert!(io.stderr().is_empty(), "stderr should be empty");
+    assert!(
+        !state_dir.exists(),
+        "factor state dir should be removed after completion"
+    );
+}
+
+#[test]
+fn advance_to_next_commit_finishes_root_session_and_runs_empty_root_cleanup() {
+    let dir = TempDir::new().expect("tempdir");
+    let repo = dir.path();
+    fs::write(repo.join("git-factor"), "").expect("write fake exe");
+
+    let git_dir = repo.join(".git");
+    let state_dir = git_dir.join("factor");
+    fs::create_dir_all(&state_dir).expect("create factor dir");
+    fs::write(state_dir.join("split_count"), "2\n").expect("write split_count");
+    fs::write(state_dir.join("requires_rebase"), "false\n").expect("write requires_rebase");
+    fs::write(state_dir.join("is_root"), "true\n").expect("write is_root");
+
+    let root = "a".repeat(40);
+    let runner = ScriptedRunner::default()
+        .with_output("git", &["rev-parse", "--git-dir"], repo, ".git\n")
+        .with_output(
+            "git",
+            &["rev-list", "--max-parents=0", "HEAD"],
+            repo,
+            &format!("{root}\n"),
+        )
+        .with_output("git", &["ls-tree", &root], repo, "")
+        .with_output("git", &["rev-parse", "--short", &root], repo, "aaaaaaa\n");
+    let io = TestIo::default();
+    let env = TestEnv {
+        cwd: repo.to_path_buf(),
+    };
+    let ctx = Ctx {
+        runner: &runner,
+        cwd: repo.to_path_buf(),
+        io: &io,
+        env: &env,
+        fs: &REAL_FS,
+    };
+
+    let has_next = advance_to_next_commit_in(&ctx, &state_dir).expect("advance should succeed");
+    assert!(!has_next, "session should be complete");
+    assert_eq!(
+        io.stdout(),
+        "FACTOR: Complete. Final commit split into 2 commits.\n"
+    );
+    assert!(io.stderr().is_empty(), "stderr should be empty");
+    assert!(
+        !state_dir.exists(),
+        "factor state dir should be removed after completion"
+    );
+}
+
+#[test]
+fn cmd_finish_reports_conflicts_when_final_cherry_pick_leaves_unmerged_paths() {
+    let dir = TempDir::new().expect("tempdir");
+    let repo = dir.path();
+    let git_dir = repo.join(".git");
+    let state_dir = git_dir.join("factor");
+    fs::create_dir_all(&state_dir).expect("create factor dir");
+    let original = "a".repeat(40);
+    fs::write(state_dir.join("commits"), format!("{original}\n")).expect("write commits");
+    fs::write(state_dir.join("current_index"), "0\n").expect("write current index");
+    fs::write(state_dir.join("split_count"), "0\n").expect("write split_count");
+    fs::write(state_dir.join("exec"), "true\n").expect("write exec");
+    fs::write(state_dir.join("requires_rebase"), "false\n").expect("write requires_rebase");
+    fs::write(state_dir.join("expected_tree"), "expected_tree\n").expect("write expected_tree");
+
+    let message = NonEmptyString::try_from("test: message".to_owned()).expect("non-empty");
+    let messages = [message];
+    let runner = ScriptedRunner::default()
+        .with_output("git", &["rev-parse", "--git-dir"], repo, ".git\n")
+        .with_status(
+            "git",
+            &["checkout", "--quiet", "--", "."],
+            &[],
+            false,
+            repo,
+            0,
+        )
+        .with_status(
+            "git",
+            &["clean", "--force", "--quiet", "-d"],
+            &[],
+            false,
+            repo,
+            0,
+        )
+        .with_status(
+            "git",
+            &[
+                "cherry-pick",
+                "--no-commit",
+                "--strategy-option",
+                "theirs",
+                original.as_str(),
+            ],
+            &[],
+            false,
+            repo,
+            1,
+        )
+        .with_output(
+            "git",
+            &["diff", "--name-only", "--diff-filter=U"],
+            repo,
+            "conflict.txt\n",
+        )
+        .with_status("git", &["cherry-pick", "--abort"], &[], true, repo, 0);
+    let io = TestIo::default();
+    let env = TestEnv {
+        cwd: repo.to_path_buf(),
+    };
+    let ctx = Ctx {
+        runner: &runner,
+        cwd: repo.to_path_buf(),
+        io: &io,
+        env: &env,
+        fs: &REAL_FS,
+    };
+
+    let err = cmd_finish_in(&ctx, &messages).expect_err("expected conflict error");
+    assert!(
+        matches!(&err, FactorError::GitCommand(msg) if msg == "final cherry-pick left conflicts:\nconflict.txt"),
+        "err was: {err:?}"
+    );
+}
+
+#[test]
+fn cmd_finish_non_conflict_cherry_pick_failure_continues_then_fails_on_quit() {
+    let dir = TempDir::new().expect("tempdir");
+    let repo = dir.path();
+    let git_dir = repo.join(".git");
+    let state_dir = git_dir.join("factor");
+    fs::create_dir_all(&state_dir).expect("create factor dir");
+    let original = "a".repeat(40);
+    fs::write(state_dir.join("commits"), format!("{original}\n")).expect("write commits");
+    fs::write(state_dir.join("current_index"), "0\n").expect("write current index");
+    fs::write(state_dir.join("split_count"), "0\n").expect("write split_count");
+    fs::write(state_dir.join("exec"), "true\n").expect("write exec");
+    fs::write(state_dir.join("requires_rebase"), "false\n").expect("write requires_rebase");
+    fs::write(state_dir.join("expected_tree"), "expected_tree\n").expect("write expected_tree");
+
+    let message = NonEmptyString::try_from("test: message".to_owned()).expect("non-empty");
+    let messages = [message];
+    let runner = ScriptedRunner::default()
+        .with_output("git", &["rev-parse", "--git-dir"], repo, ".git\n")
+        .with_status(
+            "git",
+            &["checkout", "--quiet", "--", "."],
+            &[],
+            false,
+            repo,
+            0,
+        )
+        .with_status(
+            "git",
+            &["clean", "--force", "--quiet", "-d"],
+            &[],
+            false,
+            repo,
+            0,
+        )
+        .with_status(
+            "git",
+            &[
+                "cherry-pick",
+                "--no-commit",
+                "--strategy-option",
+                "theirs",
+                original.as_str(),
+            ],
+            &[],
+            false,
+            repo,
+            1,
+        )
+        .with_output("git", &["diff", "--name-only", "--diff-filter=U"], repo, "")
+        .with_status("git", &["cherry-pick", "--quit"], &[], false, repo, 1);
+    let io = TestIo::default();
+    let env = TestEnv {
+        cwd: repo.to_path_buf(),
+    };
+    let ctx = Ctx {
+        runner: &runner,
+        cwd: repo.to_path_buf(),
+        io: &io,
+        env: &env,
+        fs: &REAL_FS,
+    };
+
+    let err = cmd_finish_in(&ctx, &messages).expect_err("expected quit failure");
+    assert!(
+        matches!(&err, FactorError::GitCommand(msg) if msg.contains("git cherry-pick failed (exit ")),
+        "err was: {err:?}"
+    );
+}
+
+#[test]
+fn cmd_finish_errors_when_original_message_is_empty_without_messages() {
+    let dir = TempDir::new().expect("tempdir");
+    let repo = dir.path();
+    let git_dir = repo.join(".git");
+    let state_dir = git_dir.join("factor");
+    fs::create_dir_all(&state_dir).expect("create factor dir");
+    let original = "a".repeat(40);
+    fs::write(state_dir.join("commits"), format!("{original}\n")).expect("write commits");
+    fs::write(state_dir.join("current_index"), "0\n").expect("write current index");
+    fs::write(state_dir.join("split_count"), "0\n").expect("write split_count");
+    fs::write(state_dir.join("exec"), "true\n").expect("write exec");
+    fs::write(state_dir.join("requires_rebase"), "false\n").expect("write requires_rebase");
+    fs::write(state_dir.join("expected_tree"), "expected_tree\n").expect("write expected_tree");
+
+    let messages: [NonEmptyString; 0] = [];
+    let runner = ScriptedRunner::default()
+        .with_output("git", &["rev-parse", "--git-dir"], repo, ".git\n")
+        .with_status(
+            "git",
+            &["checkout", "--quiet", "--", "."],
+            &[],
+            false,
+            repo,
+            0,
+        )
+        .with_status(
+            "git",
+            &["clean", "--force", "--quiet", "-d"],
+            &[],
+            false,
+            repo,
+            0,
+        )
+        .with_status(
+            "git",
+            &[
+                "cherry-pick",
+                "--no-commit",
+                "--strategy-option",
+                "theirs",
+                original.as_str(),
+            ],
+            &[],
+            false,
+            repo,
+            0,
+        )
+        .with_status("git", &["cherry-pick", "--quit"], &[], false, repo, 0)
+        .with_output(
+            "git",
+            &["show", "--format=%B", "--no-patch", original.as_str()],
+            repo,
+            "\n",
+        );
+    let io = TestIo::default();
+    let env = TestEnv {
+        cwd: repo.to_path_buf(),
+    };
+    let ctx = Ctx {
+        runner: &runner,
+        cwd: repo.to_path_buf(),
+        io: &io,
+        env: &env,
+        fs: &REAL_FS,
+    };
+
+    let err = cmd_finish_in(&ctx, &messages).expect_err("expected empty message error");
+    assert_eq!(
+        err.to_string(),
+        "git command failed: original commit has empty message"
+    );
+}
+
+#[test]
+fn cmd_finish_reports_tree_mismatch_when_no_messages_are_provided() {
+    let dir = TempDir::new().expect("tempdir");
+    let repo = dir.path();
+    let git_dir = repo.join(".git");
+    let state_dir = git_dir.join("factor");
+    fs::create_dir_all(&state_dir).expect("create factor dir");
+    let original = "a".repeat(40);
+    fs::write(state_dir.join("commits"), format!("{original}\n")).expect("write commits");
+    fs::write(state_dir.join("current_index"), "0\n").expect("write current index");
+    fs::write(state_dir.join("split_count"), "0\n").expect("write split_count");
+    fs::write(state_dir.join("exec"), "true\n").expect("write exec");
+    fs::write(state_dir.join("requires_rebase"), "false\n").expect("write requires_rebase");
+    fs::write(state_dir.join("expected_tree"), "expected_tree\n").expect("write expected_tree");
+
+    let messages: [NonEmptyString; 0] = [];
+    let runner = ScriptedRunner::default()
+        .with_output("git", &["rev-parse", "--git-dir"], repo, ".git\n")
+        .with_status(
+            "git",
+            &["checkout", "--quiet", "--", "."],
+            &[],
+            false,
+            repo,
+            0,
+        )
+        .with_status(
+            "git",
+            &["clean", "--force", "--quiet", "-d"],
+            &[],
+            false,
+            repo,
+            0,
+        )
+        .with_status(
+            "git",
+            &[
+                "cherry-pick",
+                "--no-commit",
+                "--strategy-option",
+                "theirs",
+                original.as_str(),
+            ],
+            &[],
+            false,
+            repo,
+            0,
+        )
+        .with_status("git", &["cherry-pick", "--quit"], &[], false, repo, 0)
+        .with_output(
+            "git",
+            &["show", "--format=%B", "--no-patch", original.as_str()],
+            repo,
+            "original message\n",
+        )
+        .with_output("git", &["write-tree"], repo, "actual_tree\n");
+    let io = TestIo::default();
+    let env = TestEnv {
+        cwd: repo.to_path_buf(),
+    };
+    let ctx = Ctx {
+        runner: &runner,
+        cwd: repo.to_path_buf(),
+        io: &io,
+        env: &env,
+        fs: &REAL_FS,
+    };
+
+    let err = cmd_finish_in(&ctx, &messages).expect_err("expected tree mismatch");
+    assert!(
+        matches!(
+            &err,
+            FactorError::TreeHashMismatch { actual, expected }
+                if actual == "actual_tree" && expected == "expected_tree"
+        ),
+        "err was: {err:?}"
+    );
+}
+
+#[test]
+fn cmd_start_single_head_session_exec_gate_failure_returns_exec_failed() {
+    let dir = TempDir::new().expect("tempdir");
+    let repo = dir.path();
+    let sha = "a".repeat(40);
+    let runner = ScriptedRunner::default()
+        .with_output("git", &["rev-parse", "--git-dir"], repo, ".git\n")
+        .with_output(
+            "git",
+            &["rev-parse", "--verify", "HEAD"],
+            repo,
+            &format!("{sha}\n"),
+        )
+        .with_output(
+            "git",
+            &["rev-list", "--reverse", "--topo-order", &sha],
+            repo,
+            &format!("{sha}\n"),
+        )
+        .with_status(
+            "git",
+            &["merge-base", "--is-ancestor", &sha, "HEAD"],
+            &[],
+            true,
+            repo,
+            0,
+        )
+        .with_status(
+            "git",
+            &["rev-parse", "--quiet", "--verify", &format!("{sha}^2")],
+            &[],
+            true,
+            repo,
+            1,
+        )
+        .with_output("git", &["rev-parse", "--short", &sha], repo, "aaaaaaa\n")
+        .with_output(
+            "git",
+            &["show", "--format=%B", "--no-patch", &sha],
+            repo,
+            "subject\n",
+        )
+        .with_status(
+            "bash",
+            &["--norc", "--noprofile", "-n", "-c", "true"],
+            &[],
+            true,
+            repo,
+            0,
+        )
+        .with_status("bash", &["-c", "true"], &[], false, repo, 1);
+    let io = TestIo::default();
+    let env = TestEnv {
+        cwd: repo.to_path_buf(),
+    };
+    let ctx = Ctx {
+        runner: &runner,
+        cwd: repo.to_path_buf(),
+        io: &io,
+        env: &env,
+        fs: &REAL_FS,
+    };
+
+    let err = run_with_args_vec(
+        &ctx,
+        vec![
+            OsString::from("git-factor"),
+            OsString::from("--exec"),
+            OsString::from("true"),
+            OsString::from("HEAD"),
+        ],
+    )
+    .expect_err("expected exec gate failure");
+    assert!(
+        matches!(
+            &err,
+            FactorError::ExecFailed { code, command } if *code != 0 && command == "true"
+        ),
+        "err was: {err:?}"
+    );
+}
+
+#[test]
+fn run_with_args_vec_propagates_io_errors_for_parser_and_help_output() {
+    let dir = TempDir::new().expect("tempdir");
+    let io = FailingIo;
+    let ctx = Ctx {
+        runner: &REAL_RUNNER,
+        cwd: dir.path().to_path_buf(),
+        io: &io,
+        env: &REAL_ENV,
+        fs: &REAL_FS,
+    };
+
+    let err = run_with_args_vec(
+        &ctx,
+        vec![OsString::from("git-factor"), OsString::from("--not-real")],
+    )
+    .expect_err("expected parse stderr io failure");
+    assert!(
+        matches!(&err, FactorError::Io(inner) if inner.to_string().contains("io fail")),
+        "err was: {err:?}"
+    );
+
+    let err = run_with_args_vec(
+        &ctx,
+        vec![OsString::from("git-factor"), OsString::from("--help")],
+    )
+    .expect_err("expected parse stdout io failure");
+    assert!(
+        matches!(&err, FactorError::Io(inner) if inner.to_string().contains("io fail")),
+        "err was: {err:?}"
+    );
+
+    let err = run_with_args_vec(&ctx, vec![OsString::from("git-factor")])
+        .expect_err("expected long-help io failure");
+    assert!(
+        matches!(&err, FactorError::Io(inner) if inner.to_string().contains("io fail")),
+        "err was: {err:?}"
+    );
+}
+
+#[test]
+fn increment_split_count_in_state_reports_invalid_split_count_value() {
+    let dir = TempDir::new().expect("tempdir");
+    let repo = dir.path();
+    let state_dir = repo.join(".git").join("factor");
+    fs::create_dir_all(&state_dir).expect("create state dir");
+    fs::write(state_dir.join("split_count"), "not-a-number\n").expect("write split_count");
+
+    let io = TestIo::default();
+    let env = TestEnv {
+        cwd: repo.to_path_buf(),
+    };
+    let ctx = Ctx {
+        runner: &REAL_RUNNER,
+        cwd: repo.to_path_buf(),
+        io: &io,
+        env: &env,
+        fs: &REAL_FS,
+    };
+
+    let err = increment_split_count_in_state(&ctx, &state_dir)
+        .expect_err("invalid split_count should fail");
+    assert!(
+        matches!(&err, FactorError::GitCommand(msg) if msg.contains("split_count")),
+        "err was: {err:?}"
+    );
+}
+
+#[test]
+fn cmd_status_propagates_second_current_index_read_failure() {
+    let dir = TempDir::new().expect("tempdir");
+    let repo = dir.path();
+    let git_dir = repo.join(".git");
+    let state_dir = git_dir.join("factor");
+    fs::create_dir_all(&state_dir).expect("create factor dir");
+
+    let sha = "a".repeat(40);
+    fs::write(state_dir.join("commits"), format!("{sha}\n")).expect("write commits");
+    fs::write(state_dir.join("current_index"), "0\n").expect("write current_index");
+    fs::write(state_dir.join("split_count"), "1\n").expect("write split_count");
+    fs::write(state_dir.join("requires_rebase"), "false\n").expect("write requires_rebase");
+    fs::write(state_dir.join("is_root"), "false\n").expect("write is_root");
+
+    let runner =
+        ScriptedRunner::default().with_output("git", &["rev-parse", "--git-dir"], repo, ".git\n");
+    let io = TestIo::default();
+    let env = TestEnv {
+        cwd: repo.to_path_buf(),
+    };
+    let fs = NthReadFailureFs::new("current_index", 2, "second current_index read failed");
+    let ctx = Ctx {
+        runner: &runner,
+        cwd: repo.to_path_buf(),
+        io: &io,
+        env: &env,
+        fs: &fs,
+    };
+
+    let err = cmd_status_in(&ctx).expect_err("expected second current_index read to fail");
+    assert!(
+        matches!(&err, FactorError::StateRead(inner) if inner.to_string().contains("second current_index read failed")),
+        "err was: {err:?}"
+    );
+}
+
+#[test]
+fn advance_to_next_commit_reports_invalid_split_count_before_rebase_step() {
+    let dir = TempDir::new().expect("tempdir");
+    let repo = dir.path();
+    let state_dir = repo.join(".git").join("factor");
+    fs::create_dir_all(&state_dir).expect("create factor dir");
+    fs::write(state_dir.join("split_count"), "not-a-number\n").expect("write split_count");
+
+    let io = TestIo::default();
+    let env = TestEnv {
+        cwd: repo.to_path_buf(),
+    };
+    let ctx = Ctx {
+        runner: &ScriptedRunner::default(),
+        cwd: repo.to_path_buf(),
+        io: &io,
+        env: &env,
+        fs: &REAL_FS,
+    };
+
+    let err = advance_to_next_commit_in(&ctx, &state_dir).expect_err("expected invalid split_count");
+    assert!(
+        matches!(&err, FactorError::GitCommand(msg) if msg.contains("split_count")),
+        "err was: {err:?}"
+    );
+}
+
+#[test]
+fn advance_to_next_commit_reports_invalid_requires_rebase_before_rebase_step() {
+    let dir = TempDir::new().expect("tempdir");
+    let repo = dir.path();
+    let state_dir = repo.join(".git").join("factor");
+    fs::create_dir_all(&state_dir).expect("create factor dir");
+    fs::write(state_dir.join("split_count"), "0\n").expect("write split_count");
+    fs::write(state_dir.join("requires_rebase"), "not-bool\n").expect("write requires_rebase");
+
+    let io = TestIo::default();
+    let env = TestEnv {
+        cwd: repo.to_path_buf(),
+    };
+    let ctx = Ctx {
+        runner: &ScriptedRunner::default(),
+        cwd: repo.to_path_buf(),
+        io: &io,
+        env: &env,
+        fs: &REAL_FS,
+    };
+
+    let err =
+        advance_to_next_commit_in(&ctx, &state_dir).expect_err("expected invalid requires_rebase");
+    assert!(
+        matches!(&err, FactorError::GitCommand(msg) if msg.contains("requires_rebase")),
+        "err was: {err:?}"
+    );
+}
+
+#[test]
+fn advance_to_next_commit_reports_invalid_current_index_at_edit_stop() {
+    let dir = TempDir::new().expect("tempdir");
+    let repo = dir.path();
+    let git_dir = repo.join(".git");
+    let state_dir = git_dir.join("factor");
+    fs::create_dir_all(git_dir.join("rebase-merge")).expect("create rebase-merge");
+    fs::create_dir_all(&state_dir).expect("create factor dir");
+    fs::write(state_dir.join("split_count"), "1\n").expect("write split_count");
+    fs::write(state_dir.join("current_index"), "not-a-number\n").expect("write current_index");
+
+    let runner = ScriptedRunner::default()
+        .with_output("git", &["rev-parse", "--git-dir"], repo, ".git\n")
+        .with_status(
+            "git",
+            &["rebase", "--continue"],
+            &[("GIT_EDITOR", "false"), ("GIT_SEQUENCE_EDITOR", "false")],
+            false,
+            repo,
+            0,
+        )
+        .with_output("git", &["rev-parse", "HEAD^{tree}"], repo, "head_tree\n");
+    let io = TestIo::default();
+    let env = TestEnv {
+        cwd: repo.to_path_buf(),
+    };
+    let ctx = Ctx {
+        runner: &runner,
+        cwd: repo.to_path_buf(),
+        io: &io,
+        env: &env,
+        fs: &REAL_FS,
+    };
+
+    let err = advance_to_next_commit_in(&ctx, &state_dir).expect_err("expected invalid current_index");
+    assert!(
+        matches!(&err, FactorError::GitCommand(msg) if msg.contains("current_index")),
+        "err was: {err:?}"
+    );
+}
+
+#[test]
+fn advance_to_next_commit_propagates_state_write_failure_for_current_index_update() {
+    let dir = TempDir::new().expect("tempdir");
+    let repo = dir.path();
+    let git_dir = repo.join(".git");
+    let state_dir = git_dir.join("factor");
+    fs::create_dir_all(git_dir.join("rebase-merge")).expect("create rebase-merge");
+    fs::create_dir_all(&state_dir).expect("create factor dir");
+    fs::write(state_dir.join("split_count"), "1\n").expect("write split_count");
+    fs::write(state_dir.join("current_index"), "0\n").expect("write current_index");
+
+    let runner = ScriptedRunner::default()
+        .with_output("git", &["rev-parse", "--git-dir"], repo, ".git\n")
+        .with_status(
+            "git",
+            &["rebase", "--continue"],
+            &[("GIT_EDITOR", "false"), ("GIT_SEQUENCE_EDITOR", "false")],
+            false,
+            repo,
+            0,
+        )
+        .with_output("git", &["rev-parse", "HEAD^{tree}"], repo, "head_tree\n");
+    let io = TestIo::default();
+    let env = TestEnv {
+        cwd: repo.to_path_buf(),
+    };
+    let fs = FailingWriteForFileFs {
+        file_name: "current_index",
+        message: "current_index write failed",
+    };
+    let ctx = Ctx {
+        runner: &runner,
+        cwd: repo.to_path_buf(),
+        io: &io,
+        env: &env,
+        fs: &fs,
+    };
+
+    let err = advance_to_next_commit_in(&ctx, &state_dir)
+        .expect_err("expected current_index write failure");
+    assert!(
+        matches!(&err, FactorError::StateWrite(inner) if inner.to_string().contains("current_index write failed")),
+        "err was: {err:?}"
+    );
+}
+
+#[test]
+fn advance_to_next_commit_propagates_current_commit_lookup_failure_after_reset() {
+    let dir = TempDir::new().expect("tempdir");
+    let repo = dir.path();
+    let git_dir = repo.join(".git");
+    let state_dir = git_dir.join("factor");
+    fs::create_dir_all(git_dir.join("rebase-merge")).expect("create rebase-merge");
+    fs::create_dir_all(&state_dir).expect("create factor dir");
+    fs::write(
+        state_dir.join("commits"),
+        format!("{}\n{}\n", "a".repeat(40), "b".repeat(40)),
+    )
+    .expect("write commits");
+    fs::write(state_dir.join("split_count"), "1\n").expect("write split_count");
+    fs::write(state_dir.join("current_index"), "0\n").expect("write current_index");
+
+    let runner = ScriptedRunner::default()
+        .with_output("git", &["rev-parse", "--git-dir"], repo, ".git\n")
+        .with_status(
+            "git",
+            &["rebase", "--continue"],
+            &[("GIT_EDITOR", "false"), ("GIT_SEQUENCE_EDITOR", "false")],
+            false,
+            repo,
+            0,
+        )
+        .with_output("git", &["rev-parse", "HEAD^{tree}"], repo, "head_tree\n")
+        .with_status("git", &["reset", "--quiet", "HEAD~1"], &[], false, repo, 0);
+    let io = TestIo::default();
+    let env = TestEnv {
+        cwd: repo.to_path_buf(),
+    };
+    let fs = NthReadFailureFs::new("current_index", 2, "current_index read failed after reset");
+    let ctx = Ctx {
+        runner: &runner,
+        cwd: repo.to_path_buf(),
+        io: &io,
+        env: &env,
+        fs: &fs,
+    };
+
+    let err =
+        advance_to_next_commit_in(&ctx, &state_dir).expect_err("expected current_commit failure");
+    assert!(
+        matches!(&err, FactorError::StateRead(inner) if inner.to_string().contains("after reset")),
+        "err was: {err:?}"
+    );
+}
+
+#[test]
+fn advance_to_next_commit_propagates_empty_root_cleanup_failure() {
+    let dir = TempDir::new().expect("tempdir");
+    let repo = dir.path();
+    let state_dir = repo.join(".git").join("factor");
+    fs::create_dir_all(&state_dir).expect("create factor dir");
+    fs::write(state_dir.join("split_count"), "2\n").expect("write split_count");
+    fs::write(state_dir.join("requires_rebase"), "false\n").expect("write requires_rebase");
+    fs::write(state_dir.join("is_root"), "true\n").expect("write is_root");
+
+    let io = TestIo::default();
+    let env = TestEnv {
+        cwd: repo.to_path_buf(),
+    };
+    let ctx = Ctx {
+        runner: &ScriptedRunner::default(),
+        cwd: repo.to_path_buf(),
+        io: &io,
+        env: &env,
+        fs: &REAL_FS,
+    };
+
+    let err = advance_to_next_commit_in(&ctx, &state_dir)
+        .expect_err("expected remove_empty_root failure");
+    assert!(
+        matches!(&err, FactorError::GitCommand(msg) if msg.contains("rev-list") && msg.contains("unexpected output call")),
+        "err was: {err:?}"
+    );
+}
+
+#[test]
+fn rehydrate_pool_preserving_index_propagates_quit_status_io_error() {
+    let dir = TempDir::new().expect("tempdir");
+    let repo = dir.path();
+    let base_runner = ScriptedRunner::default()
+        .with_output("git", &["write-tree"], repo, "deadbeef\n")
+        .with_status(
+            "git",
+            &[
+                "cherry-pick",
+                "--no-commit",
+                "--strategy-option",
+                "theirs",
+                &"a".repeat(40),
+            ],
+            &[],
+            false,
+            repo,
+            0,
+        )
+        .with_status("git", &["cherry-pick", "--quit"], &[], false, repo, 0)
+        .with_status("git", &["read-tree", "deadbeef"], &[], false, repo, 0);
+    let runner = NthRunnerFailure::new(base_runner, 3);
+    let io = TestIo::default();
+    let env = TestEnv {
+        cwd: repo.to_path_buf(),
+    };
+    let ctx = Ctx {
+        runner: &runner,
+        cwd: repo.to_path_buf(),
+        io: &io,
+        env: &env,
+        fs: &REAL_FS,
+    };
+
+    let commit = CommitSha::new("a".repeat(40)).expect("sha");
+    let err = rehydrate_pool_preserving_index(&ctx, &commit).expect_err("expected quit io error");
+    assert!(is_forced_runner_failure(&err), "err was: {err:?}");
+}
+
+#[test]
+fn rehydrate_pool_preserving_index_propagates_read_tree_status_io_error() {
+    let dir = TempDir::new().expect("tempdir");
+    let repo = dir.path();
+    let base_runner = ScriptedRunner::default()
+        .with_output("git", &["write-tree"], repo, "deadbeef\n")
+        .with_status(
+            "git",
+            &[
+                "cherry-pick",
+                "--no-commit",
+                "--strategy-option",
+                "theirs",
+                &"a".repeat(40),
+            ],
+            &[],
+            false,
+            repo,
+            0,
+        )
+        .with_status("git", &["cherry-pick", "--quit"], &[], false, repo, 0)
+        .with_status("git", &["read-tree", "deadbeef"], &[], false, repo, 0);
+    let runner = NthRunnerFailure::new(base_runner, 4);
+    let io = TestIo::default();
+    let env = TestEnv {
+        cwd: repo.to_path_buf(),
+    };
+    let ctx = Ctx {
+        runner: &runner,
+        cwd: repo.to_path_buf(),
+        io: &io,
+        env: &env,
+        fs: &REAL_FS,
+    };
+
+    let commit = CommitSha::new("a".repeat(40)).expect("sha");
+    let err =
+        rehydrate_pool_preserving_index(&ctx, &commit).expect_err("expected read-tree io error");
+    assert!(is_forced_runner_failure(&err), "err was: {err:?}");
+}
+
+#[test]
+fn cmd_continue_propagates_expected_tree_fallback_lookup_error() {
+    let dir = TempDir::new().expect("tempdir");
+    let repo = dir.path();
+    let git_dir = repo.join(".git");
+    let state_dir = git_dir.join("factor");
+    fs::create_dir_all(&state_dir).expect("create factor dir");
+    let original = "a".repeat(40);
+    fs::write(state_dir.join("commits"), format!("{original}\n")).expect("write commits");
+    fs::write(state_dir.join("current_index"), "0\n").expect("write current index");
+    fs::write(state_dir.join("split_count"), "0\n").expect("write split_count");
+    fs::write(state_dir.join("exec"), "true\n").expect("write exec");
+    fs::write(state_dir.join("requires_rebase"), "false\n").expect("write requires_rebase");
+
+    let commit_meta = "a\0b\0c\0d\0e\0f";
+    let envs = [
+        ("GIT_AUTHOR_NAME", "a"),
+        ("GIT_AUTHOR_EMAIL", "b"),
+        ("GIT_AUTHOR_DATE", "c"),
+        ("GIT_COMMITTER_NAME", "d"),
+        ("GIT_COMMITTER_EMAIL", "e"),
+        ("GIT_COMMITTER_DATE", "f"),
+    ];
+    let runner = ScriptedRunner::default()
+        .with_output("git", &["rev-parse", "--git-dir"], repo, ".git\n")
+        .with_status("git", &["diff", "--quiet", "--staged"], &[], false, repo, 1)
+        .with_status(
+            "git",
+            &["checkout", "--quiet", "--", "."],
+            &[],
+            false,
+            repo,
+            0,
+        )
+        .with_status(
+            "git",
+            &["clean", "--force", "--quiet", "-d"],
+            &[],
+            false,
+            repo,
+            0,
+        )
+        .with_status(
+            "git",
+            &["checkout-index", "--all", "--force", "--quiet"],
+            &[],
+            false,
+            repo,
+            0,
+        )
+        .with_output(
+            "git",
+            &["diff", "--diff-filter=D", "--name-only", "--staged"],
+            repo,
+            "",
+        )
+        .with_status("bash", &["-c", "true"], &[], false, repo, 0)
+        .with_output(
+            "git",
+            &[
+                "show",
+                "--format=%an%x00%ae%x00%aI%x00%cn%x00%ce%x00%cI",
+                "--no-patch",
+                original.as_str(),
+            ],
+            repo,
+            commit_meta,
+        )
+        .with_status(
+            "git",
+            &["commit", "--quiet", "--message", "test: message"],
+            &envs,
+            false,
+            repo,
+            0,
+        )
+        .with_output("git", &["rev-parse", "HEAD^{tree}"], repo, "head_tree\n");
+    let io = TestIo::default();
+    let env = TestEnv {
+        cwd: repo.to_path_buf(),
+    };
+    let ctx = Ctx {
+        runner: &runner,
+        cwd: repo.to_path_buf(),
+        io: &io,
+        env: &env,
+        fs: &REAL_FS,
+    };
+    let message = NonEmptyString::try_from("test: message".to_owned()).expect("non-empty");
+    let messages = NonEmpty::new(message);
+
+    let err = cmd_continue_in(&ctx, &messages).expect_err("expected expected-tree lookup failure");
+    assert!(
+        matches!(&err, FactorError::GitCommand(msg) if msg.contains("rev-parse") && msg.contains("unexpected output call")),
+        "err was: {err:?}"
+    );
+}
+
+#[test]
+fn cmd_finish_propagates_unmerged_query_output_error() {
+    let dir = TempDir::new().expect("tempdir");
+    let repo = dir.path();
+    let git_dir = repo.join(".git");
+    let state_dir = git_dir.join("factor");
+    fs::create_dir_all(&state_dir).expect("create factor dir");
+    let original = "a".repeat(40);
+    fs::write(state_dir.join("commits"), format!("{original}\n")).expect("write commits");
+    fs::write(state_dir.join("current_index"), "0\n").expect("write current index");
+    fs::write(state_dir.join("split_count"), "0\n").expect("write split_count");
+    fs::write(state_dir.join("exec"), "true\n").expect("write exec");
+    fs::write(state_dir.join("requires_rebase"), "false\n").expect("write requires_rebase");
+    fs::write(state_dir.join("expected_tree"), "expected_tree\n").expect("write expected_tree");
+
+    let message = NonEmptyString::try_from("test: message".to_owned()).expect("non-empty");
+    let messages = [message];
+    let runner = ScriptedRunner::default()
+        .with_output("git", &["rev-parse", "--git-dir"], repo, ".git\n")
+        .with_status(
+            "git",
+            &["checkout", "--quiet", "--", "."],
+            &[],
+            false,
+            repo,
+            0,
+        )
+        .with_status(
+            "git",
+            &["clean", "--force", "--quiet", "-d"],
+            &[],
+            false,
+            repo,
+            0,
+        )
+        .with_status(
+            "git",
+            &[
+                "cherry-pick",
+                "--no-commit",
+                "--strategy-option",
+                "theirs",
+                original.as_str(),
+            ],
+            &[],
+            false,
+            repo,
+            1,
+        );
+    let io = TestIo::default();
+    let env = TestEnv {
+        cwd: repo.to_path_buf(),
+    };
+    let ctx = Ctx {
+        runner: &runner,
+        cwd: repo.to_path_buf(),
+        io: &io,
+        env: &env,
+        fs: &REAL_FS,
+    };
+
+    let err = cmd_finish_in(&ctx, &messages).expect_err("expected unmerged query output error");
+    assert!(
+        matches!(&err, FactorError::GitCommand(msg) if msg.contains("git diff:") && msg.contains("unexpected output call")),
+        "err was: {err:?}"
+    );
+}
+
+#[test]
+fn cmd_finish_without_messages_propagates_original_message_lookup_error() {
+    let dir = TempDir::new().expect("tempdir");
+    let repo = dir.path();
+    let git_dir = repo.join(".git");
+    let state_dir = git_dir.join("factor");
+    fs::create_dir_all(&state_dir).expect("create factor dir");
+    let original = "a".repeat(40);
+    fs::write(state_dir.join("commits"), format!("{original}\n")).expect("write commits");
+    fs::write(state_dir.join("current_index"), "0\n").expect("write current index");
+    fs::write(state_dir.join("split_count"), "0\n").expect("write split_count");
+    fs::write(state_dir.join("exec"), "true\n").expect("write exec");
+    fs::write(state_dir.join("requires_rebase"), "false\n").expect("write requires_rebase");
+    fs::write(state_dir.join("expected_tree"), "expected_tree\n").expect("write expected_tree");
+
+    let messages: [NonEmptyString; 0] = [];
+    let runner = ScriptedRunner::default()
+        .with_output("git", &["rev-parse", "--git-dir"], repo, ".git\n")
+        .with_status(
+            "git",
+            &["checkout", "--quiet", "--", "."],
+            &[],
+            false,
+            repo,
+            0,
+        )
+        .with_status(
+            "git",
+            &["clean", "--force", "--quiet", "-d"],
+            &[],
+            false,
+            repo,
+            0,
+        )
+        .with_status(
+            "git",
+            &[
+                "cherry-pick",
+                "--no-commit",
+                "--strategy-option",
+                "theirs",
+                original.as_str(),
+            ],
+            &[],
+            false,
+            repo,
+            0,
+        )
+        .with_status("git", &["cherry-pick", "--quit"], &[], false, repo, 0);
+    let io = TestIo::default();
+    let env = TestEnv {
+        cwd: repo.to_path_buf(),
+    };
+    let ctx = Ctx {
+        runner: &runner,
+        cwd: repo.to_path_buf(),
+        io: &io,
+        env: &env,
+        fs: &REAL_FS,
+    };
+
+    let err = cmd_finish_in(&ctx, &messages).expect_err("expected original message lookup failure");
+    assert!(
+        matches!(&err, FactorError::GitCommand(msg) if msg.contains("git show:") && msg.contains("unexpected output call")),
+        "err was: {err:?}"
+    );
+}
+
+#[test]
+fn cmd_finish_propagates_advance_error_after_successful_commit() {
+    let dir = TempDir::new().expect("tempdir");
+    let repo = dir.path();
+    let git_dir = repo.join(".git");
+    let state_dir = git_dir.join("factor");
+    fs::create_dir_all(&state_dir).expect("create factor dir");
+    let original = "a".repeat(40);
+    fs::write(state_dir.join("commits"), format!("{original}\n")).expect("write commits");
+    fs::write(state_dir.join("current_index"), "0\n").expect("write current index");
+    fs::write(state_dir.join("split_count"), "0\n").expect("write split_count");
+    fs::write(state_dir.join("exec"), "true\n").expect("write exec");
+    fs::write(state_dir.join("requires_rebase"), "false\n").expect("write requires_rebase");
+    fs::write(state_dir.join("expected_tree"), "expected_tree\n").expect("write expected_tree");
+    fs::write(state_dir.join("is_root"), "true\n").expect("write is_root");
+
+    let commit_meta = "a\0b\0c\0d\0e\0f";
+    let envs = [
+        ("GIT_AUTHOR_NAME", "a"),
+        ("GIT_AUTHOR_EMAIL", "b"),
+        ("GIT_AUTHOR_DATE", "c"),
+        ("GIT_COMMITTER_NAME", "d"),
+        ("GIT_COMMITTER_EMAIL", "e"),
+        ("GIT_COMMITTER_DATE", "f"),
+    ];
+    let message = NonEmptyString::try_from("test: message".to_owned()).expect("non-empty");
+    let messages = [message];
+    let runner = ScriptedRunner::default()
+        .with_output("git", &["rev-parse", "--git-dir"], repo, ".git\n")
+        .with_status(
+            "git",
+            &["checkout", "--quiet", "--", "."],
+            &[],
+            false,
+            repo,
+            0,
+        )
+        .with_status(
+            "git",
+            &["clean", "--force", "--quiet", "-d"],
+            &[],
+            false,
+            repo,
+            0,
+        )
+        .with_status(
+            "git",
+            &[
+                "cherry-pick",
+                "--no-commit",
+                "--strategy-option",
+                "theirs",
+                original.as_str(),
+            ],
+            &[],
+            false,
+            repo,
+            0,
+        )
+        .with_status("git", &["cherry-pick", "--quit"], &[], false, repo, 0)
+        .with_output("git", &["write-tree"], repo, "expected_tree\n")
+        .with_status("git", &["diff", "--quiet", "--staged"], &[], false, repo, 1)
+        .with_status("bash", &["-c", "true"], &[], false, repo, 0)
+        .with_output(
+            "git",
+            &[
+                "show",
+                "--format=%an%x00%ae%x00%aI%x00%cn%x00%ce%x00%cI",
+                "--no-patch",
+                original.as_str(),
+            ],
+            repo,
+            commit_meta,
+        )
+        .with_status(
+            "git",
+            &["commit", "--quiet", "--message", "test: message"],
+            &envs,
+            false,
+            repo,
+            0,
+        );
+    let io = TestIo::default();
+    let env = TestEnv {
+        cwd: repo.to_path_buf(),
+    };
+    let ctx = Ctx {
+        runner: &runner,
+        cwd: repo.to_path_buf(),
+        io: &io,
+        env: &env,
+        fs: &REAL_FS,
+    };
+
+    let err = cmd_finish_in(&ctx, &messages).expect_err("expected advance failure");
+    assert!(
+        matches!(&err, FactorError::GitCommand(msg) if msg.contains("rev-list") && msg.contains("unexpected output call")),
+        "err was: {err:?}"
+    );
+}
+
+#[test]
+fn cmd_start_propagates_head_lookup_error_after_sorting() {
+    let dir = TempDir::new().expect("tempdir");
+    let repo = dir.path();
+    let sha = "a".repeat(40);
+    let runner = ScriptedRunner::default()
+        .with_output("git", &["rev-parse", "--git-dir"], repo, ".git\n")
+        .with_output(
+            "git",
+            &["rev-parse", "--verify", &sha],
+            repo,
+            &format!("{sha}\n"),
+        )
+        .with_output(
+            "git",
+            &["rev-list", "--reverse", "--topo-order", &sha],
+            repo,
+            &format!("{sha}\n"),
+        );
+    let io = TestIo::default();
+    let env = TestEnv {
+        cwd: repo.to_path_buf(),
+    };
+    let ctx = Ctx {
+        runner: &runner,
+        cwd: repo.to_path_buf(),
+        io: &io,
+        env: &env,
+        fs: &REAL_FS,
+    };
+
+    let err = run_with_args_vec(
+        &ctx,
+        vec![
+            OsString::from("git-factor"),
+            OsString::from("--exec"),
+            OsString::from("true"),
+            OsString::from(&sha),
+        ],
+    )
+    .expect_err("expected HEAD lookup failure");
+    assert!(
+        matches!(&err, FactorError::InvalidCommit(commit) if commit == "HEAD"),
+        "err was: {err:?}"
+    );
+}
+
+#[test]
+fn cmd_start_single_head_session_propagates_exec_status_io_error() {
+    let dir = TempDir::new().expect("tempdir");
+    let repo = dir.path();
+    let sha = "a".repeat(40);
+    let runner = ScriptedRunner::default()
+        .with_output("git", &["rev-parse", "--git-dir"], repo, ".git\n")
+        .with_output(
+            "git",
+            &["rev-parse", "--verify", "HEAD"],
+            repo,
+            &format!("{sha}\n"),
+        )
+        .with_output(
+            "git",
+            &["rev-list", "--reverse", "--topo-order", &sha],
+            repo,
+            &format!("{sha}\n"),
+        )
+        .with_status(
+            "git",
+            &["merge-base", "--is-ancestor", &sha, "HEAD"],
+            &[],
+            true,
+            repo,
+            0,
+        )
+        .with_status(
+            "git",
+            &["rev-parse", "--quiet", "--verify", &format!("{sha}^2")],
+            &[],
+            true,
+            repo,
+            1,
+        )
+        .with_output("git", &["rev-parse", "--short", &sha], repo, "aaaaaaa\n")
+        .with_output(
+            "git",
+            &["show", "--format=%B", "--no-patch", &sha],
+            repo,
+            "subject\n",
+        )
+        .with_status(
+            "bash",
+            &["--norc", "--noprofile", "-n", "-c", "true"],
+            &[],
+            true,
+            repo,
+            0,
+        );
+    let io = TestIo::default();
+    let env = TestEnv {
+        cwd: repo.to_path_buf(),
+    };
+    let ctx = Ctx {
+        runner: &runner,
+        cwd: repo.to_path_buf(),
+        io: &io,
+        env: &env,
+        fs: &REAL_FS,
+    };
+
+    let err = run_with_args_vec(
+        &ctx,
+        vec![
+            OsString::from("git-factor"),
+            OsString::from("--exec"),
+            OsString::from("true"),
+            OsString::from("HEAD"),
+        ],
+    )
+    .expect_err("expected exec status lookup failure");
+    assert!(
+        matches!(&err, FactorError::GitCommand(msg) if msg.contains("unexpected status call")),
+        "err was: {err:?}"
+    );
+}
+
+#[test]
+fn cmd_start_propagates_commits_state_write_failure() {
+    let dir = TempDir::new().expect("tempdir");
+    let repo = dir.path();
+    let sha = "a".repeat(40);
+    let fs = FailingWriteForFileFs {
+        file_name: "commits",
+        message: "commits write failed",
+    };
+    let runner = ScriptedRunner::default()
+        .with_output("git", &["rev-parse", "--git-dir"], repo, ".git\n")
+        .with_output(
+            "git",
+            &["rev-parse", "--verify", "HEAD"],
+            repo,
+            &format!("{sha}\n"),
+        )
+        .with_output(
+            "git",
+            &["rev-list", "--reverse", "--topo-order", &sha],
+            repo,
+            &format!("{sha}\n"),
+        )
+        .with_status(
+            "git",
+            &["merge-base", "--is-ancestor", &sha, "HEAD"],
+            &[],
+            true,
+            repo,
+            0,
+        )
+        .with_status(
+            "git",
+            &["rev-parse", "--quiet", "--verify", &format!("{sha}^2")],
+            &[],
+            true,
+            repo,
+            1,
+        )
+        .with_output("git", &["rev-parse", "--short", &sha], repo, "aaaaaaa\n")
+        .with_output(
+            "git",
+            &["show", "--format=%B", "--no-patch", &sha],
+            repo,
+            "subject\n",
+        )
+        .with_status(
+            "bash",
+            &["--norc", "--noprofile", "-n", "-c", "true"],
+            &[],
+            true,
+            repo,
+            0,
+        )
+        .with_status("bash", &["-c", "true"], &[], false, repo, 0)
+        .with_status(
+            "git",
+            &["rev-parse", "--quiet", "--verify", &format!("{sha}^")],
+            &[],
+            true,
+            repo,
+            0,
+        );
+    let io = TestIo::default();
+    let env = TestEnv {
+        cwd: repo.to_path_buf(),
+    };
+    let ctx = Ctx {
+        runner: &runner,
+        cwd: repo.to_path_buf(),
+        io: &io,
+        env: &env,
+        fs: &fs,
+    };
+
+    let err = run_with_args_vec(
+        &ctx,
+        vec![
+            OsString::from("git-factor"),
+            OsString::from("--exec"),
+            OsString::from("true"),
+            OsString::from("HEAD"),
+        ],
+    )
+    .expect_err("expected commits state write failure");
+    assert!(
+        matches!(&err, FactorError::StateWrite(inner) if inner.to_string().contains("commits write failed")),
+        "err was: {err:?}"
+    );
+}
+
+#[test]
+fn cmd_start_propagates_editor_path_error_in_multi_commit_session() {
+    let dir = TempDir::new().expect("tempdir");
+    let repo = dir.path();
+    let sha_a = "a".repeat(40);
+    let sha_b = "b".repeat(40);
+    let runner = ScriptedRunner::default()
+        .with_output("git", &["rev-parse", "--git-dir"], repo, ".git\n")
+        .with_output(
+            "git",
+            &["rev-parse", "--verify", &sha_a],
+            repo,
+            &format!("{sha_a}\n"),
+        )
+        .with_output(
+            "git",
+            &["rev-parse", "--verify", &sha_b],
+            repo,
+            &format!("{sha_b}\n"),
+        )
+        .with_output(
+            "git",
+            &["rev-list", "--reverse", "--topo-order", &sha_a, &sha_b],
+            repo,
+            &format!("{sha_a}\n{sha_b}\n"),
+        )
+        .with_output(
+            "git",
+            &["rev-parse", "--verify", "HEAD"],
+            repo,
+            &format!("{sha_b}\n"),
+        )
+        .with_status(
+            "git",
+            &["merge-base", "--is-ancestor", &sha_a, "HEAD"],
+            &[],
+            true,
+            repo,
+            0,
+        )
+        .with_status(
+            "git",
+            &["merge-base", "--is-ancestor", &sha_b, "HEAD"],
+            &[],
+            true,
+            repo,
+            0,
+        )
+        .with_status(
+            "git",
+            &["rev-parse", "--quiet", "--verify", &format!("{sha_a}^2")],
+            &[],
+            true,
+            repo,
+            1,
+        )
+        .with_status(
+            "git",
+            &["rev-parse", "--quiet", "--verify", &format!("{sha_b}^2")],
+            &[],
+            true,
+            repo,
+            1,
+        )
+        .with_output("git", &["rev-parse", "--short", &sha_a], repo, "aaaaaaa\n")
+        .with_output(
+            "git",
+            &["show", "--format=%B", "--no-patch", &sha_a],
+            repo,
+            "subject\n",
+        )
+        .with_status(
+            "bash",
+            &["--norc", "--noprofile", "-n", "-c", "true"],
+            &[],
+            true,
+            repo,
+            0,
+        );
+    let io = TestIo::default();
+    let env = ExeFailingEnv {
+        cwd: repo.to_path_buf(),
+    };
+    let ctx = Ctx {
+        runner: &runner,
+        cwd: repo.to_path_buf(),
+        io: &io,
+        env: &env,
+        fs: &REAL_FS,
+    };
+
+    let err = run_with_args_vec(
+        &ctx,
+        vec![
+            OsString::from("git-factor"),
+            OsString::from("--exec"),
+            OsString::from("true"),
+            OsString::from(&sha_a),
+            OsString::from(&sha_b),
+        ],
+    )
+    .expect_err("expected editor path error");
+    assert_eq!(
+        err.to_string(),
+        "git command failed: cannot resolve current exe: no exe"
+    );
+}
+
+#[test]
+fn cmd_start_propagates_short_sha_lookup_error_for_sequence_editor() {
+    let dir = TempDir::new().expect("tempdir");
+    let repo = dir.path();
+    fs::write(repo.join("git-factor"), "").expect("write fake exe");
+    let sha_a = "a".repeat(40);
+    let sha_b = "b".repeat(40);
+    let runner = ScriptedRunner::default()
+        .with_output("git", &["rev-parse", "--git-dir"], repo, ".git\n")
+        .with_output(
+            "git",
+            &["rev-parse", "--verify", &sha_a],
+            repo,
+            &format!("{sha_a}\n"),
+        )
+        .with_output(
+            "git",
+            &["rev-parse", "--verify", &sha_b],
+            repo,
+            &format!("{sha_b}\n"),
+        )
+        .with_output(
+            "git",
+            &["rev-list", "--reverse", "--topo-order", &sha_a, &sha_b],
+            repo,
+            &format!("{sha_a}\n{sha_b}\n"),
+        )
+        .with_output(
+            "git",
+            &["rev-parse", "--verify", "HEAD"],
+            repo,
+            &format!("{sha_b}\n"),
+        )
+        .with_status(
+            "git",
+            &["merge-base", "--is-ancestor", &sha_a, "HEAD"],
+            &[],
+            true,
+            repo,
+            0,
+        )
+        .with_status(
+            "git",
+            &["merge-base", "--is-ancestor", &sha_b, "HEAD"],
+            &[],
+            true,
+            repo,
+            0,
+        )
+        .with_status(
+            "git",
+            &["rev-parse", "--quiet", "--verify", &format!("{sha_a}^2")],
+            &[],
+            true,
+            repo,
+            1,
+        )
+        .with_status(
+            "git",
+            &["rev-parse", "--quiet", "--verify", &format!("{sha_b}^2")],
+            &[],
+            true,
+            repo,
+            1,
+        )
+        .with_output("git", &["rev-parse", "--short", &sha_a], repo, "aaaaaaa\n")
+        .with_output(
+            "git",
+            &["show", "--format=%B", "--no-patch", &sha_a],
+            repo,
+            "subject\n",
+        )
+        .with_status(
+            "bash",
+            &["--norc", "--noprofile", "-n", "-c", "true"],
+            &[],
+            true,
+            repo,
+            0,
+        )
+        .with_output("git", &["rev-parse", "--short", &sha_a], repo, "aaaaaaa\n");
+    let io = TestIo::default();
+    let env = TestEnv {
+        cwd: repo.to_path_buf(),
+    };
+    let ctx = Ctx {
+        runner: &runner,
+        cwd: repo.to_path_buf(),
+        io: &io,
+        env: &env,
+        fs: &REAL_FS,
+    };
+
+    let err = run_with_args_vec(
+        &ctx,
+        vec![
+            OsString::from("git-factor"),
+            OsString::from("--exec"),
+            OsString::from("true"),
+            OsString::from(&sha_a),
+            OsString::from(&sha_b),
+        ],
+    )
+    .expect_err("expected short SHA lookup failure");
+    assert!(
+        matches!(&err, FactorError::GitCommand(msg) if msg.contains("git rev-parse:") && msg.contains("unexpected output call")),
+        "err was: {err:?}"
+    );
+}
+
+#[test]
+fn cmd_start_propagates_expected_tree_capture_error_after_state_write() {
+    let dir = TempDir::new().expect("tempdir");
+    let repo = dir.path();
+    let sha = "a".repeat(40);
+    let runner = ScriptedRunner::default()
+        .with_output("git", &["rev-parse", "--git-dir"], repo, ".git\n")
+        .with_output(
+            "git",
+            &["rev-parse", "--verify", "HEAD"],
+            repo,
+            &format!("{sha}\n"),
+        )
+        .with_output(
+            "git",
+            &["rev-list", "--reverse", "--topo-order", &sha],
+            repo,
+            &format!("{sha}\n"),
+        )
+        .with_status(
+            "git",
+            &["merge-base", "--is-ancestor", &sha, "HEAD"],
+            &[],
+            true,
+            repo,
+            0,
+        )
+        .with_status(
+            "git",
+            &["rev-parse", "--quiet", "--verify", &format!("{sha}^2")],
+            &[],
+            true,
+            repo,
+            1,
+        )
+        .with_output("git", &["rev-parse", "--short", &sha], repo, "aaaaaaa\n")
+        .with_output(
+            "git",
+            &["show", "--format=%B", "--no-patch", &sha],
+            repo,
+            "subject\n",
+        )
+        .with_status(
+            "bash",
+            &["--norc", "--noprofile", "-n", "-c", "true"],
+            &[],
+            true,
+            repo,
+            0,
+        )
+        .with_status("bash", &["-c", "true"], &[], false, repo, 0)
+        .with_status(
+            "git",
+            &["rev-parse", "--quiet", "--verify", &format!("{sha}^")],
+            &[],
+            true,
+            repo,
+            0,
+        );
+    let io = TestIo::default();
+    let env = TestEnv {
+        cwd: repo.to_path_buf(),
+    };
+    let ctx = Ctx {
+        runner: &runner,
+        cwd: repo.to_path_buf(),
+        io: &io,
+        env: &env,
+        fs: &REAL_FS,
+    };
+
+    let err = run_with_args_vec(
+        &ctx,
+        vec![
+            OsString::from("git-factor"),
+            OsString::from("--exec"),
+            OsString::from("true"),
+            OsString::from("HEAD"),
+        ],
+    )
+    .expect_err("expected expected-tree capture error");
+    assert!(
+        matches!(&err, FactorError::GitCommand(msg) if msg.contains("git rev-parse:") && msg.contains("unexpected output call")),
+        "err was: {err:?}"
+    );
+}
+
+#[test]
+fn cmd_start_root_session_propagates_mixed_reset_error() {
+    let dir = TempDir::new().expect("tempdir");
+    let repo = dir.path();
+    let sha = "a".repeat(40);
+    let runner = ScriptedRunner::default()
+        .with_output("git", &["rev-parse", "--git-dir"], repo, ".git\n")
+        .with_output(
+            "git",
+            &["rev-parse", "--verify", "HEAD"],
+            repo,
+            &format!("{sha}\n"),
+        )
+        .with_output(
+            "git",
+            &["rev-list", "--reverse", "--topo-order", &sha],
+            repo,
+            &format!("{sha}\n"),
+        )
+        .with_status(
+            "git",
+            &["merge-base", "--is-ancestor", &sha, "HEAD"],
+            &[],
+            true,
+            repo,
+            0,
+        )
+        .with_status(
+            "git",
+            &["rev-parse", "--quiet", "--verify", &format!("{sha}^2")],
+            &[],
+            true,
+            repo,
+            1,
+        )
+        .with_output("git", &["rev-parse", "--short", &sha], repo, "aaaaaaa\n")
+        .with_output(
+            "git",
+            &["show", "--format=%B", "--no-patch", &sha],
+            repo,
+            "subject\n",
+        )
+        .with_status(
+            "bash",
+            &["--norc", "--noprofile", "-n", "-c", "true"],
+            &[],
+            true,
+            repo,
+            0,
+        )
+        .with_status("bash", &["-c", "true"], &[], false, repo, 0)
+        .with_status(
+            "git",
+            &["rev-parse", "--quiet", "--verify", &format!("{sha}^")],
+            &[],
+            true,
+            repo,
+            1,
+        )
+        .with_output("git", &["rev-parse", "HEAD^{tree}"], repo, "head_tree\n");
+    let io = TestIo::default();
+    let env = TestEnv {
+        cwd: repo.to_path_buf(),
+    };
+    let ctx = Ctx {
+        runner: &runner,
+        cwd: repo.to_path_buf(),
+        io: &io,
+        env: &env,
+        fs: &REAL_FS,
+    };
+
+    let err = run_with_args_vec(
+        &ctx,
+        vec![
+            OsString::from("git-factor"),
+            OsString::from("--exec"),
+            OsString::from("true"),
+            OsString::from("HEAD"),
+        ],
+    )
+    .expect_err("expected mixed-reset failure");
+    assert!(
+        matches!(&err, FactorError::GitCommand(msg) if msg.contains("git commit-tree:") && msg.contains("unexpected output call")),
         "err was: {err:?}"
     );
 }
