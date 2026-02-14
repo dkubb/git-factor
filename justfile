@@ -49,7 +49,7 @@ test:
 
 # Run coverage (quiet on success)
 coverage:
-    cargo coverage --no-report
+    CARGO_TARGET_DIR=target/coverage-target cargo coverage --json --summary-only --output-path target/coverage.summary.json
 
 # Install into ~/.local/bin (requires ~/.local/bin on PATH)
 install-local:
