@@ -999,6 +999,7 @@ fi
 
         commit_file(repo, "file.txt", "one\n", "chore: base");
         commit_file(repo, "file.txt", "one\ntwo\n", "feat: change");
+        let head_sha = git(repo, &["rev-parse", "HEAD"]);
         let head_short_sha = git(repo, &["rev-parse", "--short", "HEAD"]);
 
         run_git_factor(
@@ -1008,6 +1009,8 @@ fi
                 .rebase_apply_exists(false)
                 .rebase_merge_exists(false)
                 .requires_rebase(false)
+                .path_content(".git/factor/started_rebase", "false\n")
+                .path_content(".git/factor/start_head", format!("{head_sha}\n"))
                 .stdout(expected_single_commit_start_stdout(
                     head_short_sha.as_str(),
                     "feat: change",
@@ -1582,6 +1585,7 @@ fi
 
         commit_file(repo, "file.txt", "one\n", "feat: root");
         commit_file(repo, "file.txt", "one\ntwo\n", "feat: head");
+        let start_head = git(repo, &["rev-parse", "HEAD"]);
 
         let root_sha = git(repo, &["rev-list", "--max-parents=0", "HEAD"]);
 
@@ -1591,6 +1595,8 @@ fi
             GitFactorExpectation::default()
                 .factor_state_exists(true)
                 .requires_rebase(true)
+                .path_content(".git/factor/started_rebase", "true\n")
+                .path_content(".git/factor/start_head", format!("{start_head}\n"))
                 .rebase_merge_exists(true),
         );
     }
@@ -1888,14 +1894,14 @@ fi
     }
 
     #[test]
-    fn abort_resets_repo_to_current_target_commit() {
+    fn abort_resets_repo_to_pre_start_head() {
         let dir = init_repo();
         let repo = dir.path();
 
         commit_file(repo, "file.txt", "one\n", "chore: base");
         commit_file(repo, "file.txt", "one\ntwo\n", "feat: change");
         commit_file(repo, "file.txt", "one\ntwo\nthree\n", "feat: latest");
-        let target_commit = git(repo, &["rev-parse", "HEAD~1"]);
+        let start_head = git(repo, &["rev-parse", "HEAD"]);
 
         run_git_factor(
             repo,
@@ -1907,7 +1913,7 @@ fi
             repo,
             &["--abort"],
             GitFactorExpectation::default()
-                .head_sha(target_commit)
+                .head_sha(start_head)
                 .git_status_porcelain("")
                 .factor_state_exists(false),
         );
@@ -2796,18 +2802,8 @@ fi
         let repo = dir.path();
 
         commit_file(repo, "file.txt", "one\n", "chore: base");
-        commit_file(repo, "file.txt", "one\ntwo\n", "feat: change");
-        commit_file(repo, "file.txt", "one\ntwo\nthree\n", "feat: latest");
-
-        run_git_factor(
-            repo,
-            &["--exec", "true", "HEAD~1"],
-            GitFactorExpectation::default().rebase_merge_exists(true),
-        );
-
-        let git_dir_path = git_dir(repo);
-        fs::remove_dir_all(git_dir_path.join("rebase-merge")).expect("remove rebase-merge");
-        fs::create_dir_all(git_dir_path.join("rebase-apply")).expect("create rebase-apply");
+        start_session(repo);
+        fs::create_dir_all(git_dir(repo).join("rebase-apply")).expect("create rebase-apply");
 
         run_git_factor(
             repo,
@@ -2836,14 +2832,29 @@ fi
             GitFactorExpectation::default(),
         );
 
-        run_git_factor(
+        // If git-factor calls `git rebase --abort`, this wrapper forces a failure.
+        let (wrap_dir, wrap_bin) = make_git_wrapper_named(
+            "git",
+            #[expect(
+                clippy::literal_string_with_formatting_args,
+                reason = "shell script contains braces like ${1:-}"
+            )]
+            r#"if [ "${1:-}" = "rebase" ] && [ "${2:-}" = "--abort" ]; then
+  exit 1
+fi
+"#,
+        );
+        let _keep_alive = wrap_dir;
+
+        run_git_factor_with_env(
             repo,
             &["--abort"],
             GitFactorExpectation::default()
-                .stdout_suffix(
-                    "FACTOR: Rebase still active. To abort full rebase, run: git rebase --abort\n",
-                )
-                .factor_state_exists(false),
+                .code(EXIT_SOFTWARE)
+                .stderr("git command failed: git rebase failed (exit 1)\n")
+                .factor_state_exists(true),
+            "PATH",
+            format!("{}:{}", wrap_bin.display(), env::var("PATH").expect("PATH")),
         );
     }
 
@@ -4092,18 +4103,13 @@ fi
     }
 
     #[test]
-    fn abort_does_not_attempt_git_rebase_abort() {
+    fn abort_does_not_attempt_git_rebase_abort_for_external_rebase() {
         let dir = init_repo();
         let repo = dir.path();
 
         commit_file(repo, "file.txt", "one\n", "chore: base");
-        commit_file(repo, "file.txt", "one\ntwo\n", "feat: change");
-        commit_file(repo, "file.txt", "one\ntwo\nthree\n", "feat: latest");
-        run_git_factor(
-            repo,
-            &["--exec", "true", "HEAD~1"],
-            GitFactorExpectation::default().factor_state_exists(true),
-        );
+        start_session(repo);
+        fs::create_dir_all(git_dir(repo).join("rebase-merge")).expect("create rebase-merge");
 
         // If git-factor calls `git rebase --abort`, this wrapper forces a failure.
         let (wrap_dir, wrap_bin) = make_git_wrapper_named(
@@ -4126,6 +4132,7 @@ fi
                 .stdout_suffix(
                     "FACTOR: Rebase still active. To abort full rebase, run: git rebase --abort\n",
                 )
+                .rebase_merge_exists(true)
                 .factor_state_exists(false),
             "PATH",
             format!("{}:{}", wrap_bin.display(), env::var("PATH").expect("PATH")),
