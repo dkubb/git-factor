@@ -89,16 +89,6 @@ impl Io for RealIo {
         let mut err = io::stderr().lock();
         err.write_all(text.as_bytes())
     }
-
-    fn outln(&self, line: &str) -> io::Result<()> {
-        self.out(line)?;
-        self.out("\n")
-    }
-
-    fn errln(&self, line: &str) -> io::Result<()> {
-        self.err(line)?;
-        self.err("\n")
-    }
 }
 
 /// Environment access (current directory, current executable, etc.).
@@ -339,6 +329,63 @@ fn cmd_abort_in(ctx: &Ctx<'_>) -> Result<i32, FactorError> {
     Ok(EXIT_OK)
 }
 
+/// Shows status for the current factor session.
+#[expect(
+    clippy::single_call_fn,
+    reason = "Command handler dispatched from run()"
+)]
+fn cmd_status_in(ctx: &Ctx<'_>) -> Result<i32, FactorError> {
+    trace_note(ctx, "factor_cmd_status", &[]);
+
+    if !is_factor_active_in(ctx) {
+        ctx.outln("FACTOR: No active session.")?;
+        return Ok(EXIT_OK);
+    }
+
+    let state_dir = factor_dir_in(ctx)?;
+    let current_commit = current_commit_from_state(ctx, &state_dir)?;
+    let current_index = read_state_parsed::<usize>(ctx, &state_dir, "current_index")?;
+    let split_count = read_state_parsed::<u32>(ctx, &state_dir, "split_count")?;
+    let requires_rebase = read_state_bool_or_default(ctx, &state_dir, "requires_rebase", true)?;
+    let is_root = read_state_bool_or_default(ctx, &state_dir, "is_root", false)?;
+    let rebase_in_progress = is_mid_rebase_in(ctx);
+
+    ctx.outln("FACTOR: Active session.")?;
+    ctx.outln(&format!("CURRENT_COMMIT: {current_commit}"))?;
+    ctx.outln(&format!("CURRENT_INDEX: {current_index}"))?;
+    ctx.outln(&format!("SPLIT_COUNT: {split_count}"))?;
+    ctx.outln(&format!("REQUIRES_REBASE: {requires_rebase}"))?;
+    ctx.outln(&format!("REBASE_IN_PROGRESS: {rebase_in_progress}"))?;
+    ctx.outln(&format!("IS_ROOT: {is_root}"))?;
+
+    Ok(EXIT_OK)
+}
+
+fn increment_split_count_in_state(ctx: &Ctx<'_>, state_dir: &Path) -> Result<u32, FactorError> {
+    let split_count = read_state_parsed::<u32>(ctx, state_dir, "split_count")?
+        .checked_add(1)
+        .ok_or(FactorError::GitCommand("split_count overflow".to_owned()))?;
+    write_state(ctx, state_dir, "split_count", &split_count.to_string())?;
+    Ok(split_count)
+}
+
+fn capture_expected_tree_in_state(ctx: &Ctx<'_>, state_dir: &Path) -> Result<(), FactorError> {
+    let expected_tree = git_output(ctx, &["rev-parse", "HEAD^{tree}"])?;
+    write_state(ctx, state_dir, "expected_tree", &expected_tree)?;
+    Ok(())
+}
+
+fn write_state_pairs(
+    ctx: &Ctx<'_>,
+    state_dir: &Path,
+    pairs: &[(&str, &str)],
+) -> Result<(), FactorError> {
+    for (name, value) in pairs {
+        write_state(ctx, state_dir, name, value)?;
+    }
+    Ok(())
+}
+
 /// Advances to the next commit in a multi-commit factor session.
 ///
 /// Called after completing all splits for the current commit. Continues the
@@ -360,15 +407,18 @@ fn advance_to_next_commit_in(ctx: &Ctx<'_>, state_dir: &Path) -> Result<bool, Fa
         if is_mid_rebase_in(ctx) {
             // Capture the rewritten commit tree for the next edit stop before
             // resetting to unstage its diff for splitting.
-            let expected_tree = git_output(ctx, &["rev-parse", "HEAD^{tree}"])?;
-            write_state(ctx, state_dir, "expected_tree", &expected_tree)?;
+            capture_expected_tree_in_state(ctx, state_dir)?;
 
             // Another edit stop reached: advance to the next commit.
             let current_index = read_state_parsed::<usize>(ctx, state_dir, "current_index")?
                 .checked_add(1)
-                .ok_or_else(|| FactorError::GitCommand("current_index overflow".to_owned()))?;
-            write_state(ctx, state_dir, "current_index", &current_index.to_string())?;
-            write_state(ctx, state_dir, "split_count", "0")?;
+                .ok_or(FactorError::GitCommand("current_index overflow".to_owned()))?;
+            let current_index = current_index.to_string();
+            write_state_pairs(
+                ctx,
+                state_dir,
+                &[("current_index", current_index.as_str()), ("split_count", "0")],
+            )?;
 
             run_git(ctx, &["reset", "--quiet", "HEAD~1"])?;
 
@@ -476,10 +526,7 @@ fn cmd_continue_in(ctx: &Ctx<'_>, messages: &NonEmpty<NonEmptyString>) -> Result
     git_commit_preserving_metadata(ctx, &original_commit, messages, false)?;
 
     // Increment split count.
-    let split_count = read_state_parsed::<u32>(ctx, &state_dir, "split_count")?
-        .checked_add(1)
-        .ok_or_else(|| FactorError::GitCommand("split_count overflow".to_owned()))?;
-    write_state(ctx, &state_dir, "split_count", &split_count.to_string())?;
+    let split_count = increment_split_count_in_state(ctx, &state_dir)?;
 
     let head_tree = git_output(ctx, &["rev-parse", "HEAD^{tree}"])?;
     let expected_tree = expected_tree_for_current_step(ctx, &state_dir, &original_commit)?;
@@ -747,10 +794,7 @@ fn cmd_finish_in(ctx: &Ctx<'_>, messages: &[NonEmptyString]) -> Result<i32, Fact
     )?;
 
     // Update split count and advance to next commit or finish.
-    let split_count = read_state_parsed::<u32>(ctx, &state_dir, "split_count")?
-        .checked_add(1)
-        .ok_or_else(|| FactorError::GitCommand("split_count overflow".to_owned()))?;
-    write_state(ctx, &state_dir, "split_count", &split_count.to_string())?;
+    increment_split_count_in_state(ctx, &state_dir)?;
     advance_to_next_commit_in(ctx, &state_dir)?;
 
     Ok(EXIT_OK)
@@ -815,8 +859,12 @@ fn cmd_start_in(
         let exec_status =
             command_status_with(ctx, "bash", &["-c", exec_combined.as_str()], &[], false)?;
         if !exec_status.success() {
+            #[expect(
+                clippy::expect_used,
+                reason = "exec is NonEmpty<NonEmptyString>; join with ' && ' cannot produce empty"
+            )]
             let command = NonEmptyString::try_from(exec_combined)
-                .map_err(|_err| FactorError::GitCommand("exec command is empty".to_owned()))?;
+                .expect("joined exec command from non-empty inputs cannot be empty");
             return Err(FactorError::ExecFailed {
                 code: status_code(exec_status),
                 command,
@@ -828,25 +876,19 @@ fn cmd_start_in(
     ctx.fs
         .create_dir_all(&state_dir)
         .map_err(FactorError::StateWrite)?;
+    let is_root = is_root_commit_in(ctx, base_sha);
+    let requires_rebase = if single_head_session { "false" } else { "true" };
+    let is_root_value = if is_root { "true" } else { "false" };
+    let session_state_pairs = [
+        ("current_index", "0"),
+        ("exec", exec_combined.as_str()),
+        ("split_count", "0"),
+        ("requires_rebase", requires_rebase),
+        ("is_root", is_root_value),
+    ];
     let commits_content: Vec<&str> = resolved_commits.iter().map(CommitSha::as_str).collect();
     write_state(ctx, &state_dir, "commits", &commits_content.join("\n"))?;
-    write_state(ctx, &state_dir, "current_index", "0")?;
-    write_state(ctx, &state_dir, "exec", &exec_combined)?;
-    write_state(ctx, &state_dir, "split_count", "0")?;
-    write_state(
-        ctx,
-        &state_dir,
-        "requires_rebase",
-        if single_head_session { "false" } else { "true" },
-    )?;
-
-    let is_root = is_root_commit_in(ctx, base_sha);
-    write_state(
-        ctx,
-        &state_dir,
-        "is_root",
-        if is_root { "true" } else { "false" },
-    )?;
+    write_state_pairs(ctx, &state_dir, &session_state_pairs)?;
 
     if !single_head_session {
         // Build sequence editor command with --edit flags for all commits.
@@ -871,7 +913,10 @@ fn cmd_start_in(
             ctx,
             "git",
             &rebase_args,
-            &[("GIT_EDITOR", "false"), ("GIT_SEQUENCE_EDITOR", &seq_editor)],
+            &[
+                ("GIT_EDITOR", "false"),
+                ("GIT_SEQUENCE_EDITOR", &seq_editor),
+            ],
             false,
         )?;
 
@@ -886,8 +931,7 @@ fn cmd_start_in(
 
     // Capture the tree of the exact commit currently being split. In
     // interactive rebase sessions this is the rewritten edit-stop commit.
-    let expected_tree = git_output(ctx, &["rev-parse", "HEAD^{tree}"])?;
-    write_state(ctx, &state_dir, "expected_tree", &expected_tree)?;
+    capture_expected_tree_in_state(ctx, &state_dir)?;
 
     if is_root {
         mixed_reset_to_empty(ctx)?;
@@ -941,13 +985,11 @@ fn current_commit_from_state(ctx: &Ctx<'_>, state_dir: &Path) -> Result<CommitSh
     let commits_raw = read_state(ctx, state_dir, "commits")?;
     let commits: Vec<&str> = commits_raw.as_str().lines().collect();
     let current_index = read_state_parsed::<usize>(ctx, state_dir, "current_index")?;
-
-    let sha_str = commits.get(current_index).ok_or_else(|| {
-        FactorError::GitCommand(format!(
-            "commit index {current_index} out of range (have {} commits)",
-            commits.len()
-        ))
-    })?;
+    let out_of_range = FactorError::GitCommand(format!(
+        "commit index {current_index} out of range (have {} commits)",
+        commits.len()
+    ));
+    let sha_str = commits.get(current_index).ok_or(out_of_range)?;
 
     CommitSha::new((*sha_str).to_owned())
 }
@@ -1111,22 +1153,21 @@ fn run_with_args_vec(ctx: &Ctx<'_>, args: Vec<OsString>) -> Result<i32, FactorEr
 
     // Show help when invoked with no arguments.
     if !cli.abort()
+        && !cli.status()
         && !cli.continue_flag()
         && !cli.finish()
         && cli.exec().is_empty()
         && cli.commits().is_empty()
         && cli.message().is_empty()
     {
-        let mut cmd = Cli::command();
-        let mut buf = Vec::new();
-        cmd.write_long_help(&mut buf).map_err(FactorError::Io)?;
-        let help = String::from_utf8_lossy(&buf);
+        let help = Cli::command().render_long_help().to_string();
         ctx.out(&help)?;
         return Ok(EXIT_OK);
     }
 
     if cli.abort() {
-        if cli.continue_flag()
+        if cli.status()
+            || cli.continue_flag()
             || cli.finish()
             || !cli.exec().is_empty()
             || !cli.commits().is_empty()
@@ -1136,6 +1177,20 @@ fn run_with_args_vec(ctx: &Ctx<'_>, args: Vec<OsString>) -> Result<i32, FactorEr
             ));
         }
         return cmd_abort_in(ctx);
+    }
+
+    if cli.status() {
+        if cli.continue_flag()
+            || cli.finish()
+            || !cli.exec().is_empty()
+            || !cli.commits().is_empty()
+            || !cli.message().is_empty()
+        {
+            return Err(FactorError::Usage(
+                "--status cannot be combined with other options".to_owned(),
+            ));
+        }
+        return cmd_status_in(ctx);
     }
 
     if cli.finish() {

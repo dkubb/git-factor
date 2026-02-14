@@ -13,6 +13,7 @@ WORKFLOW:
   3. Commit a slice:     git factor --continue --message 'type: description'
   4. Repeat steps 2-3 for each atomic commit.
   5. Finish remaining:   git factor --finish
+  6. Check progress:     git factor --status
 
   Each split commit must pass the exec gate independently.
   Use --finish without --message to reuse the original commit message.
@@ -34,12 +35,21 @@ EXAMPLES:
     git factor --finish
 
   Abort and restore the repository:
-    git factor --abort"
+    git factor --abort
+
+  Show active-session status:
+    git factor --status"
 )]
 pub(super) struct Cli {
     /// Abort the current factor session and restore the repository.
     #[arg(long = "abort", help_heading = "Session Control")]
     abort: bool,
+
+    /// Show status for the current factor session.
+    ///
+    /// Prints session details when active, otherwise reports no active session.
+    #[arg(long = "status", help_heading = "Session Control")]
+    status: bool,
 
     /// Commit(s) or ranges to split (e.g. SHA, A..B, main..HEAD).
     ///
@@ -89,6 +99,11 @@ impl Cli {
     /// Returns whether `--abort` was requested.
     pub(super) const fn abort(&self) -> bool {
         self.abort
+    }
+
+    /// Returns whether `--status` was requested.
+    pub(super) const fn status(&self) -> bool {
+        self.status
     }
 
     /// Returns requested commit refs/ranges.
