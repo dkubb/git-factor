@@ -3680,7 +3680,7 @@ fi
     }
 
     #[test]
-    fn finish_handles_cherry_pick_failure_without_conflicts() {
+    fn finish_reports_restore_failure_from_wrapper_injection() {
         let dir = init_repo();
         let repo = dir.path();
 
@@ -3689,19 +3689,15 @@ fi
 
         start_session(repo);
 
-        // Wrapper: fail `cherry-pick --no-commit`, report no conflicts, and force
-        // `cherry-pick --quit` to "succeed" so cmd_finish continues into tree checks.
+        // Wrapper: fail `git restore` so finish surfaces a restore failure.
         let (wrap_dir, wrap_bin) = make_git_wrapper_named(
             "git",
             #[expect(
                 clippy::literal_string_with_formatting_args,
                 reason = "shell script contains braces like ${1:-}"
             )]
-            r#"if [ "${1:-}" = "cherry-pick" ] && [ "${2:-}" = "--no-commit" ]; then
+            r#"if [ "${1:-}" = "restore" ] && [ "${2:-}" = "--source" ]; then
   exit 1
-fi
-if [ "${1:-}" = "diff" ] && [ "${2:-}" = "--name-only" ] && [ "${3:-}" = "--diff-filter=U" ]; then
-  exit 0
 fi
 if [ "${1:-}" = "cherry-pick" ] && [ "${2:-}" = "--quit" ]; then
   exit 0
@@ -3709,23 +3705,13 @@ fi
 "#,
         );
         let _keep_alive = wrap_dir;
-        let original_commit = fs::read_to_string(git_dir(repo).join("factor/commits"))
-            .expect("read commits")
-            .lines()
-            .next()
-            .expect("first commit in session state")
-            .to_owned();
-        let expected_tree = git(repo, &["rev-parse", &format!("{original_commit}^{{tree}}")]);
-        let actual_tree = git(repo, &["write-tree"]);
 
         run_git_factor_with_env(
             repo,
             &["--finish", "--message", "test: finish"],
             GitFactorExpectation::default()
-                .code(EXIT_TEMPFAIL)
-                .stderr(format!(
-                    "tree hash mismatch: expected {expected_tree}, got {actual_tree}\n"
-                )),
+                .code(EXIT_SOFTWARE)
+                .stderr("git command failed: git restore failed (exit 1)\n"),
             "PATH",
             format!("{}:{}", wrap_bin.display(), env::var("PATH").expect("PATH")),
         );
@@ -3756,7 +3742,7 @@ fi
     }
 
     #[test]
-    fn finish_reports_conflicts_from_wrapper_injection() {
+    fn finish_reports_restore_failure_before_message_resolution() {
         let dir = init_repo();
         let repo = dir.path();
 
@@ -3774,20 +3760,15 @@ fi
             ],
         );
 
-        // Wrapper: force cherry-pick --no-commit to fail, and make the unmerged query
-        // return a non-empty list so cmd_finish takes the conflict error path.
+        // Wrapper: force restore to fail so finish exits before message lookup.
         let (wrap_dir, wrap_bin) = make_git_wrapper_named(
             "git",
             #[expect(
                 clippy::literal_string_with_formatting_args,
                 reason = "shell script contains braces like ${1:-}"
             )]
-            r#"if [ "${1:-}" = "cherry-pick" ] && [ "${2:-}" = "--no-commit" ]; then
+            r#"if [ "${1:-}" = "restore" ] && [ "${2:-}" = "--source" ]; then
   exit 1
-fi
-if [ "${1:-}" = "diff" ] && [ "${2:-}" = "--name-only" ] && [ "${3:-}" = "--diff-filter=U" ]; then
-  echo "conflict.txt"
-  exit 0
 fi
 "#,
         );
@@ -3802,13 +3783,13 @@ fi
             wrapped_path.clone(),
         );
 
-        // Finish with the wrapper-enabled PATH so the conflict path triggers.
+        // Finish with the wrapper-enabled PATH so restore failure triggers.
         run_git_factor_with_env(
             repo,
             &["--finish"],
             GitFactorExpectation::default()
                 .code(EXIT_SOFTWARE)
-                .stderr("git command failed: final cherry-pick left conflicts:\nconflict.txt\n"),
+                .stderr("git command failed: git restore failed (exit 1)\n"),
             "PATH",
             wrapped_path,
         );

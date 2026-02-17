@@ -712,38 +712,20 @@ fn cmd_finish_in(ctx: &Ctx<'_>, messages: &[NonEmptyString]) -> Result<i32, Fact
     run_git(ctx, &["checkout", "--quiet", "--", "."])?;
     run_git(ctx, &["clean", "--force", "--quiet", "-d"])?;
 
-    // Cherry-pick the original commit without committing to stage remaining changes.
-    // With --strategy-option theirs, conflicts are auto-resolved in favor of the
-    // original commit.
-    let cherry_status = git_status(
+    // Restore the original commit tree directly into index/worktree.
+    // This avoids merge/cherry-pick conflict mechanics during finish.
+    run_git(
         ctx,
         &[
-            "cherry-pick",
-            "--no-commit",
-            "--strategy-option",
-            "theirs",
+            "restore",
+            "--source",
             original_commit.as_str(),
+            "--staged",
+            "--worktree",
+            "--",
+            ".",
         ],
     )?;
-
-    if !cherry_status.success() {
-        let unmerged = git_output(ctx, &["diff", "--name-only", "--diff-filter=U"])?;
-        if !unmerged.is_empty() {
-            drop(command_status_with(
-                ctx,
-                "git",
-                &["cherry-pick", "--abort"],
-                &[],
-                true,
-            ));
-            return Err(FactorError::GitCommand(format!(
-                "final cherry-pick left conflicts:\n{unmerged}"
-            )));
-        }
-    }
-
-    // Clear sequencer state while keeping the index/worktree changes.
-    run_git(ctx, &["cherry-pick", "--quit"])?;
 
     // Resolve effective messages: use original commit message when none provided.
     let effective_messages: NonEmpty<NonEmptyString> = if messages.is_empty() {
