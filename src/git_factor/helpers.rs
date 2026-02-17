@@ -3143,6 +3143,83 @@ mod tests {
     }
 
     #[test]
+    fn remove_empty_root_in_passes_empty_drop_to_rebase() {
+        struct RebaseArgsRunner;
+
+        impl Runner for RebaseArgsRunner {
+            fn output(&self, _bin: &str, args: &[&str], _cwd: &Path) -> io::Result<Output> {
+                let stdout = match args {
+                    ["rev-list", "--max-parents=0", "HEAD"] => format!("{}\n", "a".repeat(40)).into_bytes(),
+                    ["ls-tree", _] => Vec::new(),
+                    ["rev-parse", "--short", _] => b"aaaaaaa\n".to_vec(),
+                    _ => {
+                        return Err(io::Error::other(format!(
+                            "unexpected args: {}",
+                            args.join(" ")
+                        )));
+                    }
+                };
+
+                Ok(Output {
+                    status: ExitStatus::from_raw(0),
+                    stdout,
+                    stderr: Vec::new(),
+                })
+            }
+
+            fn status(
+                &self,
+                _bin: &str,
+                args: &[&str],
+                envs: &[(&str, &str)],
+                _quiet: bool,
+                _cwd: &Path,
+            ) -> io::Result<ExitStatus> {
+                assert_eq!(
+                    args,
+                    [
+                        "rebase",
+                        "--empty",
+                        "drop",
+                        "--interactive",
+                        "--quiet",
+                        "--root",
+                    ],
+                    "unexpected status args"
+                );
+
+                assert!(
+                    envs.contains(&("GIT_EDITOR", "false")),
+                    "expected GIT_EDITOR=false env var"
+                );
+                assert!(
+                    envs
+                        .iter()
+                        .any(|(key, value)| *key == "GIT_SEQUENCE_EDITOR" && value.contains("--drop")),
+                    "expected GIT_SEQUENCE_EDITOR with --drop"
+                );
+
+                Ok(ExitStatus::from_raw(0))
+            }
+        }
+
+        let dir = TempDir::new().expect("tempdir");
+        let env = TestEnv {
+            cwd: dir.path().to_path_buf(),
+            trace_log: None,
+        };
+        let ctx = Ctx {
+            runner: &RebaseArgsRunner,
+            cwd: dir.path().to_path_buf(),
+            io: &REAL_IO,
+            env: &env,
+            fs: &REAL_FS,
+        };
+
+        remove_empty_root_in(&ctx).expect("remove_empty_root_in should pass expected rebase args");
+    }
+
+    #[test]
     fn mixed_reset_to_empty_resets_index_to_empty_tree() {
         const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 
