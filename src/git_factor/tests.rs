@@ -2041,6 +2041,8 @@ fn cmd_start_range_ref_inserts_shas_and_propagates_io_error_on_multi_commit_bann
             "git",
             &[
                 "rebase",
+                "--empty",
+                "drop",
                 "--interactive",
                 "--no-autosquash",
                 "--no-autostash",
