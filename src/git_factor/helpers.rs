@@ -803,7 +803,10 @@ pub(super) fn print_session_started(
         format!("FACTOR: Split session started for {short_sha}.")
     };
     let original_message = format!("ORIGINAL MESSAGE: {message}");
-    out_lines(ctx, &[started.as_str(), original_message.as_str(), "UNSTAGED:"])?;
+    out_lines(
+        ctx,
+        &[started.as_str(), original_message.as_str(), "UNSTAGED:"],
+    )?;
     for line in stat_output.lines() {
         ctx.outln(&format!("  {line}"))?;
     }
@@ -903,7 +906,14 @@ pub(super) fn remove_empty_root_in(ctx: &Ctx<'_>) -> Result<(), FactorError> {
     drop(command_status_with(
         ctx,
         "git",
-        &["rebase", "--empty", "drop", "--interactive", "--quiet", "--root"],
+        &[
+            "rebase",
+            "--empty",
+            "drop",
+            "--interactive",
+            "--quiet",
+            "--root",
+        ],
         &[
             ("GIT_EDITOR", "false"),
             ("GIT_SEQUENCE_EDITOR", &seq_editor),
@@ -1281,7 +1291,8 @@ mod tests {
             {
                 return Err(io::Error::other("forced untracked failure"));
             }
-            if args == ["rev-parse", "--show-toplevel"] && self.fail_on == Some(HintFailure::TopLevel)
+            if args == ["rev-parse", "--show-toplevel"]
+                && self.fail_on == Some(HintFailure::TopLevel)
             {
                 return Err(io::Error::other("forced show-toplevel failure"));
             }
@@ -1339,7 +1350,10 @@ mod tests {
     }
 
     fn assert_git_command(error: &FactorError) {
-        assert!(matches!(error, FactorError::GitCommand(_)), "error was: {error:?}");
+        assert!(
+            matches!(error, FactorError::GitCommand(_)),
+            "error was: {error:?}"
+        );
     }
 
     fn invalid_commit_message(error: &FactorError) -> Option<&str> {
@@ -2885,8 +2899,9 @@ mod tests {
             env: &env,
             fs: &REAL_FS,
         };
-        let untracked_err = print_session_started(&untracked_ctx, &commits, &short_sha, "feat: test")
-            .expect_err("untracked command should fail");
+        let untracked_err =
+            print_session_started(&untracked_ctx, &commits, &short_sha, "feat: test")
+                .expect_err("untracked command should fail");
         let untracked_message = git_command_message(&untracked_err).expect("expected GitCommand");
         assert!(
             untracked_message.contains("forced untracked failure"),
@@ -2910,8 +2925,9 @@ mod tests {
             env: &env,
             fs: &REAL_FS,
         };
-        let stat_line_err = print_session_started(&stat_line_ctx, &commits, &short_sha, "feat: test")
-            .expect_err("stat line should fail");
+        let stat_line_err =
+            print_session_started(&stat_line_ctx, &commits, &short_sha, "feat: test")
+                .expect_err("stat line should fail");
         assert!(
             stat_line_err.to_string().contains("io fail"),
             "unexpected error: {stat_line_err:?}"
@@ -3091,14 +3107,16 @@ mod tests {
         fs::write(dir.path().join("a.txt"), "a\n").expect("write a");
         run_git(&ctx, &["add", "a.txt"]).expect("add a");
         run_git(&ctx, &["commit", "--quiet", "-m", "a"]).expect("commit a");
-        let a = CommitSha::new(git_output(&ctx, &["rev-parse", "--verify", "HEAD"]).expect("sha a"))
-            .expect("valid sha a");
+        let a =
+            CommitSha::new(git_output(&ctx, &["rev-parse", "--verify", "HEAD"]).expect("sha a"))
+                .expect("valid sha a");
 
         fs::write(dir.path().join("b.txt"), "b\n").expect("write b");
         run_git(&ctx, &["add", "b.txt"]).expect("add b");
         run_git(&ctx, &["commit", "--quiet", "-m", "b"]).expect("commit b");
-        let b = CommitSha::new(git_output(&ctx, &["rev-parse", "--verify", "HEAD"]).expect("sha b"))
-            .expect("valid sha b");
+        let b =
+            CommitSha::new(git_output(&ctx, &["rev-parse", "--verify", "HEAD"]).expect("sha b"))
+                .expect("valid sha b");
 
         let commits = Commits::new(BTreeSet::from([a.clone(), b.clone()])).expect("non-empty set");
         let sorted = sort_topologically(&ctx, &commits).expect("sort should succeed");
@@ -3149,7 +3167,9 @@ mod tests {
         impl Runner for RebaseArgsRunner {
             fn output(&self, _bin: &str, args: &[&str], _cwd: &Path) -> io::Result<Output> {
                 let stdout = match args {
-                    ["rev-list", "--max-parents=0", "HEAD"] => format!("{}\n", "a".repeat(40)).into_bytes(),
+                    ["rev-list", "--max-parents=0", "HEAD"] => {
+                        format!("{}\n", "a".repeat(40)).into_bytes()
+                    }
                     ["ls-tree", _] => Vec::new(),
                     ["rev-parse", "--short", _] => b"aaaaaaa\n".to_vec(),
                     _ => {
@@ -3193,9 +3213,9 @@ mod tests {
                     "expected GIT_EDITOR=false env var"
                 );
                 assert!(
-                    envs
-                        .iter()
-                        .any(|(key, value)| *key == "GIT_SEQUENCE_EDITOR" && value.contains("--drop")),
+                    envs.iter()
+                        .any(|(key, value)| *key == "GIT_SEQUENCE_EDITOR"
+                            && value.contains("--drop")),
                     "expected GIT_SEQUENCE_EDITOR with --drop"
                 );
 
