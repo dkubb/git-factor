@@ -979,6 +979,8 @@ fn build_rebase_args<'arg>(
 ) -> Vec<&'arg str> {
     let mut rebase_args = vec![
         "rebase",
+        "--empty",
+        "drop",
         "--interactive",
         "--no-autosquash",
         "--no-autostash",
