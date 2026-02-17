@@ -3072,6 +3072,8 @@ fn build_rebase_args_uses_parent_for_non_root_and_root_flag_for_root() {
         non_root,
         vec![
             "rebase",
+            "--empty",
+            "drop",
             "--interactive",
             "--no-autosquash",
             "--no-autostash",
@@ -3090,6 +3092,8 @@ fn build_rebase_args_uses_parent_for_non_root_and_root_flag_for_root() {
         root,
         vec![
             "rebase",
+            "--empty",
+            "drop",
             "--interactive",
             "--no-autosquash",
             "--no-autostash",
