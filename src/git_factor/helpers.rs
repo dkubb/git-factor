@@ -903,7 +903,7 @@ pub(super) fn remove_empty_root_in(ctx: &Ctx<'_>) -> Result<(), FactorError> {
     drop(command_status_with(
         ctx,
         "git",
-        &["rebase", "--interactive", "--quiet", "--root"],
+        &["rebase", "--empty", "drop", "--interactive", "--quiet", "--root"],
         &[
             ("GIT_EDITOR", "false"),
             ("GIT_SEQUENCE_EDITOR", &seq_editor),
