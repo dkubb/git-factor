@@ -47,6 +47,16 @@ test:
     cargo --quiet test-all
     cargo --quiet test-doc
 
+# Assert working tree is clean
+assert-clean:
+    #!/usr/bin/env -S bash --noprofile --norc -o errexit -o errtrace -o nounset -o pipefail
+
+    if [[ -n "$(git status --porcelain=v1)" ]]; then
+      echo 'Error: Working tree is not clean.' >&2
+      echo 'Please commit or stash changes first.' >&2
+      exit 1
+    fi
+
 # Run coverage (quiet on success)
 coverage:
     CARGO_TARGET_DIR=target/coverage-target cargo coverage --json --summary-only --output-path target/coverage.summary.json
