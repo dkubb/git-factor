@@ -6286,6 +6286,129 @@ fn advance_to_next_commit_finishes_root_session_and_runs_empty_root_cleanup() {
 }
 
 #[test]
+fn cmd_finish_rehydrates_remaining_changes_with_restore() {
+    let dir = TempDir::new().expect("tempdir");
+    let repo = dir.path();
+    let git_dir = repo.join(".git");
+    let state_dir = git_dir.join("factor");
+    fs::create_dir_all(&state_dir).expect("create factor dir");
+    let original = "a".repeat(40);
+    fs::write(state_dir.join("commits"), format!("{original}\n")).expect("write commits");
+    fs::write(state_dir.join("current_index"), "0\n").expect("write current index");
+    fs::write(state_dir.join("split_count"), "0\n").expect("write split_count");
+    fs::write(state_dir.join("exec"), "true\n").expect("write exec");
+    fs::write(state_dir.join("requires_rebase"), "false\n").expect("write requires_rebase");
+    fs::write(state_dir.join("expected_tree"), "expected_tree\n").expect("write expected_tree");
+
+    let message = NonEmptyString::try_from("test: finish".to_owned()).expect("non-empty");
+    let messages = [message];
+    let runner = ScriptedRunner::default()
+        .with_output("git", &["rev-parse", "--git-dir"], repo, ".git\n")
+        .with_status(
+            "git",
+            &["checkout", "--quiet", "--", "."],
+            &[],
+            false,
+            repo,
+            0,
+        )
+        .with_status(
+            "git",
+            &["clean", "--force", "--quiet", "-d"],
+            &[],
+            false,
+            repo,
+            0,
+        )
+        .with_status(
+            "git",
+            &[
+                "restore",
+                "--source",
+                original.as_str(),
+                "--staged",
+                "--worktree",
+                "--",
+                ".",
+            ],
+            &[],
+            false,
+            repo,
+            0,
+        )
+        .with_output("git", &["write-tree"], repo, "expected_tree\n")
+        .with_status("git", &["diff", "--quiet", "--staged"], &[], false, repo, 1)
+        .with_status("bash", &["-c", "true"], &[], false, repo, 0)
+        .with_output(
+            "git",
+            &["show", "--format=%an", "--no-patch", original.as_str()],
+            repo,
+            "A U Thor\n",
+        )
+        .with_output(
+            "git",
+            &["show", "--format=%ae", "--no-patch", original.as_str()],
+            repo,
+            "author@example.com\n",
+        )
+        .with_output(
+            "git",
+            &["show", "--format=%ad", "--date=raw", "--no-patch", original.as_str()],
+            repo,
+            "1700000000 +0000\n",
+        )
+        .with_output(
+            "git",
+            &["show", "--format=%cn", "--no-patch", original.as_str()],
+            repo,
+            "C O M Mitter\n",
+        )
+        .with_output(
+            "git",
+            &["show", "--format=%ce", "--no-patch", original.as_str()],
+            repo,
+            "committer@example.com\n",
+        )
+        .with_output(
+            "git",
+            &["show", "--format=%cd", "--date=raw", "--no-patch", original.as_str()],
+            repo,
+            "1700000001 +0000\n",
+        )
+        .with_status(
+            "git",
+            &["commit", "--quiet", "--message", "test: finish"],
+            &[
+                ("GIT_AUTHOR_NAME", "A U Thor"),
+                ("GIT_AUTHOR_EMAIL", "author@example.com"),
+                ("GIT_AUTHOR_DATE", "1700000000 +0000"),
+                ("GIT_COMMITTER_NAME", "C O M Mitter"),
+                ("GIT_COMMITTER_EMAIL", "committer@example.com"),
+                ("GIT_COMMITTER_DATE", "1700000001 +0000"),
+            ],
+            false,
+            repo,
+            0,
+        )
+        .with_output("git", &["rev-list", "--max-parents=0", "HEAD"], repo, &format!("{original}\n"))
+        .with_output("git", &["ls-tree", original.as_str()], repo, "not-empty\n");
+    let io = TestIo::default();
+    let env = TestEnv {
+        cwd: repo.to_path_buf(),
+    };
+    let ctx = Ctx {
+        runner: &runner,
+        cwd: repo.to_path_buf(),
+        io: &io,
+        env: &env,
+        fs: &REAL_FS,
+    };
+
+    let code = cmd_finish_in(&ctx, &messages).expect("finish should succeed");
+    assert_eq!(code, EXIT_OK);
+}
+
+#[test]
 fn cmd_finish_reports_conflicts_when_final_cherry_pick_leaves_unmerged_paths() {
     let dir = TempDir::new().expect("tempdir");
     let repo = dir.path();
