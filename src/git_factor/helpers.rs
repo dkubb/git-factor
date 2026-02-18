@@ -3228,8 +3228,17 @@ mod tests {
             cwd: dir.path().to_path_buf(),
             trace_log: None,
         };
+        let runner = RebaseArgsRunner;
+        let unexpected = runner
+            .output("git", &["unexpected"], dir.path())
+            .expect_err("unexpected args should error");
+        assert!(
+            unexpected.to_string().contains("unexpected args"),
+            "err was: {unexpected}"
+        );
+
         let ctx = Ctx {
-            runner: &RebaseArgsRunner,
+            runner: &runner,
             cwd: dir.path().to_path_buf(),
             io: &REAL_IO,
             env: &env,

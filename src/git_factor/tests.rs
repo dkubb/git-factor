@@ -5778,6 +5778,94 @@ fn cmd_abort_errors_when_current_commit_state_is_missing() {
 }
 
 #[test]
+fn cmd_abort_propagates_start_head_state_read_error() {
+    let dir = TempDir::new().expect("tempdir");
+    let repo = dir.path();
+    let state_dir = repo.join(".git").join("factor");
+    fs::create_dir_all(&state_dir).expect("create factor dir");
+    fs::create_dir_all(state_dir.join("start_head")).expect("create invalid start_head");
+
+    let runner =
+        ScriptedRunner::default().with_output("git", &["rev-parse", "--git-dir"], repo, ".git\n");
+    let io = TestIo::default();
+    let env = TestEnv {
+        cwd: repo.to_path_buf(),
+    };
+    let ctx = Ctx {
+        runner: &runner,
+        cwd: repo.to_path_buf(),
+        io: &io,
+        env: &env,
+        fs: &REAL_FS,
+    };
+
+    let err = cmd_abort_in(&ctx).expect_err("expected start_head read failure");
+    assert!(
+        matches!(&err, FactorError::StateRead(inner) if inner.kind() != io::ErrorKind::NotFound),
+        "err was: {err:?}"
+    );
+}
+
+#[test]
+fn cmd_abort_propagates_requires_rebase_state_read_error() {
+    let dir = TempDir::new().expect("tempdir");
+    let repo = dir.path();
+    let state_dir = repo.join(".git").join("factor");
+    fs::create_dir_all(&state_dir).expect("create factor dir");
+    fs::create_dir_all(state_dir.join("requires_rebase")).expect("create invalid requires_rebase");
+
+    let runner =
+        ScriptedRunner::default().with_output("git", &["rev-parse", "--git-dir"], repo, ".git\n");
+    let io = TestIo::default();
+    let env = TestEnv {
+        cwd: repo.to_path_buf(),
+    };
+    let ctx = Ctx {
+        runner: &runner,
+        cwd: repo.to_path_buf(),
+        io: &io,
+        env: &env,
+        fs: &REAL_FS,
+    };
+
+    let err = cmd_abort_in(&ctx).expect_err("expected requires_rebase read failure");
+    assert!(
+        matches!(&err, FactorError::StateRead(inner) if inner.kind() != io::ErrorKind::NotFound),
+        "err was: {err:?}"
+    );
+}
+
+#[test]
+fn cmd_abort_propagates_started_rebase_state_read_error() {
+    let dir = TempDir::new().expect("tempdir");
+    let repo = dir.path();
+    let state_dir = repo.join(".git").join("factor");
+    fs::create_dir_all(&state_dir).expect("create factor dir");
+    fs::write(state_dir.join("requires_rebase"), "false\n").expect("write requires_rebase");
+    fs::create_dir_all(state_dir.join("started_rebase")).expect("create invalid started_rebase");
+
+    let runner =
+        ScriptedRunner::default().with_output("git", &["rev-parse", "--git-dir"], repo, ".git\n");
+    let io = TestIo::default();
+    let env = TestEnv {
+        cwd: repo.to_path_buf(),
+    };
+    let ctx = Ctx {
+        runner: &runner,
+        cwd: repo.to_path_buf(),
+        io: &io,
+        env: &env,
+        fs: &REAL_FS,
+    };
+
+    let err = cmd_abort_in(&ctx).expect_err("expected started_rebase read failure");
+    assert!(
+        matches!(&err, FactorError::StateRead(inner) if inner.kind() != io::ErrorKind::NotFound),
+        "err was: {err:?}"
+    );
+}
+
+#[test]
 fn cmd_status_io_failure_on_no_active_session_covers_outln_error_path() {
     let dir = TempDir::new().expect("tempdir");
     let repo = dir.path();
