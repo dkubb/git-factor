@@ -473,6 +473,47 @@ fn git_commit_preserving_metadata_propagates_git_output_error() {
     );
 }
 
+#[test]
+#[should_panic(expected = "author date")]
+fn git_commit_preserving_metadata_panics_on_truncated_format() {
+    let dir = TempDir::new().expect("tempdir");
+    let repo = dir.path();
+    let sha = "a".repeat(40);
+    let runner = ScriptedRunner::default()
+        .with_output("git", &["rev-parse", "--git-dir"], repo, ".git\n")
+        .with_output(
+            "git",
+            &[
+                "show",
+                "--format=%an%x00%ae%x00%aI%x00%cn%x00%ce%x00%cI",
+                "--no-patch",
+                &sha,
+            ],
+            repo,
+            "Alice\0alice@example.com",
+        );
+    let io = TestIo::default();
+    let env = TestEnv {
+        cwd: repo.to_path_buf(),
+    };
+    let ctx = Ctx {
+        runner: &runner,
+        cwd: repo.to_path_buf(),
+        io: &io,
+        env: &env,
+        fs: &REAL_FS,
+    };
+
+    let commit = CommitSha::new(sha).expect("commit sha");
+    let msg = NonEmptyString::try_from("feat: msg".to_owned()).expect("msg");
+    let messages = NonEmpty::new(msg);
+
+    // Current code panics on truncated output; after fix this will return Err
+    drop(git_commit_preserving_metadata(
+        &ctx, &commit, &messages, false,
+    ));
+}
+
 struct TestEnv {
     cwd: PathBuf,
 }
