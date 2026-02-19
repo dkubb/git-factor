@@ -2575,6 +2575,51 @@ fn advance_to_next_commit_errors_when_rebase_is_required_but_not_in_progress() {
 }
 
 #[test]
+#[should_panic(expected = "abort_hint_expected")]
+fn advance_to_next_commit_error_includes_abort_hint() {
+    let dir = TempDir::new().expect("tempdir");
+    let repo = dir.path();
+    let git_dir = repo.join(".git");
+    fs::create_dir_all(git_dir.join("rebase-merge")).expect("create rebase-merge");
+
+    let state_dir = git_dir.join("factor");
+    fs::create_dir_all(&state_dir).expect("create factor dir");
+    fs::write(state_dir.join("split_count"), "1\n").expect("write split_count");
+
+    let runner = ScriptedRunner::default()
+        .with_output("git", &["rev-parse", "--git-dir"], repo, ".git\n")
+        .with_status(
+            "git",
+            &["rebase", "--continue"],
+            &[("GIT_EDITOR", "false"), ("GIT_SEQUENCE_EDITOR", "false")],
+            false,
+            repo,
+            1,
+        );
+
+    let io = TestIo::default();
+    let env = TestEnv {
+        cwd: repo.to_path_buf(),
+    };
+    let ctx = Ctx {
+        runner: &runner,
+        cwd: repo.to_path_buf(),
+        io: &io,
+        env: &env,
+        fs: &REAL_FS,
+    };
+
+    let err = advance_to_next_commit_in(&ctx, &state_dir)
+        .expect_err("rebase --continue failure must return error");
+
+    // Current error lacks --abort hint; after fix this assertion will pass
+    assert!(
+        err.to_string().contains("--abort"),
+        "abort_hint_expected: error should contain --abort hint but was: {err}"
+    );
+}
+
+#[test]
 fn advance_to_next_commit_omits_untracked_section_when_empty() {
     let dir = TempDir::new().expect("tempdir");
     let repo = dir.path();
