@@ -423,7 +423,11 @@ fn advance_to_next_commit_in(ctx: &Ctx<'_>, state_dir: &Path) -> Result<bool, Fa
             return Err(FactorError::GitCommand("no rebase in progress".to_owned()));
         }
 
-        run_git_non_interactive(ctx, &["rebase", "--continue"])?;
+        run_git_non_interactive(ctx, &["rebase", "--continue"]).map_err(|err| {
+            FactorError::GitCommand(format!(
+                "{err}\n\nTo recover, resolve conflicts and retry, or run 'git factor --abort'"
+            ))
+        })?;
 
         if is_mid_rebase_in(ctx) {
             // Capture the rewritten commit tree for the next edit stop before

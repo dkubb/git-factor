@@ -2575,7 +2575,6 @@ fn advance_to_next_commit_errors_when_rebase_is_required_but_not_in_progress() {
 }
 
 #[test]
-#[should_panic(expected = "abort_hint_expected")]
 fn advance_to_next_commit_error_includes_abort_hint() {
     let dir = TempDir::new().expect("tempdir");
     let repo = dir.path();
@@ -2612,10 +2611,14 @@ fn advance_to_next_commit_error_includes_abort_hint() {
     let err = advance_to_next_commit_in(&ctx, &state_dir)
         .expect_err("rebase --continue failure must return error");
 
-    // Current error lacks --abort hint; after fix this assertion will pass
+    let msg = err.to_string();
     assert!(
-        err.to_string().contains("--abort"),
-        "abort_hint_expected: error should contain --abort hint but was: {err}"
+        msg.contains("--abort"),
+        "error should contain --abort hint but was: {msg}"
+    );
+    assert!(
+        msg.contains("git rebase failed"),
+        "error should contain original failure message but was: {msg}"
     );
 }
 
