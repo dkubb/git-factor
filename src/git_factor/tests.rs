@@ -6468,6 +6468,96 @@ fn cmd_abort_omits_rebase_hint_when_rebase_is_not_active() {
     assert!(io.stderr().is_empty(), "stderr should be empty");
 }
 
+struct FailingRemoveDirAllFs;
+
+impl Fs for FailingRemoveDirAllFs {
+    fn create_dir_all(&self, path: &Path) -> io::Result<()> {
+        REAL_FS.create_dir_all(path)
+    }
+
+    fn remove_dir_all(&self, _path: &Path) -> io::Result<()> {
+        Err(io::Error::other("injected remove_dir_all failure"))
+    }
+
+    fn remove_file(&self, path: &Path) -> io::Result<()> {
+        REAL_FS.remove_file(path)
+    }
+
+    fn read_to_string(&self, path: &Path) -> io::Result<String> {
+        REAL_FS.read_to_string(path)
+    }
+
+    fn write_string(&self, path: &Path, content: &str) -> io::Result<()> {
+        REAL_FS.write_string(path, content)
+    }
+
+    fn canonicalize(&self, path: &Path) -> io::Result<PathBuf> {
+        REAL_FS.canonicalize(path)
+    }
+
+    fn is_dir(&self, path: &Path) -> bool {
+        REAL_FS.is_dir(path)
+    }
+
+    fn exists(&self, path: &Path) -> bool {
+        REAL_FS.exists(path)
+    }
+}
+
+#[test]
+#[should_panic(expected = "state_removal_warning")]
+fn cmd_abort_warns_on_state_removal_failure() {
+    let dir = TempDir::new().expect("tempdir");
+    let repo = dir.path();
+    let git_dir = repo.join(".git");
+    let state_dir = git_dir.join("factor");
+    fs::create_dir_all(&state_dir).expect("create factor dir");
+
+    let sha = "a".repeat(40);
+    fs::write(state_dir.join("commits"), format!("{sha}\n")).expect("write commits");
+    fs::write(state_dir.join("current_index"), "0\n").expect("write current index");
+
+    let runner = ScriptedRunner::default()
+        .with_output("git", &["rev-parse", "--git-dir"], repo, ".git\n")
+        .with_status(
+            "git",
+            &["reset", "--hard", "--quiet", &sha],
+            &[],
+            false,
+            repo,
+            0,
+        )
+        .with_status(
+            "git",
+            &["clean", "--force", "--quiet", "-d"],
+            &[],
+            false,
+            repo,
+            0,
+        );
+    let io = TestIo::default();
+    let env = TestEnv {
+        cwd: repo.to_path_buf(),
+    };
+    let ctx = Ctx {
+        runner: &runner,
+        cwd: repo.to_path_buf(),
+        io: &io,
+        env: &env,
+        fs: &FailingRemoveDirAllFs,
+    };
+
+    let code = cmd_abort_in(&ctx).expect("abort should succeed despite removal failure");
+    assert_eq!(code, EXIT_OK);
+
+    // Current code silently drops the error; after fix stderr should contain a warning
+    assert!(
+        io.stderr().contains("remove"),
+        "state_removal_warning: stderr should contain removal warning but was: {}",
+        io.stderr()
+    );
+}
+
 #[test]
 fn cmd_continue_errors_when_rebase_is_required_but_not_active() {
     let dir = TempDir::new().expect("tempdir");
