@@ -1570,7 +1570,12 @@ fn cmd_start_propagates_status_error_when_start_sequence_fails() {
             0,
         )
         .with_status("bash", &["-c", "true"], &[], false, repo, 0)
-        .with_output("git", &["rev-parse", "HEAD^{tree}"], repo, "head_tree\n")
+        .with_output(
+            "git",
+            &["rev-parse", "HEAD^{tree}"],
+            repo,
+            &format!("{}\n", "c".repeat(40)),
+        )
         .with_status(
             "git",
             &["rev-parse", "--quiet", "--verify", &format!("{sha}^")],
@@ -2102,7 +2107,12 @@ fn cmd_start_range_ref_inserts_shas_and_propagates_io_error_on_multi_commit_bann
             repo,
             0,
         )
-        .with_output("git", &["rev-parse", "HEAD^{tree}"], repo, "head_tree\n")
+        .with_output(
+            "git",
+            &["rev-parse", "HEAD^{tree}"],
+            repo,
+            &format!("{}\n", "c".repeat(40)),
+        )
         .with_status("git", &["reset", "--quiet", "HEAD~1"], &[], false, repo, 0)
         .with_output("git", &["diff", "--stat"], repo, "")
         .with_output(
@@ -2323,7 +2333,12 @@ fn advance_to_next_commit_prints_untracked_changes_when_present() {
             repo,
             0,
         )
-        .with_output("git", &["rev-parse", "HEAD^{tree}"], repo, "head_tree\n")
+        .with_output(
+            "git",
+            &["rev-parse", "HEAD^{tree}"],
+            repo,
+            &format!("{}\n", "c".repeat(40)),
+        )
         .with_status("git", &["reset", "--quiet", "HEAD~1"], &[], false, repo, 0)
         .with_output("git", &["rev-parse", "--git-dir"], repo, ".git\n")
         .with_output(
@@ -2427,7 +2442,12 @@ fn advance_to_next_commit_propagates_io_error_when_outln_fails_mid_rebase() {
             repo,
             0,
         )
-        .with_output("git", &["rev-parse", "HEAD^{tree}"], repo, "head_tree\n")
+        .with_output(
+            "git",
+            &["rev-parse", "HEAD^{tree}"],
+            repo,
+            &format!("{}\n", "c".repeat(40)),
+        )
         .with_status("git", &["reset", "--quiet", "HEAD~1"], &[], false, repo, 0)
         .with_output("git", &["rev-parse", "--git-dir"], repo, ".git\n")
         .with_output(
@@ -2525,7 +2545,12 @@ fn advance_to_next_commit_errors_on_current_index_overflow() {
             repo,
             0,
         )
-        .with_output("git", &["rev-parse", "HEAD^{tree}"], repo, "head_tree\n")
+        .with_output(
+            "git",
+            &["rev-parse", "HEAD^{tree}"],
+            repo,
+            &format!("{}\n", "c".repeat(40)),
+        )
         .with_output("git", &["rev-parse", "--git-dir"], repo, ".git\n");
     let io = TestIo::default();
     let env = TestEnv {
@@ -2648,7 +2673,12 @@ fn advance_to_next_commit_omits_untracked_section_when_empty() {
             repo,
             0,
         )
-        .with_output("git", &["rev-parse", "HEAD^{tree}"], repo, "head_tree\n")
+        .with_output(
+            "git",
+            &["rev-parse", "HEAD^{tree}"],
+            repo,
+            &format!("{}\n", "c".repeat(40)),
+        )
         .with_status("git", &["reset", "--quiet", "HEAD~1"], &[], false, repo, 0)
         .with_output("git", &["rev-parse", "--git-dir"], repo, ".git\n")
         .with_output(
@@ -3125,8 +3155,12 @@ fn capture_expected_tree_in_state_propagates_state_write_error() {
     let state_dir = repo.join(".git").join("factor");
     fs::create_dir_all(&state_dir).expect("create state dir");
 
-    let runner =
-        ScriptedRunner::default().with_output("git", &["rev-parse", "HEAD^{tree}"], repo, "tree\n");
+    let runner = ScriptedRunner::default().with_output(
+        "git",
+        &["rev-parse", "HEAD^{tree}"],
+        repo,
+        &format!("{}\n", "c".repeat(40)),
+    );
     let io = TestIo::default();
     let env = TestEnv {
         cwd: repo.to_path_buf(),
@@ -3152,7 +3186,6 @@ fn capture_expected_tree_in_state_propagates_state_write_error() {
 }
 
 #[test]
-#[should_panic(expected = "invalid_tree_hash")]
 fn capture_expected_tree_rejects_invalid_hash() {
     let dir = TempDir::new().expect("tempdir");
     let repo = dir.path();
@@ -3177,8 +3210,13 @@ fn capture_expected_tree_rejects_invalid_hash() {
         fs: &REAL_FS,
     };
 
-    // Current code writes invalid hash to state; after fix this will return Err
-    drop(capture_expected_tree_in_state(&ctx, &state_dir).expect_err("invalid_tree_hash"));
+    let err = capture_expected_tree_in_state(&ctx, &state_dir)
+        .expect_err("invalid hash must return error");
+
+    assert!(
+        matches!(&err, FactorError::GitCommand(msg) if msg.contains("invalid tree hash")),
+        "unexpected error: {err:?}"
+    );
 }
 
 #[test]
@@ -4361,7 +4399,12 @@ fn cmd_continue_propagates_restore_status_error() {
             repo,
             0,
         )
-        .with_output("git", &["rev-parse", "HEAD^{tree}"], repo, "head_tree\n")
+        .with_output(
+            "git",
+            &["rev-parse", "HEAD^{tree}"],
+            repo,
+            &format!("{}\n", "c".repeat(40)),
+        )
         .with_output(
             "git",
             &["rev-parse", &format!("{original}^{{tree}}")],
@@ -5058,7 +5101,12 @@ fn cmd_continue_reports_tree_mismatch_after_restore() {
             repo,
             0,
         )
-        .with_output("git", &["rev-parse", "HEAD^{tree}"], repo, "head_tree\n")
+        .with_output(
+            "git",
+            &["rev-parse", "HEAD^{tree}"],
+            repo,
+            &format!("{}\n", "c".repeat(40)),
+        )
         .with_output(
             "git",
             &["rev-parse", &format!("{original}^{{tree}}")],
@@ -5230,7 +5278,12 @@ fn advance_to_next_commit_runner_failures_cover_command_error_paths() {
             repo,
             0,
         )
-        .with_output("git", &["rev-parse", "HEAD^{tree}"], repo, "head_tree\n")
+        .with_output(
+            "git",
+            &["rev-parse", "HEAD^{tree}"],
+            repo,
+            &format!("{}\n", "c".repeat(40)),
+        )
         .with_status("git", &["reset", "--quiet", "HEAD~1"], &[], false, repo, 0)
         .with_output("git", &["rev-parse", "--git-dir"], repo, ".git\n")
         .with_output(
@@ -5312,7 +5365,12 @@ fn advance_to_next_commit_io_failures_cover_output_paths() {
             repo,
             0,
         )
-        .with_output("git", &["rev-parse", "HEAD^{tree}"], repo, "head_tree\n")
+        .with_output(
+            "git",
+            &["rev-parse", "HEAD^{tree}"],
+            repo,
+            &format!("{}\n", "c".repeat(40)),
+        )
         .with_status("git", &["reset", "--quiet", "HEAD~1"], &[], false, repo, 0)
         .with_output("git", &["rev-parse", "--git-dir"], repo, ".git\n")
         .with_output(
@@ -5459,7 +5517,12 @@ fn cmd_continue_runner_failures_cover_command_error_paths() {
             repo,
             0,
         )
-        .with_output("git", &["rev-parse", "HEAD^{tree}"], repo, "head_tree\n")
+        .with_output(
+            "git",
+            &["rev-parse", "HEAD^{tree}"],
+            repo,
+            &format!("{}\n", "c".repeat(40)),
+        )
         .with_status(
             "git",
             &[
@@ -5689,7 +5752,12 @@ fn cmd_continue_io_failures_cover_remaining_output_paths() {
             repo,
             0,
         )
-        .with_output("git", &["rev-parse", "HEAD^{tree}"], repo, "head_tree\n")
+        .with_output(
+            "git",
+            &["rev-parse", "HEAD^{tree}"],
+            repo,
+            &format!("{}\n", "c".repeat(40)),
+        )
         .with_status(
             "git",
             &[
@@ -7313,7 +7381,12 @@ fn advance_to_next_commit_reports_invalid_current_index_at_edit_stop() {
             repo,
             0,
         )
-        .with_output("git", &["rev-parse", "HEAD^{tree}"], repo, "head_tree\n");
+        .with_output(
+            "git",
+            &["rev-parse", "HEAD^{tree}"],
+            repo,
+            &format!("{}\n", "c".repeat(40)),
+        );
     let io = TestIo::default();
     let env = TestEnv {
         cwd: repo.to_path_buf(),
@@ -7355,7 +7428,12 @@ fn advance_to_next_commit_propagates_state_write_failure_for_current_index_updat
             repo,
             0,
         )
-        .with_output("git", &["rev-parse", "HEAD^{tree}"], repo, "head_tree\n");
+        .with_output(
+            "git",
+            &["rev-parse", "HEAD^{tree}"],
+            repo,
+            &format!("{}\n", "c".repeat(40)),
+        );
     let io = TestIo::default();
     let env = TestEnv {
         cwd: repo.to_path_buf(),
@@ -7406,7 +7484,12 @@ fn advance_to_next_commit_propagates_current_commit_lookup_failure_after_reset()
             repo,
             0,
         )
-        .with_output("git", &["rev-parse", "HEAD^{tree}"], repo, "head_tree\n")
+        .with_output(
+            "git",
+            &["rev-parse", "HEAD^{tree}"],
+            repo,
+            &format!("{}\n", "c".repeat(40)),
+        )
         .with_status("git", &["reset", "--quiet", "HEAD~1"], &[], false, repo, 0);
     let io = TestIo::default();
     let env = TestEnv {
@@ -7616,7 +7699,12 @@ fn cmd_continue_propagates_expected_tree_fallback_lookup_error() {
             repo,
             0,
         )
-        .with_output("git", &["rev-parse", "HEAD^{tree}"], repo, "head_tree\n");
+        .with_output(
+            "git",
+            &["rev-parse", "HEAD^{tree}"],
+            repo,
+            &format!("{}\n", "c".repeat(40)),
+        );
     let io = TestIo::default();
     let env = TestEnv {
         cwd: repo.to_path_buf(),
@@ -8459,7 +8547,12 @@ fn cmd_start_root_session_propagates_mixed_reset_error() {
             repo,
             1,
         )
-        .with_output("git", &["rev-parse", "HEAD^{tree}"], repo, "head_tree\n");
+        .with_output(
+            "git",
+            &["rev-parse", "HEAD^{tree}"],
+            repo,
+            &format!("{}\n", "c".repeat(40)),
+        );
     let io = TestIo::default();
     let env = TestEnv {
         cwd: repo.to_path_buf(),

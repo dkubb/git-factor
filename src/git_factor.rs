@@ -392,6 +392,11 @@ fn increment_split_count_in_state(ctx: &Ctx<'_>, state_dir: &Path) -> Result<u32
 
 fn capture_expected_tree_in_state(ctx: &Ctx<'_>, state_dir: &Path) -> Result<(), FactorError> {
     let expected_tree = git_output(ctx, &["rev-parse", "HEAD^{tree}"])?;
+    if expected_tree.len() != 40 || !expected_tree.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(FactorError::GitCommand(format!(
+            "invalid tree hash from rev-parse: '{expected_tree}'"
+        )));
+    }
     write_state(ctx, state_dir, "expected_tree", &expected_tree)?;
     Ok(())
 }
