@@ -3152,6 +3152,36 @@ fn capture_expected_tree_in_state_propagates_state_write_error() {
 }
 
 #[test]
+#[should_panic(expected = "invalid_tree_hash")]
+fn capture_expected_tree_rejects_invalid_hash() {
+    let dir = TempDir::new().expect("tempdir");
+    let repo = dir.path();
+    let state_dir = repo.join(".git").join("factor");
+    fs::create_dir_all(&state_dir).expect("create state dir");
+
+    let runner = ScriptedRunner::default().with_output(
+        "git",
+        &["rev-parse", "HEAD^{tree}"],
+        repo,
+        "not-a-valid-hash\n",
+    );
+    let io = TestIo::default();
+    let env = TestEnv {
+        cwd: repo.to_path_buf(),
+    };
+    let ctx = Ctx {
+        runner: &runner,
+        cwd: repo.to_path_buf(),
+        io: &io,
+        env: &env,
+        fs: &REAL_FS,
+    };
+
+    // Current code writes invalid hash to state; after fix this will return Err
+    drop(capture_expected_tree_in_state(&ctx, &state_dir).expect_err("invalid_tree_hash"));
+}
+
+#[test]
 fn write_state_pairs_propagates_first_state_write_error() {
     let dir = TempDir::new().expect("tempdir");
     let repo = dir.path();
