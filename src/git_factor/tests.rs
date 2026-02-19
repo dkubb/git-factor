@@ -3253,6 +3253,76 @@ fn remove_empty_root_is_noop_when_root_is_not_empty() {
 }
 
 #[test]
+#[should_panic(expected = "remove_empty_root_rebase_failure")]
+fn remove_empty_root_returns_error_when_rebase_fails() {
+    let dir = TempDir::new().expect("tempdir");
+    let repo = dir.path();
+    let sha = "a".repeat(40);
+
+    // Create git-factor file so editor_path can canonicalize
+    fs::write(repo.join("git-factor"), "").expect("create git-factor");
+    let canon_repo = fs::canonicalize(repo).expect("canonicalize repo");
+    let editor = canon_repo.join("git-sequence-editor");
+    let editor_str = editor.to_str().expect("editor path is UTF-8");
+
+    let short_sha = "aaa1234";
+    let seq_editor = format!(
+        "{} {} {}",
+        shell_quote(editor_str),
+        shell_quote("--drop"),
+        shell_quote(short_sha)
+    );
+
+    let runner = ScriptedRunner::default()
+        .with_output(
+            "git",
+            &["rev-list", "--max-parents=0", "HEAD"],
+            repo,
+            &format!("{sha}\n"),
+        )
+        .with_output("git", &["ls-tree", &sha], repo, "")
+        .with_output(
+            "git",
+            &["rev-parse", "--short", &sha],
+            repo,
+            &format!("{short_sha}\n"),
+        )
+        .with_status(
+            "git",
+            &[
+                "rebase",
+                "--empty",
+                "drop",
+                "--interactive",
+                "--quiet",
+                "--root",
+            ],
+            &[
+                ("GIT_EDITOR", "false"),
+                ("GIT_SEQUENCE_EDITOR", &seq_editor),
+            ],
+            false,
+            repo,
+            1,
+        );
+
+    let io = TestIo::default();
+    let env = TestEnv {
+        cwd: repo.to_path_buf(),
+    };
+    let ctx = Ctx {
+        runner: &runner,
+        cwd: repo.to_path_buf(),
+        io: &io,
+        env: &env,
+        fs: &REAL_FS,
+    };
+
+    // Current code silently drops the failure; after fix this will return Err
+    drop(remove_empty_root_in(&ctx).expect_err("remove_empty_root_rebase_failure"));
+}
+
+#[test]
 fn run_with_args_maps_help_to_exit_ok() {
     let dir = TempDir::new().expect("tempdir");
     let io = TestIo::default();
