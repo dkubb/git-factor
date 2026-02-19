@@ -3671,9 +3671,7 @@ fi
         run_git_factor_with_env(
             repo,
             &["--continue", "--message", "test: slice"],
-            GitFactorExpectation::default()
-                .code(EXIT_TEMPFAIL)
-                .stderr("exec gate failed: false (exit code 1)\n"),
+            GitFactorExpectation::default().code(EXIT_SOFTWARE),
             "PATH",
             format!("{}:{}", wrap_bin.display(), env::var("PATH").expect("PATH")),
         );

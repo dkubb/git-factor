@@ -2801,7 +2801,7 @@ fn rehydrate_pool_preserving_index_reports_conflicts_when_unmerged_paths_exist()
 }
 
 #[test]
-fn rehydrate_pool_preserving_index_reports_quit_failure_after_cherry_pick_failure() {
+fn rehydrate_pool_preserving_index_reports_non_conflict_failure_even_when_quit_fails() {
     let dir = TempDir::new().expect("tempdir");
     let repo = dir.path();
 
@@ -2837,10 +2837,11 @@ fn rehydrate_pool_preserving_index_reports_quit_failure_after_cherry_pick_failur
     };
 
     let commit = CommitSha::new("a".repeat(40)).expect("sha");
-    let err = rehydrate_pool_preserving_index(&ctx, &commit).expect_err("expected quit error");
+    let err = rehydrate_pool_preserving_index(&ctx, &commit)
+        .expect_err("non-conflict failure must return error");
 
     assert!(
-        matches!(err, FactorError::GitCommand(ref msg) if msg.contains("git cherry-pick --quit failed (exit ")),
+        matches!(&err, FactorError::GitCommand(msg) if msg.contains("cherry-pick failed") && msg.contains("no merge conflicts")),
         "unexpected error: {err:?}"
     );
 }
@@ -2963,7 +2964,6 @@ fn rehydrate_pool_preserving_index_propagates_unmerged_query_error() {
 }
 
 #[test]
-#[should_panic(expected = "cherry_pick_non_conflict_failure")]
 fn rehydrate_pool_preserving_index_returns_error_on_non_conflict_failure() {
     let dir = TempDir::new().expect("tempdir");
     let repo = dir.path();
@@ -2985,8 +2985,7 @@ fn rehydrate_pool_preserving_index_returns_error_on_non_conflict_failure() {
             1,
         )
         .with_output("git", &["diff", "--name-only", "--diff-filter=U"], repo, "")
-        .with_status("git", &["cherry-pick", "--quit"], &[], false, repo, 0)
-        .with_status("git", &["read-tree", "deadbeef"], &[], false, repo, 0);
+        .with_status("git", &["cherry-pick", "--quit"], &[], false, repo, 0);
 
     let io = TestIo::default();
     let env = TestEnv {
@@ -3002,10 +3001,12 @@ fn rehydrate_pool_preserving_index_returns_error_on_non_conflict_failure() {
 
     let commit = CommitSha::new("a".repeat(40)).expect("sha");
 
-    // Current code silently succeeds; after fix this will return Err
-    drop(
-        rehydrate_pool_preserving_index(&ctx, &commit)
-            .expect_err("cherry_pick_non_conflict_failure"),
+    let err = rehydrate_pool_preserving_index(&ctx, &commit)
+        .expect_err("non-conflict cherry-pick failure must return error");
+
+    assert!(
+        matches!(&err, FactorError::GitCommand(msg) if msg.contains("cherry-pick failed") && msg.contains("no merge conflicts")),
+        "unexpected error: {err:?}"
     );
 }
 

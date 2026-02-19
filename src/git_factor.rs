@@ -646,11 +646,16 @@ fn rehydrate_pool_preserving_index(
 
     if !status.success() {
         let unmerged = git_output(ctx, &["diff", "--name-only", "--diff-filter=U"])?;
-        if !unmerged.is_empty() {
+        if unmerged.is_empty() {
+            drop(git_status(ctx, &["cherry-pick", "--quit"]));
             return Err(FactorError::GitCommand(format!(
-                "rehydrate cherry-pick left conflicts:\n{unmerged}"
+                "cherry-pick failed (exit {}) with no merge conflicts for {original_commit}",
+                status_code(status)
             )));
         }
+        return Err(FactorError::GitCommand(format!(
+            "rehydrate cherry-pick left conflicts:\n{unmerged}"
+        )));
     }
 
     let quit_status = git_status(ctx, &["cherry-pick", "--quit"])?;
