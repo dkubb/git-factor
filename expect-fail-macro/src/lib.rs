@@ -192,6 +192,15 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "messager_rejected")]
+    fn parse_expected_message_rejects_messager_typo() {
+        assert!(
+            parse_expected_message(quote!(messager = "bang")).is_err(),
+            "messager_rejected: messager should be rejected as a typo"
+        );
+    }
+
+    #[test]
     fn expand_expect_fail_rejects_async_and_argument_functions() {
         let async_fn: ItemFn = syn::parse_quote!(
             async fn sample() {}
