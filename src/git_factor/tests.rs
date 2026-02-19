@@ -474,8 +474,7 @@ fn git_commit_preserving_metadata_propagates_git_output_error() {
 }
 
 #[test]
-#[should_panic(expected = "author date")]
-fn git_commit_preserving_metadata_panics_on_truncated_format() {
+fn git_commit_preserving_metadata_returns_error_on_truncated_format() {
     let dir = TempDir::new().expect("tempdir");
     let repo = dir.path();
     let sha = "a".repeat(40);
@@ -508,10 +507,13 @@ fn git_commit_preserving_metadata_panics_on_truncated_format() {
     let msg = NonEmptyString::try_from("feat: msg".to_owned()).expect("msg");
     let messages = NonEmpty::new(msg);
 
-    // Current code panics on truncated output; after fix this will return Err
-    drop(git_commit_preserving_metadata(
-        &ctx, &commit, &messages, false,
-    ));
+    let err = git_commit_preserving_metadata(&ctx, &commit, &messages, false)
+        .expect_err("truncated format must return error");
+
+    assert!(
+        err.to_string().contains("truncated commit metadata"),
+        "unexpected error: {err}"
+    );
 }
 
 struct TestEnv {

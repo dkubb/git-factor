@@ -1039,10 +1039,6 @@ fn expected_tree_for_current_step(
 }
 
 /// Creates a git commit preserving the original author and committer metadata.
-#[expect(
-    clippy::expect_used,
-    reason = "git log format guarantees 6 null-separated fields for a valid commit"
-)]
 fn git_commit_preserving_metadata(
     ctx: &Ctx<'_>,
     original_commit: &CommitSha,
@@ -1059,13 +1055,19 @@ fn git_commit_preserving_metadata(
             original_commit.as_str(),
         ],
     )?;
-    let mut parts = raw.splitn(6, '\0');
-    let author_name = parts.next().expect("author name from git log format");
-    let author_email = parts.next().expect("author email from git log format");
-    let author_date = parts.next().expect("author date from git log format");
-    let committer_name = parts.next().expect("committer name from git log format");
-    let committer_email = parts.next().expect("committer email from git log format");
-    let committer_date = parts.next().expect("committer date from git log format");
+    let parts: Vec<&str> = raw.splitn(6, '\0').collect();
+    if parts.len() != 6 {
+        return Err(FactorError::GitCommand(format!(
+            "truncated commit metadata: expected 6 fields, got {} for {original_commit}",
+            parts.len()
+        )));
+    }
+    let author_name = parts[0];
+    let author_email = parts[1];
+    let author_date = parts[2];
+    let committer_name = parts[3];
+    let committer_email = parts[4];
+    let committer_date = parts[5];
 
     let mut commit_args: Vec<&str> = vec!["commit", "--quiet"];
     if allow_empty {
