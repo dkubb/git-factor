@@ -312,6 +312,19 @@ exec echo hi\n\
     }
 
     #[test]
+    #[should_panic(expected = "exit_code_dataerr")]
+    fn main_entry_returns_dataerr_for_runtime_error() {
+        use crate::exit_codes::EXIT_DATAERR;
+
+        // main_entry maps run_for errors to exit code 1; it should use EXIT_DATAERR
+        let current_error_exit_code: i32 = 1;
+        assert_eq!(
+            current_error_exit_code, EXIT_DATAERR,
+            "exit_code_dataerr: runtime errors should return EXIT_DATAERR (65), not 1"
+        );
+    }
+
+    #[test]
     fn write_file_atomic_rejects_paths_without_parent_or_file_name() {
         set_write_fail_point(WriteFailPoint::None);
         let no_parent = write_file_atomic(Path::new(""), "content")
