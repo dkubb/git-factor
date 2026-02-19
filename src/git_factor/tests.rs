@@ -4846,6 +4846,45 @@ fn cmd_start_errors_when_rebase_is_already_active() {
 }
 
 #[test]
+fn cmd_start_errors_when_worktree_is_dirty() {
+    let dir = TempDir::new().expect("tempdir");
+    let repo = dir.path();
+
+    let runner = ScriptedRunner::default()
+        .with_output("git", &["rev-parse", "--git-dir"], repo, ".git\n")
+        .with_output(
+            "git",
+            &["status", "--porcelain", "--untracked-files=all"],
+            repo,
+            " M src/lib.rs\n",
+        );
+    let io = TestIo::default();
+    let env = TestEnv {
+        cwd: repo.to_path_buf(),
+    };
+    let ctx = Ctx {
+        runner: &runner,
+        cwd: repo.to_path_buf(),
+        io: &io,
+        env: &env,
+        fs: &REAL_FS,
+    };
+
+    let exec = NonEmpty::new(NonEmptyString::try_from("true".to_owned()).expect("exec"));
+    let commits = NonEmpty::new(NonEmptyString::try_from("HEAD".to_owned()).expect("commit"));
+
+    let err = cmd_start_in(&ctx, &exec, &commits).expect_err("expected dirty worktree error");
+    assert!(
+        matches!(
+            &err,
+            FactorError::GitCommand(msg)
+                if msg.contains("working tree must be clean before starting")
+        ),
+        "err was: {err:?}"
+    );
+}
+
+#[test]
 fn expected_tree_for_current_step_prefers_state_file() {
     let dir = TempDir::new().expect("tempdir");
     let repo = dir.path();
@@ -6505,7 +6544,6 @@ impl Fs for FailingRemoveDirAllFs {
 }
 
 #[test]
-#[should_panic(expected = "state_removal_warning")]
 fn cmd_abort_warns_on_state_removal_failure() {
     let dir = TempDir::new().expect("tempdir");
     let repo = dir.path();
@@ -6550,10 +6588,10 @@ fn cmd_abort_warns_on_state_removal_failure() {
     let code = cmd_abort_in(&ctx).expect("abort should succeed despite removal failure");
     assert_eq!(code, EXIT_OK);
 
-    // Current code silently drops the error; after fix stderr should contain a warning
     assert!(
-        io.stderr().contains("remove"),
-        "state_removal_warning: stderr should contain removal warning but was: {}",
+        io.stderr()
+            .contains("failed to remove factor state directory"),
+        "stderr should contain removal warning but was: {}",
         io.stderr()
     );
 }

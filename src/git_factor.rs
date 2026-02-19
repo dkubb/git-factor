@@ -340,7 +340,11 @@ fn cmd_abort_in(ctx: &Ctx<'_>) -> Result<i32, FactorError> {
     };
     run_git(ctx, &["reset", "--hard", "--quiet", reset_target.as_str()])?;
     run_git(ctx, &["clean", "--force", "--quiet", "-d"])?;
-    drop(ctx.fs.remove_dir_all(&state_dir));
+    if let Err(err) = ctx.fs.remove_dir_all(&state_dir) {
+        ctx.errln(&format!(
+            "WARN: failed to remove factor state directory: {err}"
+        ))?;
+    }
 
     ctx.outln("FACTOR: Session aborted for current commit step.")?;
     if is_mid_rebase_in(ctx) {
@@ -490,7 +494,11 @@ fn advance_to_next_commit_in(ctx: &Ctx<'_>, state_dir: &Path) -> Result<bool, Fa
 
     // Session finished (either rebase is done, or single-commit no-rebase mode).
     let is_root = read_state(ctx, state_dir, "is_root").is_ok_and(|value| value.as_str() == "true");
-    drop(ctx.fs.remove_dir_all(state_dir));
+    if let Err(err) = ctx.fs.remove_dir_all(state_dir) {
+        ctx.errln(&format!(
+            "WARN: failed to remove factor state directory: {err}"
+        ))?;
+    }
 
     if is_root {
         remove_empty_root_in(ctx)?;
@@ -655,6 +663,7 @@ fn rehydrate_pool_preserving_index(
 
     if !status.success() {
         let unmerged = git_output(ctx, &["diff", "--name-only", "--diff-filter=U"])?;
+        drop(git_status(ctx, &["cherry-pick", "--abort"]));
         if unmerged.is_empty() {
             drop(git_status(ctx, &["cherry-pick", "--quit"]));
             return Err(FactorError::GitCommand(format!(
@@ -662,6 +671,7 @@ fn rehydrate_pool_preserving_index(
                 status_code(status)
             )));
         }
+        drop(git_status(ctx, &["cherry-pick", "--quit"]));
         return Err(FactorError::GitCommand(format!(
             "rehydrate cherry-pick left conflicts:\n{unmerged}"
         )));
@@ -669,6 +679,7 @@ fn rehydrate_pool_preserving_index(
 
     let quit_status = git_status(ctx, &["cherry-pick", "--quit"])?;
     if !quit_status.success() {
+        drop(git_status(ctx, &["cherry-pick", "--abort"]));
         return Err(FactorError::GitCommand(format!(
             "git cherry-pick --quit failed (exit {})",
             status_code(quit_status)
@@ -841,6 +852,16 @@ fn cmd_start_in(
     if is_mid_rebase_in(ctx) {
         return Err(FactorError::ActiveRebase);
     }
+    let worktree_status = git_output(
+        ctx,
+        &["status", "--porcelain", "--untracked-files=all"],
+    )?;
+    if !worktree_status.is_empty() {
+        return Err(FactorError::GitCommand(
+            "working tree must be clean before starting; stash, commit, or remove local changes"
+                .to_owned(),
+        ));
+    }
 
     let commits = resolve_commit_refs(ctx, commit_refs)?;
     let resolved_commits = sort_topologically(ctx, &commits)?;
@@ -944,7 +965,11 @@ fn cmd_start_in(
         )?;
 
         if !status.success() {
-            drop(ctx.fs.remove_dir_all(&state_dir));
+            if let Err(err) = ctx.fs.remove_dir_all(&state_dir) {
+                ctx.errln(&format!(
+                    "WARN: failed to remove factor state directory: {err}"
+                ))?;
+            }
             return Err(FactorError::GitCommand(format!(
                 "git rebase failed (exit {})",
                 status_code(status)
