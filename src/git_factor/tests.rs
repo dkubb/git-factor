@@ -2963,6 +2963,53 @@ fn rehydrate_pool_preserving_index_propagates_unmerged_query_error() {
 }
 
 #[test]
+#[should_panic(expected = "cherry_pick_non_conflict_failure")]
+fn rehydrate_pool_preserving_index_returns_error_on_non_conflict_failure() {
+    let dir = TempDir::new().expect("tempdir");
+    let repo = dir.path();
+
+    let runner = ScriptedRunner::default()
+        .with_output("git", &["write-tree"], repo, "deadbeef\n")
+        .with_status(
+            "git",
+            &[
+                "cherry-pick",
+                "--no-commit",
+                "--strategy-option",
+                "theirs",
+                &"a".repeat(40),
+            ],
+            &[],
+            false,
+            repo,
+            1,
+        )
+        .with_output("git", &["diff", "--name-only", "--diff-filter=U"], repo, "")
+        .with_status("git", &["cherry-pick", "--quit"], &[], false, repo, 0)
+        .with_status("git", &["read-tree", "deadbeef"], &[], false, repo, 0);
+
+    let io = TestIo::default();
+    let env = TestEnv {
+        cwd: repo.to_path_buf(),
+    };
+    let ctx = Ctx {
+        runner: &runner,
+        cwd: repo.to_path_buf(),
+        io: &io,
+        env: &env,
+        fs: &REAL_FS,
+    };
+
+    let commit = CommitSha::new("a".repeat(40)).expect("sha");
+
+    // Current code silently succeeds; after fix this will return Err
+    drop(
+        rehydrate_pool_preserving_index(&ctx, &commit)
+            .expect_err("cherry_pick_non_conflict_failure"),
+    );
+}
+
+#[test]
 fn increment_split_count_in_state_propagates_state_write_error() {
     let dir = TempDir::new().expect("tempdir");
     let repo = dir.path();
