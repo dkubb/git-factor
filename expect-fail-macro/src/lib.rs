@@ -90,7 +90,7 @@ fn parse_expected_message(args: proc_macro2::TokenStream) -> syn::Result<LitStr>
     let parser = Punctuated::<MetaNameValue, Token![,]>::parse_terminated;
     let entries = parser.parse2(args)?;
     for entry in entries {
-        if !(entry.path.is_ident("message") || entry.path.is_ident("messager")) {
+        if !entry.path.is_ident("message") {
             return Err(syn::Error::new_spanned(
                 entry.path,
                 "expected `message = \"...\"`",
@@ -132,12 +132,9 @@ mod tests {
     use quote::quote;
 
     #[test]
-    fn parse_expected_message_accepts_message_and_alias() {
+    fn parse_expected_message_accepts_message() {
         let direct = parse_expected_message(quote!(message = "boom")).expect("message");
         assert_eq!(direct.value(), "boom");
-
-        let alias = parse_expected_message(quote!(messager = "bang")).expect("alias");
-        assert_eq!(alias.value(), "bang");
     }
 
     #[test]
@@ -192,11 +189,13 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "messager_rejected")]
     fn parse_expected_message_rejects_messager_typo() {
+        let err = parse_expected_message(quote!(messager = "bang"))
+            .err()
+            .expect("messager should be rejected as a typo");
         assert!(
-            parse_expected_message(quote!(messager = "bang")).is_err(),
-            "messager_rejected: messager should be rejected as a typo"
+            err.to_string().contains("expected `message = \"...\"`"),
+            "unexpected error: {err}"
         );
     }
 

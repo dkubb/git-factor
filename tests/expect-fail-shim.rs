@@ -26,16 +26,6 @@ mod tests {
         panic!("intentional xfail panic");
     }
 
-    #[expect_fail(messager = "intentional alias panic")]
-    #[expect(
-        clippy::panic,
-        reason = "Deliberately panics to verify exact-message xfail shim alias"
-    )]
-    #[test]
-    fn accepts_messager_alias() {
-        panic!("intentional alias panic");
-    }
-
     #[expect_fail(message = "intentional owned string panic")]
     #[expect(
         clippy::panic,
