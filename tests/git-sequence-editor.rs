@@ -169,7 +169,7 @@ exec echo hi\n\
         run_editor(
             &["--drop", "abc1234", "--drop", "abc1234"],
             GitSequenceEditorExpectation {
-                code: EXIT_FAILURE,
+                code: EXIT_DATAERR,
                 stderr: "duplicate drop sha: abc1234\n".to_owned(),
                 ..Default::default()
             },
@@ -186,7 +186,7 @@ exec echo hi\n\
         run_editor(
             &["--pick", "abc1234", "--pick", "abc1234"],
             GitSequenceEditorExpectation {
-                code: EXIT_FAILURE,
+                code: EXIT_DATAERR,
                 stderr: "duplicate pick sha: abc1234\n".to_owned(),
                 ..Default::default()
             },
@@ -227,7 +227,7 @@ exec echo hi\n\
         run_editor_with_prefixed_path(
             &["--pick", "abc1234", "--pick", long_sha.as_str()],
             GitSequenceEditorExpectation {
-                code: EXIT_FAILURE,
+                code: EXIT_DATAERR,
                 ordered_git_replay: Some(OrderedGitReplayExpectation::from_count_file(
                     count_file,
                     steps.len(),
@@ -251,7 +251,7 @@ exec echo hi\n\
         run_editor(
             &["--edit", "abc1234", "--edit", "abc1234"],
             GitSequenceEditorExpectation {
-                code: EXIT_FAILURE,
+                code: EXIT_DATAERR,
                 stderr: "duplicate edit sha: abc1234\n".to_owned(),
                 ..Default::default()
             },
@@ -292,7 +292,7 @@ exec echo hi\n\
         run_editor_with_prefixed_path(
             &["--edit", "abc1234", "--edit", long_sha.as_str()],
             GitSequenceEditorExpectation {
-                code: EXIT_FAILURE,
+                code: EXIT_DATAERR,
                 ordered_git_replay: Some(OrderedGitReplayExpectation::from_count_file(
                     count_file,
                     steps.len(),
@@ -316,7 +316,7 @@ exec echo hi\n\
         run_editor(
             &["--pick", "abc1234", "--drop", "abc1234"],
             GitSequenceEditorExpectation {
-                code: EXIT_FAILURE,
+                code: EXIT_DATAERR,
                 stderr: "sha specified multiple times: abc1234\n".to_owned(),
                 ..Default::default()
             },
@@ -333,7 +333,7 @@ exec echo hi\n\
         run_editor(
             &["--pick", "abc1234", "--edit", "abc1234"],
             GitSequenceEditorExpectation {
-                code: EXIT_FAILURE,
+                code: EXIT_DATAERR,
                 stderr: "sha specified multiple times: abc1234\n".to_owned(),
                 todo_content: Some("pick abc1234 first\n".to_owned()),
                 ..Default::default()
@@ -351,7 +351,7 @@ exec echo hi\n\
         run_editor(
             &["--edit", "abc1234", "--drop", "abc1234"],
             GitSequenceEditorExpectation {
-                code: EXIT_FAILURE,
+                code: EXIT_DATAERR,
                 stderr: "sha specified multiple times: abc1234\n".to_owned(),
                 todo_content: Some("pick abc1234 first\n".to_owned()),
                 ..Default::default()
@@ -393,7 +393,7 @@ exec echo hi\n\
         run_editor_with_prefixed_path(
             &["--pick", "abc1234", "--pick", requested.as_str()],
             GitSequenceEditorExpectation {
-                code: EXIT_FAILURE,
+                code: EXIT_DATAERR,
                 ordered_git_replay: Some(OrderedGitReplayExpectation::from_count_file(
                     count_file,
                     steps.len(),
@@ -441,7 +441,7 @@ exec echo hi\n\
         run_editor_with_prefixed_path(
             &["--drop", "abc1234", "--drop", long_sha.as_str()],
             GitSequenceEditorExpectation {
-                code: EXIT_FAILURE,
+                code: EXIT_DATAERR,
                 ordered_git_replay: Some(OrderedGitReplayExpectation::from_count_file(
                     count_file,
                     steps.len(),
@@ -465,7 +465,7 @@ exec echo hi\n\
         run_editor(
             &["--drop", "deadbeef"],
             GitSequenceEditorExpectation {
-                code: EXIT_FAILURE,
+                code: EXIT_DATAERR,
                 stderr: "sha not present in todo: deadbeef\n".to_owned(),
                 ..Default::default()
             },
@@ -482,7 +482,7 @@ exec echo hi\n\
         run_editor(
             &["--pick", "deadbeef"],
             GitSequenceEditorExpectation {
-                code: EXIT_FAILURE,
+                code: EXIT_DATAERR,
                 stderr: "sha not present in todo: deadbeef\n".to_owned(),
                 ..Default::default()
             },
@@ -499,7 +499,7 @@ exec echo hi\n\
         run_editor(
             &["--edit", "deadbeef"],
             GitSequenceEditorExpectation {
-                code: EXIT_FAILURE,
+                code: EXIT_DATAERR,
                 stderr: "sha not present in todo: deadbeef\n".to_owned(),
                 ..Default::default()
             },
@@ -518,7 +518,7 @@ exec echo hi\n\
         run_editor(
             &["--drop", requested.as_str()],
             GitSequenceEditorExpectation {
-                code: EXIT_FAILURE,
+                code: EXIT_DATAERR,
                 stderr: format!("sha not present in todo: {requested}\n"),
                 ..Default::default()
             },
@@ -702,7 +702,7 @@ exec echo hi\n\
         run_editor_with_prefixed_path(
             &["--drop", requested.as_str()],
             GitSequenceEditorExpectation {
-                code: EXIT_FAILURE,
+                code: EXIT_DATAERR,
                 ordered_git_replay: Some(OrderedGitReplayExpectation::from_count_file(
                     count_file,
                     steps.len(),
@@ -730,7 +730,7 @@ exec echo hi\n\
         run_editor_with_prefixed_path(
             &["--drop", requested.as_str()],
             GitSequenceEditorExpectation {
-                code: EXIT_FAILURE,
+                code: EXIT_DATAERR,
                 stderr: "failed to run git rev-parse: No such file or directory (os error 2)\n"
                     .to_owned(),
                 todo_content: Some("pick abc1234 first\n".to_owned()),
@@ -776,7 +776,7 @@ exec echo hi\n\
         run_editor_with_prefixed_path(
             &["--drop", requested.as_str()],
             GitSequenceEditorExpectation {
-                code: EXIT_FAILURE,
+                code: EXIT_DATAERR,
                 ordered_git_replay: Some(OrderedGitReplayExpectation::from_count_file(
                     count_file,
                     steps.len(),
@@ -852,7 +852,7 @@ exec echo hi\n\
         run_editor(
             &["--drop", "abc1234"],
             GitSequenceEditorExpectation {
-                code: EXIT_FAILURE,
+                code: EXIT_DATAERR,
                 stderr: "unsupported todo action: foo\n".to_owned(),
                 todo_content: Some(original.to_owned()),
                 ..Default::default()
@@ -871,7 +871,7 @@ exec echo hi\n\
         run_editor(
             &["--drop", "abc1234"],
             GitSequenceEditorExpectation {
-                code: EXIT_FAILURE,
+                code: EXIT_DATAERR,
                 stderr: "unsupported todo action: Pick\n".to_owned(),
                 todo_content: Some(original.to_owned()),
                 ..Default::default()
@@ -1027,7 +1027,7 @@ edit abc1234 first
         run_editor_with_prefixed_path(
             &["--drop", requested.as_str()],
             GitSequenceEditorExpectation {
-                code: EXIT_FAILURE,
+                code: EXIT_DATAERR,
                 ordered_git_replay: Some(OrderedGitReplayExpectation::from_count_file(
                     count_file,
                     steps.len(),
@@ -1050,7 +1050,7 @@ edit abc1234 first
         run_editor(
             &["--drop", "abc1234"],
             GitSequenceEditorExpectation {
-                code: EXIT_FAILURE,
+                code: EXIT_DATAERR,
                 stderr: "failed to read todo file: No such file or directory (os error 2)\n"
                     .to_owned(),
                 todo_exists: false,
@@ -1076,7 +1076,7 @@ edit abc1234 first
         run_editor(
             &["--drop", "abc1234"],
             GitSequenceEditorExpectation {
-                code: EXIT_FAILURE,
+                code: EXIT_DATAERR,
                 stderr: format!(
                     "failed to create temporary todo file for {}: Permission denied (os error 13)\n",
                     path.display()
