@@ -903,7 +903,7 @@ pub(super) fn remove_empty_root_in(ctx: &Ctx<'_>) -> Result<(), FactorError> {
         shell_quote(short_root.as_str())
     );
 
-    drop(command_status_with(
+    let rebase_status = command_status_with(
         ctx,
         "git",
         &[
@@ -919,7 +919,14 @@ pub(super) fn remove_empty_root_in(ctx: &Ctx<'_>) -> Result<(), FactorError> {
             ("GIT_SEQUENCE_EDITOR", &seq_editor),
         ],
         false,
-    ));
+    )?;
+
+    if !rebase_status.success() {
+        return Err(FactorError::GitCommand(format!(
+            "rebase to remove empty root failed (exit {})",
+            status_code(rebase_status)
+        )));
+    }
 
     Ok(())
 }
@@ -3152,12 +3159,17 @@ mod tests {
     }
 
     #[test]
-    fn remove_empty_root_in_handles_empty_root_commit_history() {
+    fn remove_empty_root_in_reports_rebase_failure_for_empty_root() {
         let dir = TempDir::new().expect("tempdir");
         init_empty_root_repo(dir.path());
         let ctx = ctx_for(dir.path());
 
-        remove_empty_root_in(&ctx).expect("remove_empty_root_in should tolerate empty root");
+        let err =
+            remove_empty_root_in(&ctx).expect_err("rebase should fail without sequence editor");
+        assert!(
+            matches!(&err, FactorError::GitCommand(msg) if msg.contains("rebase to remove empty root failed")),
+            "unexpected error: {err:?}"
+        );
     }
 
     #[test]

@@ -3253,7 +3253,6 @@ fn remove_empty_root_is_noop_when_root_is_not_empty() {
 }
 
 #[test]
-#[should_panic(expected = "remove_empty_root_rebase_failure")]
 fn remove_empty_root_returns_error_when_rebase_fails() {
     let dir = TempDir::new().expect("tempdir");
     let repo = dir.path();
@@ -3318,8 +3317,12 @@ fn remove_empty_root_returns_error_when_rebase_fails() {
         fs: &REAL_FS,
     };
 
-    // Current code silently drops the failure; after fix this will return Err
-    drop(remove_empty_root_in(&ctx).expect_err("remove_empty_root_rebase_failure"));
+    let err = remove_empty_root_in(&ctx).expect_err("rebase failure must return error");
+
+    assert!(
+        matches!(&err, FactorError::GitCommand(msg) if msg.contains("rebase to remove empty root failed")),
+        "unexpected error: {err:?}"
+    );
 }
 
 #[test]
@@ -6497,6 +6500,16 @@ fn advance_to_next_commit_finishes_root_session_and_runs_empty_root_cleanup() {
     let repo = dir.path();
     fs::write(repo.join("git-factor"), "").expect("write fake exe");
 
+    let canon_repo = fs::canonicalize(repo).expect("canonicalize repo");
+    let editor = canon_repo.join("git-sequence-editor");
+    let editor_str = editor.to_str().expect("editor path is UTF-8");
+    let seq_editor = format!(
+        "{} {} {}",
+        shell_quote(editor_str),
+        shell_quote("--drop"),
+        shell_quote("aaaaaaa")
+    );
+
     let git_dir = repo.join(".git");
     let state_dir = git_dir.join("factor");
     fs::create_dir_all(&state_dir).expect("create factor dir");
@@ -6514,7 +6527,25 @@ fn advance_to_next_commit_finishes_root_session_and_runs_empty_root_cleanup() {
             &format!("{root}\n"),
         )
         .with_output("git", &["ls-tree", &root], repo, "")
-        .with_output("git", &["rev-parse", "--short", &root], repo, "aaaaaaa\n");
+        .with_output("git", &["rev-parse", "--short", &root], repo, "aaaaaaa\n")
+        .with_status(
+            "git",
+            &[
+                "rebase",
+                "--empty",
+                "drop",
+                "--interactive",
+                "--quiet",
+                "--root",
+            ],
+            &[
+                ("GIT_EDITOR", "false"),
+                ("GIT_SEQUENCE_EDITOR", &seq_editor),
+            ],
+            false,
+            repo,
+            0,
+        );
     let io = TestIo::default();
     let env = TestEnv {
         cwd: repo.to_path_buf(),
