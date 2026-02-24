@@ -41,4 +41,20 @@ mod tests {
     fn accepts_non_string_payload() {
         std::panic::panic_any(123_u32);
     }
+
+    #[expect_fail(message = "intentional owned string panic")]
+    #[expect(
+        clippy::panic,
+        reason = "Deliberately panics with String payload to exercise xfail shim downcast path"
+    )]
+    #[test]
+    fn accepts_string_payload() {
+        panic!("{}", String::from("intentional owned string panic"));
+    }
+
+    #[expect_fail(message = "<non-string panic payload>")]
+    #[test]
+    fn accepts_non_string_payload() {
+        std::panic::panic_any(123_u32);
+    }
 }
