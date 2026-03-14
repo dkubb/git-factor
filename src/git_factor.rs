@@ -372,10 +372,6 @@ impl<'ctx> Session<'ctx> {
     }
 
     /// Creates a session accessor from the active factor state directory.
-    #[expect(
-        clippy::single_call_fn,
-        reason = "active-session loading is kept isolated for later workflow commands"
-    )]
     fn from_active(ctx: &'ctx Ctx<'ctx>) -> Result<Self, FactorError> {
         Ok(Self {
             ctx,
@@ -418,6 +414,21 @@ impl<'ctx> Session<'ctx> {
     fn split_count(&self) -> Result<u8, FactorError> {
         read_state_parsed::<u8>(self.ctx, &self.state_dir, StateFileKey::SplitCount.as_str())
     }
+
+    /// Reads the `start_head` state value.
+    fn start_head(&self) -> Result<NonEmptyString, FactorError> {
+        read_state(self.ctx, &self.state_dir, StateFileKey::StartHead.as_str())
+    }
+
+    /// Reads the `started_rebase` flag from state, defaulting to the provided value.
+    fn started_rebase(&self, default: bool) -> Result<bool, FactorError> {
+        read_state_bool_or_default(
+            self.ctx,
+            &self.state_dir,
+            StateFileKey::StartedRebase.as_str(),
+            default,
+        )
+    }
 }
 
 /// Returns the path to the factor state directory.
@@ -445,23 +456,111 @@ fn git_dir_in(ctx: &Ctx<'_>) -> Result<PathBuf, FactorError> {
 }
 
 /// Returns true when the factor state directory exists.
-#[expect(
-    clippy::single_call_fn,
-    reason = "active-session detection stays isolated for status and later workflow commands"
-)]
 fn is_factor_active_in(ctx: &Ctx<'_>) -> bool {
     factor_dir_in(ctx).is_ok_and(|dir| ctx.fs.is_dir(&dir))
 }
 
 /// Returns true when either rebase backend directory exists.
-#[expect(
-    clippy::single_call_fn,
-    reason = "rebase detection stays isolated for status and later workflow commands"
-)]
 fn is_mid_rebase_in(ctx: &Ctx<'_>) -> bool {
     git_dir_in(ctx).is_ok_and(|dir| {
         ctx.fs.is_dir(&dir.join(REBASE_MERGE_DIR)) || ctx.fs.is_dir(&dir.join(REBASE_APPLY_DIR))
     })
+}
+
+/// Runs a git command with optional environment overrides.
+fn run_git_with_env(
+    ctx: &Ctx<'_>,
+    args: &[&str],
+    envs: &[(&str, &str)],
+) -> Result<(), FactorError> {
+    let status = ctx
+        .runner
+        .status("git", args, envs, false, &ctx.cwd)
+        .map_err(|err| {
+            FactorError::GitCommand(non_empty_msg(format!(
+                "git {}: {err}",
+                args.first().copied().unwrap_or_default()
+            )))
+        })?;
+
+    if status.success() {
+        return Ok(());
+    }
+
+    Err(FactorError::GitCommand(non_empty_msg(format!(
+        "git {} failed (exit {})",
+        args.first().copied().unwrap_or_default(),
+        status.code().unwrap_or(EXIT_SOFTWARE)
+    ))))
+}
+
+/// Removes the factor state path whether it is a directory or stray file.
+#[expect(
+    clippy::single_call_fn,
+    reason = "cleanup is centralized to keep abort and finish state removal consistent"
+)]
+fn remove_factor_state_path(ctx: &Ctx<'_>, state_path: &Path) -> Result<(), FactorError> {
+    if !ctx.fs.exists(state_path) {
+        return Ok(());
+    }
+
+    if ctx.fs.is_dir(state_path) {
+        ctx.fs
+            .remove_dir_all(state_path)
+            .map_err(FactorError::StateWrite)?;
+    } else {
+        ctx.fs
+            .remove_file(state_path)
+            .map_err(FactorError::StateWrite)?;
+    }
+
+    Ok(())
+}
+
+/// Aborts the current factor session and restores the repository.
+#[expect(
+    clippy::single_call_fn,
+    reason = "abort workflow stays isolated until later session-control commands land"
+)]
+fn cmd_abort_in(ctx: &Ctx<'_>) -> Result<i32, FactorError> {
+    if !is_factor_active_in(ctx) {
+        return Err(FactorError::NoActiveSession);
+    }
+
+    let session = Session::from_active(ctx)?;
+    let requires_rebase = session.requires_rebase()?;
+    let started_rebase = session.started_rebase(requires_rebase)?;
+
+    if started_rebase && is_mid_rebase_in(ctx) {
+        run_git_with_env(
+            ctx,
+            &["rebase", "--abort"],
+            &[("GIT_EDITOR", "false"), ("GIT_SEQUENCE_EDITOR", "false")],
+        )?;
+    }
+
+    let reset_target = match session.start_head() {
+        Ok(start_head) => start_head.to_string(),
+        Err(FactorError::StateRead(err)) if err.kind() == io::ErrorKind::NotFound => {
+            session.current_commit()?
+        }
+        Err(err) => return Err(err),
+    };
+
+    run_git_with_env(
+        ctx,
+        &["reset", "--hard", "--quiet", reset_target.as_str()],
+        &[],
+    )?;
+    run_git_with_env(ctx, &["clean", "--force", "--quiet", "-d"], &[])?;
+    remove_factor_state_path(ctx, &session.state_dir)?;
+
+    ctx.outln("FACTOR: Session aborted for current commit step.")?;
+    if is_mid_rebase_in(ctx) {
+        ctx.outln("FACTOR: Rebase still active. To abort full rebase, run: git rebase --abort")?;
+    }
+
+    Ok(EXIT_OK)
 }
 
 /// Shows status for the current factor session.
@@ -683,9 +782,7 @@ fn run_with_args_vec(ctx: &Ctx<'_>, args: Vec<OsString>) -> Result<i32, FactorEr
     }
 
     if cli.abort() {
-        return Err(FactorError::Usage(non_empty_msg(
-            "abort workflow lands in later commits".to_owned(),
-        )));
+        return cmd_abort_in(ctx);
     }
 
     if cli.status() {

@@ -339,19 +339,87 @@ EXAMPLES:
     }
 
     #[test]
-    fn abort_placeholder_reports_later_workflow() {
+    fn abort_succeeds_when_session_dir_exists_but_no_rebase_is_active() {
         let dir = init_repo();
         let repo = dir.path();
+        commit_file(repo, "file.txt", "one\n", "chore: base");
+        let current_commit = git(repo, &["rev-parse", "HEAD"]);
+
+        write_factor_state(
+            repo,
+            &[
+                ("commits", current_commit.as_str()),
+                ("current_index", "0"),
+                ("split_count", "0"),
+                ("start_head", current_commit.as_str()),
+                ("requires_rebase", "false"),
+            ],
+        );
 
         Command::new(git_factor_bin())
             .current_dir(repo)
             .arg("--abort")
             .assert()
-            .code(EXIT_USAGE)
-            .stdout(predicate::str::is_empty())
-            .stderr(predicate::str::diff(
-                "abort workflow lands in later commits\n".to_owned(),
-            ));
+            .code(EXIT_OK)
+            .stdout(predicate::str::diff(
+                "FACTOR: Session aborted for current commit step.\n".to_owned(),
+            ))
+            .stderr(predicate::str::is_empty());
+
+        assert!(
+            !git_dir(repo).join("factor").exists(),
+            "factor state should be removed"
+        );
+        assert_eq!(git_status_porcelain(repo), "");
+    }
+
+    #[test]
+    fn abort_resets_repo_to_pre_start_head() {
+        let dir = init_repo();
+        let repo = dir.path();
+
+        commit_file(repo, "file.txt", "one\n", "chore: base");
+        commit_file(repo, "file.txt", "one\ntwo\n", "feat: change");
+        commit_file(repo, "file.txt", "one\ntwo\nthree\n", "feat: latest");
+
+        let start_head = git(repo, &["rev-parse", "HEAD"]);
+        let target_commit = git(repo, &["rev-parse", "HEAD~1"]);
+
+        write_factor_state(
+            repo,
+            &[
+                ("commits", target_commit.as_str()),
+                ("current_index", "0"),
+                ("split_count", "1"),
+                ("start_head", start_head.as_str()),
+                ("requires_rebase", "true"),
+                ("started_rebase", "false"),
+            ],
+        );
+
+        must_ok(fs::write(repo.join("file.txt"), "split attempt\n"));
+        must_ok(fs::write(repo.join("scratch.txt"), "temporary\n"));
+
+        Command::new(git_factor_bin())
+            .current_dir(repo)
+            .arg("--abort")
+            .assert()
+            .code(EXIT_OK)
+            .stdout(predicate::str::diff(
+                "FACTOR: Session aborted for current commit step.\n".to_owned(),
+            ))
+            .stderr(predicate::str::is_empty());
+
+        assert_eq!(git(repo, &["rev-parse", "HEAD"]), start_head);
+        assert_eq!(git_status_porcelain(repo), "");
+        assert!(
+            !repo.join("scratch.txt").exists(),
+            "untracked files should be cleaned"
+        );
+        assert!(
+            !git_dir(repo).join("factor").exists(),
+            "factor state should be removed"
+        );
     }
 
     #[test]
