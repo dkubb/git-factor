@@ -772,6 +772,56 @@ exec echo hi\n\
     }
 
     #[test]
+    fn rejects_ambiguous_long_sha_resolution_in_todo() {
+        let dir = TempDir::new().or_abort();
+        let path = dir.path().join("todo");
+        fs::write(&path, "pick abc first\npick abc1234 second\n").or_abort();
+
+        let requested = "a".repeat(FULL_SHA_LEN);
+        let resolved = format!("abc1234{}", "0".repeat(33));
+
+        let steps = vec![GitWrapperStep {
+            args: vec![
+                "rev-parse".to_owned(),
+                "--verify".to_owned(),
+                "--quiet".to_owned(),
+                format!("{requested}^{{commit}}"),
+            ],
+            stdout: format!("{resolved}\n"),
+            stderr: String::new(),
+            exit_code: 0,
+        }];
+
+        let (wrap_dir, wrap_bin, count_file) = make_ordered_git_wrapper(&steps);
+
+        let original_path = env::var_os("PATH").or_abort();
+        let prefixed_path = {
+            let mut joined = OsString::new();
+            joined.push(wrap_bin.as_os_str());
+            joined.push(OsStr::new(":"));
+            joined.push(original_path);
+            joined
+        };
+
+        run_editor_with_prefixed_path(
+            &["--drop", requested.as_str()],
+            GitSequenceEditorExpectation {
+                code: EXIT_FAILURE,
+                ordered_git_replay: Some(OrderedGitReplayExpectation::from_count_file(
+                    count_file,
+                    steps.len(),
+                )),
+                stderr: format!("sha is ambiguous in todo: {resolved}\n"),
+                todo_content: Some("pick abc first\npick abc1234 second\n".to_owned()),
+                ..Default::default()
+            },
+            prefixed_path,
+            &path,
+        );
+        let _keep_alive = wrap_dir;
+    }
+
+    #[test]
     fn warns_when_pick_request_is_idempotent() {
         let dir = TempDir::new().or_abort();
         let path = dir.path().join("todo");
@@ -1042,6 +1092,56 @@ edit abc1234 first
             },
             &path,
         );
+    }
+
+    #[test]
+    fn rejects_resolved_long_sha_when_not_present_in_todo() {
+        let dir = TempDir::new().or_abort();
+        let path = dir.path().join("todo");
+        fs::write(&path, "pick abc1234 first\n").or_abort();
+
+        let requested = "a".repeat(FULL_SHA_LEN);
+        let resolved = format!("deadbeef{}", "0".repeat(32));
+
+        let steps = vec![GitWrapperStep {
+            args: vec![
+                "rev-parse".to_owned(),
+                "--verify".to_owned(),
+                "--quiet".to_owned(),
+                format!("{requested}^{{commit}}"),
+            ],
+            stdout: format!("{resolved}\n"),
+            stderr: String::new(),
+            exit_code: 0,
+        }];
+
+        let (wrap_dir, wrap_bin, count_file) = make_ordered_git_wrapper(&steps);
+
+        let original_path = env::var_os("PATH").or_abort();
+        let prefixed_path = {
+            let mut joined = OsString::new();
+            joined.push(wrap_bin.as_os_str());
+            joined.push(OsStr::new(":"));
+            joined.push(original_path);
+            joined
+        };
+
+        run_editor_with_prefixed_path(
+            &["--drop", requested.as_str()],
+            GitSequenceEditorExpectation {
+                code: EXIT_FAILURE,
+                ordered_git_replay: Some(OrderedGitReplayExpectation::from_count_file(
+                    count_file,
+                    steps.len(),
+                )),
+                stderr: format!("sha not present in todo: {resolved}\n"),
+                todo_content: Some("pick abc1234 first\n".to_owned()),
+                ..Default::default()
+            },
+            prefixed_path,
+            &path,
+        );
+        let _keep_alive = wrap_dir;
     }
 
     #[test]
