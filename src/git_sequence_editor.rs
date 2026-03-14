@@ -226,6 +226,91 @@ fn sync_parent_directory(parent: &Path, path: &Path) -> Result<(), AtomicWriteEr
     Ok(())
 }
 
+/// Writes `content` to `path` atomically via a same-directory temp file and rename.
+#[cfg_attr(
+    not(test),
+    expect(
+        clippy::single_call_fn,
+        reason = "isolates atomic write behavior from todo transform logic"
+    )
+)]
+fn write_file_atomic(path: &Path, content: &str) -> Result<(), AtomicWriteError> {
+    let target = match AtomicWriteTarget::new(path) {
+        Ok(target) => target,
+        Err(err) => return Err(err),
+    };
+    let pid = process::id();
+
+    for attempt in 0..TEMP_FILE_ATTEMPTS_MAX {
+        let mut temp_name = target.file_name.clone();
+        temp_name.push(format!(".tmp{pid}.{attempt}"));
+        let temp_path = target.parent.join(temp_name);
+
+        let mut file = match OpenOptions::new()
+            .create_new(true)
+            .truncate(false)
+            .write(true)
+            .open(&temp_path)
+        {
+            Ok(file) => file,
+            Err(err) if err.kind() == ErrorKind::AlreadyExists => continue,
+            Err(err) => {
+                return Err(AtomicWriteError::CreateTemp(
+                    target.path.display().to_string(),
+                    err,
+                ));
+            }
+        };
+
+        let write_result = if write_fail_point() == WriteFailPoint::Write {
+            Err(io::Error::other("injected write failure"))
+        } else {
+            file.write_all(content.as_bytes())
+        };
+        if let Err(err) = write_result {
+            let _ignored = fs::remove_file(&temp_path);
+            return Err(AtomicWriteError::WriteTemp(
+                target.path.display().to_string(),
+                err,
+            ));
+        }
+
+        let sync_result = if write_fail_point() == WriteFailPoint::Sync {
+            Err(io::Error::other("injected sync failure"))
+        } else {
+            file.sync_all()
+        };
+        if let Err(err) = sync_result {
+            let _ignored = fs::remove_file(&temp_path);
+            return Err(AtomicWriteError::SyncTemp(
+                target.path.display().to_string(),
+                err,
+            ));
+        }
+
+        drop(file);
+
+        if let Err(err) = fs::rename(&temp_path, target.path) {
+            let _ignored = fs::remove_file(&temp_path);
+            return Err(AtomicWriteError::ReplaceFile(
+                target.path.display().to_string(),
+                err,
+            ));
+        }
+
+        #[cfg(unix)]
+        if let Err(err) = sync_parent_directory(target.parent, target.path) {
+            return Err(err);
+        }
+
+        return Ok(());
+    }
+
+    Err(AtomicWriteError::TempNameExhausted(
+        target.path.display().to_string(),
+    ))
+}
+
 /// Runs `git-sequence-editor` from process arguments and returns an exit code.
 #[must_use]
 #[inline]
