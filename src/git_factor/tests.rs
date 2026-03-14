@@ -865,3 +865,113 @@ impl Fs for StickyStatePathFs {
     fs_delegate!(remove_file);
     fs_delegate!(write_string);
 }
+
+fn with_git_dir_outputs(mut runner: ScriptedRunner, repo: &Path, count: usize) -> ScriptedRunner {
+    for _ in 0..count {
+        runner = runner.with_output("git", &["rev-parse", "--git-dir"], repo, ".git\n");
+    }
+    runner
+}
+
+fn with_start_gate_result(
+    runner: ScriptedRunner,
+    repo: &Path,
+    command: &str,
+    code: i32,
+    stdout: &str,
+    stderr: &str,
+) -> ScriptedRunner {
+    let runner_with_gate = runner
+        .with_status(
+            "bash",
+            &["--norc", "--noprofile", "-n", "-c", command],
+            &[],
+            true,
+            repo,
+            0,
+        )
+        .with_output_status("bash", &["-c", command], repo, code, stdout, stderr);
+    if code == i32::default() {
+        return runner_with_gate.with_output("git", &["status", "--porcelain=v1"], repo, "");
+    }
+    runner_with_gate
+}
+
+fn start_single_head_resolution_runner(repo: &Path, sha: &str) -> ScriptedRunner {
+    ScriptedRunner::default()
+        .with_output("git", &["rev-parse", "--git-dir"], repo, ".git\n")
+        .with_output("git", &["status", "--porcelain=v1"], repo, "")
+        .with_output(
+            "git",
+            &["rev-parse", "--verify", "HEAD"],
+            repo,
+            &format!("{sha}\n"),
+        )
+        .with_output(
+            "git",
+            &["rev-list", "--reverse", "--topo-order", sha],
+            repo,
+            &format!("{sha}\n"),
+        )
+        .with_output(
+            "git",
+            &["rev-parse", "--verify", "HEAD"],
+            repo,
+            &format!("{sha}\n"),
+        )
+}
+
+fn start_single_head_validation_runner(repo: &Path, sha: &str) -> ScriptedRunner {
+    start_single_head_resolution_runner(repo, sha)
+        .with_status(
+            "git",
+            &["merge-base", "--is-ancestor", sha, "HEAD"],
+            &[],
+            true,
+            repo,
+            0,
+        )
+        .with_status(
+            "git",
+            &["rev-parse", "--quiet", "--verify", &format!("{sha}^2")],
+            &[],
+            true,
+            repo,
+            1,
+        )
+}
+
+fn is_forced_runner_failure(err: &FactorError) -> bool {
+    matches!(
+        err,
+        FactorError::GitDir(msg) | FactorError::GitCommand(msg)
+            if msg.contains("forced runner failure")
+    )
+}
+
+fn test_messages() -> NonEmpty<NonEmptyString> {
+    let message = NonEmptyString::try_from("test: message".to_owned()).or_abort("non-empty");
+    NonEmpty::new(message)
+}
+
+fn setup_factor_state(
+    repo: &Path,
+    original: &str,
+    split_count: &str,
+    requires_rebase: Option<&str>,
+    expected_tree: Option<&str>,
+) -> PathBuf {
+    let state_dir = repo.join(".git").join("factor");
+    fs::create_dir_all(&state_dir).or_abort("create factor dir");
+    fs::write(state_dir.join("commits"), format!("{original}\n")).or_abort("write commits");
+    fs::write(state_dir.join("current_index"), "0\n").or_abort("write current_index");
+    fs::write(state_dir.join("split_count"), split_count).or_abort("write split_count");
+    fs::write(state_dir.join("exec"), "true\n").or_abort("write exec");
+    if let Some(value) = requires_rebase {
+        fs::write(state_dir.join("requires_rebase"), value).or_abort("write requires_rebase");
+    }
+    if let Some(value) = expected_tree {
+        fs::write(state_dir.join("expected_tree"), value).or_abort("write expected_tree");
+    }
+    state_dir
+}
