@@ -36,9 +36,9 @@ mod types;
 
 use core::num::NonZeroU8;
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-use crate::exit_codes::EXIT_OK;
+use crate::exit_codes::{EXIT_DATAERR, EXIT_OK, EXIT_SOFTWARE, EXIT_TEMPFAIL, EXIT_USAGE};
 use crate::non_empty_string::NonEmptyString;
 
 #[cfg_attr(
@@ -324,26 +324,66 @@ impl TryFrom<String> for ShortSha {
     }
 }
 
+/// Maps a `FactorError` to an `(exit_code, message)` tuple.
+fn error_to_exit(error: &FactorError) -> (i32, String) {
+    let code = match error {
+        &FactorError::ActiveRebase
+        | &FactorError::ActiveSession
+        | &FactorError::NoActiveSession
+        | &FactorError::NoStagedChanges
+        | &FactorError::Usage(_) => EXIT_USAGE,
+        &FactorError::GitDir(_)
+        | &FactorError::InvalidCommit(_)
+        | &FactorError::InvalidExecSyntax(_)
+        | &FactorError::MergeCommit(_)
+        | &FactorError::NotAncestor(_)
+        | &FactorError::NotGitRepo => EXIT_DATAERR,
+        &FactorError::ExecFailed { .. } | &FactorError::TreeHashMismatch { .. } => EXIT_TEMPFAIL,
+        &FactorError::GitCommand(_)
+        | &FactorError::StateRead(_)
+        | &FactorError::StateWrite(_)
+        | &FactorError::Io(_) => EXIT_SOFTWARE,
+    };
+    (code, error.to_string())
+}
+
 /// Runs the `git-factor` CLI entrypoint.
-///
-/// The full factor workflow is added in later commits. This placeholder keeps
-/// the binary wiring intact while the shared support layers land first.
-#[must_use]
 #[inline]
+#[must_use]
 pub const fn main_entry() -> i32 {
     EXIT_OK
+}
+
+/// Builds the real runtime context from a cwd lookup result.
+fn build_ctx_from_cwd(cwd_result: io::Result<PathBuf>) -> Result<Ctx<'static>, FactorError> {
+    match cwd_result {
+        Ok(cwd) => Ok(Ctx {
+            cwd,
+            env: &REAL_ENV,
+            fs: &REAL_FS,
+            io: &REAL_IO,
+            runner: &REAL_RUNNER,
+        }),
+        Err(err) => Err(FactorError::GitCommand(non_empty_msg(format!(
+            "cannot resolve cwd: {err}"
+        )))),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        CommitMessage, Ctx, CurrentIndex, REAL_ENV, REAL_FS, REAL_IO, REAL_RUNNER, SessionPhase,
-        ShortSha, SplitCount, StateBool, StateDir, StateFileKey,
+        CommitMessage, Ctx, CurrentIndex, FactorError, REAL_ENV, REAL_FS, REAL_IO, REAL_RUNNER,
+        SessionPhase, ShortSha, SplitCount, StateBool, StateDir, StateFileKey, build_ctx_from_cwd,
+        error_to_exit,
     };
+    use crate::exit_codes::{EXIT_DATAERR, EXIT_SOFTWARE, EXIT_TEMPFAIL, EXIT_USAGE};
+    use crate::git_factor::non_empty_msg;
     use crate::test_support::{OrAbort as _, ResultOrAbort as _};
     use core::num::NonZeroU8;
     use std::fs;
-    use std::path::Path;
+    use std::io;
+    use std::path::{Path, PathBuf};
     use tempfile::TempDir;
 
     fn ctx_for(path: &Path) -> Ctx<'static> {
@@ -520,5 +560,61 @@ mod tests {
             .increment()
             .err_or_abort("u8::MAX split_count should overflow");
         assert_eq!(err.to_string(), "git command failed: split_count overflow");
+    }
+
+    #[test]
+    fn error_to_exit_maps_usage_errors() {
+        let (code, message) =
+            error_to_exit(&FactorError::Usage(non_empty_msg("bad usage".to_owned())));
+        assert_eq!(code, EXIT_USAGE);
+        assert_eq!(message, "bad usage");
+    }
+
+    #[test]
+    fn error_to_exit_maps_data_and_software_errors() {
+        let (data_code, data_message) =
+            error_to_exit(&FactorError::InvalidCommit("deadbeef".to_owned()));
+        assert_eq!(data_code, EXIT_DATAERR);
+        assert_eq!(data_message, "invalid commit: deadbeef");
+
+        let (software_code, software_message) = error_to_exit(&FactorError::GitCommand(
+            non_empty_msg("internal state blew up".to_owned()),
+        ));
+        assert_eq!(software_code, EXIT_SOFTWARE);
+        assert_eq!(
+            software_message,
+            "git command failed: internal state blew up"
+        );
+    }
+
+    #[test]
+    fn error_to_exit_maps_tempfail_errors() {
+        let exec_code: i32 = 42;
+        let (code, message) = error_to_exit(&FactorError::ExecFailed {
+            code: exec_code,
+            command: non_empty_msg("just ci".to_owned()),
+        });
+        assert_eq!(code, EXIT_TEMPFAIL);
+        assert_eq!(message, "exec gate failed: just ci (exit code 42)");
+    }
+
+    #[test]
+    fn build_ctx_from_cwd_reports_error() {
+        let result = build_ctx_from_cwd(Err(io::Error::other("cwd failed")));
+        let err = result
+            .err()
+            .or_abort("cwd failure should map to git command error");
+        assert_eq!(
+            err.to_string(),
+            "git command failed: cannot resolve cwd: cwd failed"
+        );
+    }
+
+    #[test]
+    fn build_ctx_from_cwd_returns_real_context_on_success() {
+        let cwd = PathBuf::from("repo");
+        let ctx = build_ctx_from_cwd(Ok(cwd.clone())).or_abort("cwd success should build context");
+
+        assert_eq!(ctx.cwd, cwd);
     }
 }
