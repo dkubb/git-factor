@@ -1207,3 +1207,238 @@ fn finish_advance_runner(repo: &Path, original: &str, next: &str) -> ScriptedRun
             &format!("{}\n", repo.display()),
         )
 }
+
+fn start_multi_commit_runner_base(repo: &Path, sha_a: &str, sha_b: &str) -> ScriptedRunner {
+    ScriptedRunner::default()
+        .with_output("git", &["rev-parse", "--git-dir"], repo, ".git\n")
+        .with_output("git", &["status", "--porcelain=v1"], repo, "")
+        .with_output(
+            "git",
+            &["rev-parse", "--verify", sha_a],
+            repo,
+            &format!("{sha_a}\n"),
+        )
+        .with_output(
+            "git",
+            &["rev-parse", "--verify", sha_b],
+            repo,
+            &format!("{sha_b}\n"),
+        )
+        .with_output(
+            "git",
+            &["rev-list", "--reverse", "--topo-order", sha_a, sha_b],
+            repo,
+            &format!("{sha_a}\n{sha_b}\n"),
+        )
+        .with_output(
+            "git",
+            &["rev-parse", "--verify", "HEAD"],
+            repo,
+            &format!("{sha_b}\n"),
+        )
+        .with_status(
+            "git",
+            &["merge-base", "--is-ancestor", sha_a, "HEAD"],
+            &[],
+            true,
+            repo,
+            0,
+        )
+        .with_status(
+            "git",
+            &["merge-base", "--is-ancestor", sha_b, "HEAD"],
+            &[],
+            true,
+            repo,
+            0,
+        )
+        .with_status(
+            "git",
+            &["rev-parse", "--quiet", "--verify", &format!("{sha_a}^2")],
+            &[],
+            true,
+            repo,
+            1,
+        )
+        .with_status(
+            "git",
+            &["rev-parse", "--quiet", "--verify", &format!("{sha_b}^2")],
+            &[],
+            true,
+            repo,
+            1,
+        )
+        .with_output("git", &["rev-parse", "--short", sha_a], repo, "aaaaaaa\n")
+        .with_output(
+            "git",
+            &["show", "--format=%B", "--no-patch", sha_a],
+            repo,
+            "subject\n",
+        )
+        .with_status(
+            "bash",
+            &["--norc", "--noprofile", "-n", "-c", "true"],
+            &[],
+            true,
+            repo,
+            0,
+        )
+        .with_status(
+            "git",
+            &["rev-parse", "--quiet", "--verify", &format!("{sha_a}^")],
+            &[],
+            true,
+            repo,
+            0,
+        )
+}
+
+fn start_rebase_failure_runner(
+    repo: &Path,
+    sha_a: &str,
+    sha_b: &str,
+    seq_editor: &str,
+) -> ScriptedRunner {
+    start_multi_commit_runner_base(repo, sha_a, sha_b)
+        .with_output("git", &["rev-parse", "--short", sha_a], repo, "aaaaaaa\n")
+        .with_output("git", &["rev-parse", "--short", sha_b], repo, "bbbbbbb\n")
+        .with_status(
+            "git",
+            &[
+                "rebase",
+                "--empty",
+                "drop",
+                "--interactive",
+                "--no-autosquash",
+                "--no-autostash",
+                "--no-rebase-merges",
+                "--no-stat",
+                "--quiet",
+                "--reschedule-failed-exec",
+                &format!("{sha_a}^"),
+            ],
+            &[("GIT_EDITOR", "false"), ("GIT_SEQUENCE_EDITOR", seq_editor)],
+            false,
+            repo,
+            1,
+        )
+}
+
+fn start_single_head_runner(repo: &Path, sha: &str, tree: &str, diff_stat: &str) -> ScriptedRunner {
+    with_start_gate_result(
+        start_single_head_validation_runner(repo, sha)
+            .with_output("git", &["rev-parse", "--short", sha], repo, "aaaaaaa\n")
+            .with_output(
+                "git",
+                &["show", "--format=%B", "--no-patch", sha],
+                repo,
+                "subject\n",
+            ),
+        repo,
+        "true",
+        0,
+        "",
+        "",
+    )
+    .with_status(
+        "git",
+        &["rev-parse", "--quiet", "--verify", &format!("{sha}^")],
+        &[],
+        true,
+        repo,
+        0,
+    )
+    .with_output(
+        "git",
+        &["rev-parse", concat!("HEAD^", "{", "tree", "}")],
+        repo,
+        &format!("{tree}\n"),
+    )
+    .with_status("git", &["reset", "--quiet", "HEAD~1"], &[], false, repo, 0)
+    .with_output("git", &["diff", "--stat"], repo, diff_stat)
+    .with_output(
+        "git",
+        &["ls-files", "--others", "--exclude-standard"],
+        repo,
+        "",
+    )
+    .with_output("git", &["diff", "--stat"], repo, diff_stat)
+    .with_output(
+        "git",
+        &["rev-parse", "--show-toplevel"],
+        repo,
+        &format!("{}\n", repo.display()),
+    )
+}
+
+fn start_single_head_root_runner(
+    repo: &Path,
+    sha: &str,
+    synthetic_root: &str,
+    tree: &str,
+    diff_stat: &str,
+    reset_code: i32,
+) -> ScriptedRunner {
+    with_start_gate_result(
+        start_single_head_validation_runner(repo, sha)
+            .with_output("git", &["rev-parse", "--short", sha], repo, "aaaaaaa\n")
+            .with_output(
+                "git",
+                &["show", "--format=%B", "--no-patch", sha],
+                repo,
+                "subject\n",
+            ),
+        repo,
+        "true",
+        0,
+        "",
+        "",
+    )
+    .with_status(
+        "git",
+        &["rev-parse", "--quiet", "--verify", &format!("{sha}^")],
+        &[],
+        true,
+        repo,
+        1,
+    )
+    .with_output(
+        "git",
+        &["rev-parse", concat!("HEAD^", "{", "tree", "}")],
+        repo,
+        &format!("{tree}\n"),
+    )
+    .with_output(
+        "git",
+        &[
+            "commit-tree",
+            "4b825dc642cb6eb9a060e54bf8d69288fbee4904",
+            "-m",
+            "empty",
+        ],
+        repo,
+        &format!("{synthetic_root}\n"),
+    )
+    .with_status(
+        "git",
+        &["reset", "--quiet", synthetic_root],
+        &[],
+        false,
+        repo,
+        reset_code,
+    )
+    .with_output("git", &["diff", "--stat"], repo, diff_stat)
+    .with_output(
+        "git",
+        &["ls-files", "--others", "--exclude-standard"],
+        repo,
+        "",
+    )
+    .with_output("git", &["diff", "--stat"], repo, diff_stat)
+    .with_output(
+        "git",
+        &["rev-parse", "--show-toplevel"],
+        repo,
+        &format!("{}\n", repo.display()),
+    )
+}
