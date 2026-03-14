@@ -549,3 +549,175 @@ pub(in crate::git_sequence_editor) fn build_requested_actions(
 
     Ok(out)
 }
+
+/// Builds factor-session insertions keyed by the todo SHA to modify.
+#[expect(
+    clippy::single_call_fn,
+    reason = "factor insertion validation stays centralized in one rewrite pre-pass"
+)]
+pub(in crate::git_sequence_editor) fn build_factor_insertions(
+    cli: &Cli,
+    todo_shas: &BTreeSet<TodoSha>,
+) -> Result<BTreeMap<TodoSha, FactorInsertion>, TodoError> {
+    let has_factor_args = !cli.factor_target().is_empty()
+        || !cli.factor_preflight().is_empty()
+        || !cli.factor_begin().is_empty();
+    if !has_factor_args {
+        return Ok(BTreeMap::new());
+    }
+    if cli.factor_target().is_empty()
+        || cli.factor_preflight().is_empty()
+        || cli.factor_begin().is_empty()
+    {
+        return Err(TodoError::InvalidFactorArguments {
+            message: "factor-target, factor-preflight, and factor-begin must all be provided"
+                .to_owned(),
+        });
+    }
+    let expected_len = cli.factor_target().len();
+    if cli.factor_preflight().len() != expected_len || cli.factor_begin().len() != expected_len {
+        return Err(TodoError::InvalidFactorArguments {
+            message: "factor-target, factor-preflight, and factor-begin counts must match"
+                .to_owned(),
+        });
+    }
+    match validate_no_duplicates(RequestedActionKind::Edit, cli.factor_target()) {
+        Ok(()) => {}
+        Err(err) => return Err(err),
+    }
+
+    let mut out = BTreeMap::<TodoSha, FactorInsertion>::new();
+    for ((target, preflight), begin) in cli
+        .factor_target()
+        .iter()
+        .zip(cli.factor_preflight())
+        .zip(cli.factor_begin())
+    {
+        let resolved = match resolve_requested_sha(target.as_str(), todo_shas) {
+            Ok(resolved) => resolved,
+            Err(err) => return Err(err),
+        };
+        if out
+            .insert(
+                resolved.clone(),
+                FactorInsertion {
+                    begin_command: begin.clone(),
+                    preflight_command: preflight.clone(),
+                },
+            )
+            .is_some()
+        {
+            return Err(TodoError::DuplicateRequestedSha {
+                sha: resolved.as_str().to_owned(),
+            });
+        }
+    }
+
+    Ok(out)
+}
+
+/// Rewrites todo content and returns structured rewrite output.
+#[cfg(test)]
+pub(in crate::git_sequence_editor) fn rewrite_todo(
+    content: &str,
+    requested: &BTreeMap<TodoSha, Action>,
+) -> RewriteTodoResult {
+    rewrite_todo_with_factor(content, requested, &BTreeMap::new())
+}
+
+/// Rewrites todo content and returns structured rewrite output.
+#[cfg_attr(
+    not(test),
+    expect(
+        clippy::single_call_fn,
+        reason = "single rewrite pass keeps todo transformation deterministic"
+    )
+)]
+pub(in crate::git_sequence_editor) fn rewrite_todo_with_factor(
+    content: &str,
+    requested: &BTreeMap<TodoSha, Action>,
+    factor_insertions: &BTreeMap<TodoSha, FactorInsertion>,
+) -> RewriteTodoResult {
+    let mut warnings = Vec::<String>::new();
+    let mut output = String::with_capacity(content.len());
+
+    for line in content.lines() {
+        let Some(sha) = parse_todo_sha(line) else {
+            output.push_str(line);
+            output.push('\n');
+            continue;
+        };
+
+        let requested_action = requested.get(sha);
+        let factor_insertion_for_sha = factor_insertions.get(sha);
+
+        if requested_action.is_none() {
+            output.push_str(line);
+            output.push('\n');
+            append_factor_insertion(&mut output, factor_insertion_for_sha);
+            continue;
+        }
+        let Some(requested_action_for_sha) = requested_action else {
+            continue;
+        };
+
+        let target_action = requested_action_for_sha.as_str();
+        let target_kind = match *requested_action_for_sha {
+            Action::Drop => TodoActionKind::Drop,
+            Action::Edit => TodoActionKind::Edit,
+            Action::Pick => TodoActionKind::Pick,
+        };
+
+        if parse_todo_action(line).and_then(TodoActionKind::parse) == Some(target_kind) {
+            warnings.push(format!(
+                "WARN: {sha}: requested '{target_action}', but todo already had '{target_action}'"
+            ));
+            output.push_str(line);
+            output.push('\n');
+            continue;
+        }
+
+        // Replace only the first action token and preserve the rest of the line as-is.
+        let trimmed = line.trim_start();
+        let old_action = trimmed.split_whitespace().next().unwrap_or_default();
+        let rewritten = line.replacen(old_action, target_action, 1);
+        output.push_str(&rewritten);
+        output.push('\n');
+        append_factor_insertion(&mut output, factor_insertion_for_sha);
+    }
+
+    RewriteTodoResult { output, warnings }
+}
+
+/// Appends the hidden factor rebase exec sequence for one targeted commit.
+fn append_factor_insertion(output: &mut String, factor_insertion: Option<&FactorInsertion>) {
+    if let Some(insertion) = factor_insertion {
+        output.push_str("exec ");
+        output.push_str(insertion.preflight_command().as_str());
+        output.push('\n');
+        output.push_str("exec ");
+        output.push_str(insertion.begin_command().as_str());
+        output.push('\n');
+        output.push_str("break\n");
+    }
+}
+
+/// Returns the set of commit tokens present in the todo file.
+#[cfg_attr(
+    not(test),
+    expect(
+        clippy::single_call_fn,
+        reason = "single extractor keeps SHA token collection behavior centralized"
+    )
+)]
+pub(in crate::git_sequence_editor) fn todo_shas_in(content: &str) -> BTreeSet<TodoSha> {
+    let mut set = BTreeSet::<TodoSha>::new();
+    for sha_tok in content
+        .lines()
+        .filter_map(parse_todo_sha)
+        .filter_map(|todo_sha| TodoSha::new(todo_sha).ok())
+    {
+        let _inserted: bool = set.insert(sha_tok);
+    }
+    set
+}
