@@ -675,3 +675,193 @@ impl Io for MatchingOutlnFailureIo<'_> {
         self.out("\n")
     }
 }
+
+struct DefaultOutlnFailingIo;
+
+impl Io for DefaultOutlnFailingIo {
+    fn err(&self, _text: &str) -> io::Result<()> {
+        Ok(())
+    }
+
+    fn errln(&self, line: &str) -> io::Result<()> {
+        self.err(line)?;
+        self.err("\n")
+    }
+
+    fn out(&self, text: &str) -> io::Result<()> {
+        if text == "io fail" {
+            Err(io::Error::other("io fail"))
+        } else {
+            Ok(())
+        }
+    }
+
+    fn outln(&self, line: &str) -> io::Result<()> {
+        self.out(line)?;
+        self.out("\n")
+    }
+}
+
+#[derive(Default)]
+struct DefaultLineIo {
+    stderr: Mutex<String>,
+    stdout: Mutex<String>,
+}
+
+impl DefaultLineIo {
+    fn stderr(&self) -> String {
+        self.stderr.lock().or_abort("stderr lock").clone()
+    }
+
+    fn stdout(&self) -> String {
+        self.stdout.lock().or_abort("stdout lock").clone()
+    }
+}
+
+impl Io for DefaultLineIo {
+    fn err(&self, text: &str) -> io::Result<()> {
+        self.stderr
+            .lock()
+            .map_err(|_err| io::Error::other("stderr lock poisoned"))?
+            .push_str(text);
+        Ok(())
+    }
+
+    fn errln(&self, line: &str) -> io::Result<()> {
+        self.err(&format!("{line}\n"))
+    }
+
+    fn out(&self, text: &str) -> io::Result<()> {
+        self.stdout
+            .lock()
+            .map_err(|_err| io::Error::other("stdout lock poisoned"))?
+            .push_str(text);
+        Ok(())
+    }
+
+    fn outln(&self, line: &str) -> io::Result<()> {
+        self.out(&format!("{line}\n"))
+    }
+}
+
+struct DefaultErrlnFailingIo;
+
+impl Io for DefaultErrlnFailingIo {
+    fn err(&self, text: &str) -> io::Result<()> {
+        if text == "io fail" {
+            Err(io::Error::other("io fail"))
+        } else {
+            Ok(())
+        }
+    }
+
+    fn errln(&self, line: &str) -> io::Result<()> {
+        self.err(line)?;
+        self.err("\n")
+    }
+
+    fn out(&self, _text: &str) -> io::Result<()> {
+        Ok(())
+    }
+
+    fn outln(&self, line: &str) -> io::Result<()> {
+        self.out(line)?;
+        self.out("\n")
+    }
+}
+
+#[derive(Default)]
+struct FailingEnv {
+    message: &'static str,
+}
+
+impl Env for FailingEnv {
+    fn current_dir(&self) -> io::Result<PathBuf> {
+        Err(io::Error::other(self.message))
+    }
+
+    fn current_exe(&self) -> io::Result<PathBuf> {
+        Err(io::Error::other(self.message))
+    }
+
+    fn var_os(&self, _key: &str) -> Option<OsString> {
+        None
+    }
+}
+
+struct RootExeEnv {
+    cwd: PathBuf,
+}
+
+impl Env for RootExeEnv {
+    fn current_dir(&self) -> io::Result<PathBuf> {
+        Ok(self.cwd.clone())
+    }
+
+    fn current_exe(&self) -> io::Result<PathBuf> {
+        Ok(PathBuf::from("/"))
+    }
+
+    fn var_os(&self, _key: &str) -> Option<OsString> {
+        None
+    }
+}
+
+struct ExeFailingEnv {
+    cwd: PathBuf,
+}
+
+impl Env for ExeFailingEnv {
+    fn current_dir(&self) -> io::Result<PathBuf> {
+        Ok(self.cwd.clone())
+    }
+
+    fn current_exe(&self) -> io::Result<PathBuf> {
+        Err(io::Error::other("no exe"))
+    }
+
+    fn var_os(&self, _key: &str) -> Option<OsString> {
+        None
+    }
+}
+
+struct FailingRemoveDirAllFs;
+
+impl Fs for FailingRemoveDirAllFs {
+    fs_delegate!(canonicalize);
+    fs_delegate!(create_dir_all);
+    fs_delegate!(exists);
+    fs_delegate!(is_dir);
+    fs_delegate!(read_to_string);
+
+    fn remove_dir_all(&self, _path: &Path) -> io::Result<()> {
+        Err(io::Error::other("injected remove_dir_all failure"))
+    }
+
+    fs_delegate!(remove_file);
+    fs_delegate!(write_string);
+}
+
+struct StickyStatePathFs;
+
+impl Fs for StickyStatePathFs {
+    fs_delegate!(canonicalize);
+    fs_delegate!(create_dir_all);
+
+    fn exists(&self, _path: &Path) -> bool {
+        true
+    }
+
+    fn is_dir(&self, _path: &Path) -> bool {
+        true
+    }
+
+    fs_delegate!(read_to_string);
+
+    fn remove_dir_all(&self, _path: &Path) -> io::Result<()> {
+        Ok(())
+    }
+
+    fs_delegate!(remove_file);
+    fs_delegate!(write_string);
+}
