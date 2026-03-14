@@ -1,5 +1,7 @@
 use core::fmt::Write as _;
 use core::str::FromStr;
+use std::fs::{self, OpenOptions};
+use std::io::Write as _;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::*;
@@ -413,4 +415,161 @@ pub(in crate::git_factor) fn collect_repo_snapshot(ctx: &Ctx<'_>) -> RepoSnapsho
     snapshot.unstaged_paths = unstaged;
     snapshot.untracked_paths = untracked;
     snapshot
+}
+
+/// Appends snapshot fields to a JSON object under the given key prefix.
+pub(in crate::git_factor) fn push_snapshot_fields(
+    buf: &mut String,
+    prefix: &str,
+    snapshot: &RepoSnapshot,
+) {
+    macro_rules! push_opt {
+        ($suffix:literal, $value:expr) => {{
+            push_json_opt_str(buf, &format!("{prefix}_{}", $suffix), $value);
+            buf.push(',');
+        }};
+    }
+    macro_rules! push_array {
+        ($suffix:literal, $value:expr) => {{
+            push_json_array(buf, &format!("{prefix}_{}", $suffix), $value);
+            buf.push(',');
+        }};
+    }
+    let factor_current_index_text = snapshot.factor_current_index.map(|value| value.to_string());
+    let factor_split_count_text = snapshot.factor_split_count.map(|value| value.to_string());
+    let rebase_msgnum_text = snapshot
+        .rebase_msgnum
+        .map(|value| value.as_u32().to_string());
+    let rebase_end_text = snapshot.rebase_end.map(|value| value.as_u32().to_string());
+
+    push_opt!("head", snapshot.head.as_deref());
+    push_opt!("head_tree", snapshot.head_tree.as_deref());
+    push_opt!("git_dir", snapshot.git_dir.as_deref());
+    push_opt!("toplevel", snapshot.toplevel.as_deref());
+    push_array!("staged_paths", &snapshot.staged_paths);
+    push_array!("unstaged_paths", &snapshot.unstaged_paths);
+    push_array!("untracked_paths", &snapshot.untracked_paths);
+    push_opt!("factor_current_index", factor_current_index_text.as_deref());
+    push_opt!("factor_split_count", factor_split_count_text.as_deref());
+    push_opt!(
+        "factor_requires_rebase",
+        snapshot
+            .factor_requires_rebase
+            .map(|value| if value.as_bool() { "true" } else { "false" })
+    );
+    push_opt!(
+        "factor_expected_tree",
+        snapshot.factor_expected_tree.as_deref()
+    );
+    push_opt!(
+        "factor_current_commit",
+        snapshot.factor_current_commit.as_deref()
+    );
+    push_opt!(
+        "rebase_state",
+        snapshot.rebase_state.map(|state| match state {
+            RebaseState::Apply => REBASE_APPLY_DIR,
+            RebaseState::Merge => REBASE_MERGE_DIR,
+        })
+    );
+    push_opt!("rebase_msgnum", rebase_msgnum_text.as_deref());
+    push_opt!("rebase_end", rebase_end_text.as_deref());
+    push_opt!("rebase_todo_head", snapshot.rebase_todo_head.as_deref());
+    push_json_opt_str(
+        buf,
+        &format!("{prefix}_rebase_done_tail"),
+        snapshot.rebase_done_tail.as_deref(),
+    );
+}
+
+/// Appends one newline-terminated JSONL trace record to disk.
+pub(in crate::git_factor) fn append_trace_line(ctx: &Ctx<'_>, line: &str) {
+    let Some(path) = trace_log_path(ctx) else {
+        return;
+    };
+    if let Some(parent) = path.parent() {
+        drop(fs::create_dir_all(parent));
+    }
+    let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) else {
+        return;
+    };
+    drop(file.write_all(line.as_bytes()));
+    drop(file.write_all(b"\n"));
+}
+
+/// Emits a structured trace record for a spawned process execution.
+pub(in crate::git_factor) fn trace_process_command(ctx: &Ctx<'_>, trace: ProcessTrace<'_>) {
+    let mut line = String::new();
+    line.push('{');
+    push_json_u64(&mut line, "ts_unix_ms", now_unix_ms());
+    line.push(',');
+    push_json_str(&mut line, "event", "process");
+    line.push(',');
+    push_json_str(&mut line, "mode", trace.mode);
+    line.push(',');
+    push_json_str(&mut line, "bin", trace.bin);
+    line.push(',');
+    let arg_values = trace
+        .args
+        .iter()
+        .map(|arg| (*arg).to_owned())
+        .collect::<Vec<String>>();
+    push_json_array(&mut line, "args", &arg_values);
+    line.push(',');
+    let mut env_arr = Vec::with_capacity(trace.envs.len());
+    for &(key, value) in trace.envs {
+        env_arr.push(format!("{key}={value}"));
+    }
+    push_json_array(&mut line, "env", &env_arr);
+    line.push(',');
+    push_json_bool(&mut line, "quiet", trace.quiet);
+    line.push(',');
+    push_json_bool(&mut line, "spawned", trace.spawned);
+    line.push(',');
+    push_json_u64(&mut line, "duration_ms", trace.duration_ms);
+    line.push(',');
+    if let Some(code) = trace.exit_code {
+        let _wrote_i32 = write!(line, "\"{}\":{}", json_escape("exit_code"), code).is_ok();
+    } else {
+        push_json_opt_str(&mut line, "exit_code", None);
+    }
+    line.push(',');
+    push_json_opt_str(
+        &mut line,
+        "stdout",
+        trace.stdout.map(trace_text_limit).as_deref(),
+    );
+    line.push(',');
+    push_json_opt_str(
+        &mut line,
+        "stderr",
+        trace.stderr.map(trace_text_limit).as_deref(),
+    );
+    line.push(',');
+    push_snapshot_fields(&mut line, "before", trace.before);
+    line.push(',');
+    push_snapshot_fields(&mut line, "after", trace.after);
+    line.push('}');
+    append_trace_line(ctx, &line);
+}
+
+/// Writes a note event into the trace log, if tracing is enabled.
+pub(in crate::git_factor) fn trace_note(ctx: &Ctx<'_>, event: &str, fields: &[(&str, &str)]) {
+    if trace_log_path(ctx).is_none() {
+        return;
+    }
+    let snapshot = collect_repo_snapshot(ctx);
+    let mut line = String::new();
+    line.push('{');
+    push_json_u64(&mut line, "ts_unix_ms", now_unix_ms());
+    line.push(',');
+    push_json_str(&mut line, "event", event);
+    line.push(',');
+    push_snapshot_fields(&mut line, "state", &snapshot);
+    for &(key, value) in fields {
+        line.push(',');
+        push_json_str(&mut line, key, value);
+    }
+    line.push('}');
+    append_trace_line(ctx, &line);
 }
