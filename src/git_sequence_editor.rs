@@ -400,6 +400,10 @@ mod tests {
     };
     use super::*;
 
+    const EXIT_OK: i32 = 0;
+    const EXIT_ERROR: i32 = 1;
+    const EXIT_USAGE: i32 = 2;
+
     #[test]
     fn rewrite_todo_rewrites_action_for_matching_sha_only() {
         let requested = BTreeMap::from([(TodoSha::new("def5678").or_abort(""), Action::Edit)]);
@@ -765,4 +769,132 @@ exec echo hi\n\
         );
     }
 
+    #[test]
+    fn main_entry_with_args_vec_returns_usage_for_parse_errors() {
+        let code = super::main_entry_with_args_vec(vec![OsString::from("git-sequence-editor")]);
+        assert_eq!(code, EXIT_USAGE);
+    }
+
+    #[test]
+    fn main_entry_with_args_vec_returns_usage_for_unknown_flag() {
+        let code = super::main_entry_with_args_vec(vec![
+            OsString::from("git-sequence-editor"),
+            OsString::from("--unknown"),
+        ]);
+        assert_eq!(code, EXIT_USAGE);
+    }
+
+    #[test]
+    fn main_entry_with_args_vec_returns_ok_for_help() {
+        let code = super::main_entry_with_args_vec(vec![
+            OsString::from("git-sequence-editor"),
+            OsString::from("--help"),
+        ]);
+        assert_eq!(code, EXIT_OK);
+    }
+
+    #[test]
+    fn main_entry_with_args_vec_returns_ok_for_version() {
+        let code = super::main_entry_with_args_vec(vec![
+            OsString::from("git-sequence-editor"),
+            OsString::from("--version"),
+        ]);
+        assert_eq!(code, EXIT_OK);
+    }
+
+    #[test]
+    fn main_entry_with_args_vec_returns_error_for_runtime_failures() {
+        let code = super::main_entry_with_args_vec(vec![
+            OsString::from("git-sequence-editor"),
+            OsString::from("missing-todo"),
+        ]);
+        assert_eq!(code, EXIT_ERROR);
+    }
+
+    #[test]
+    fn main_entry_with_args_vec_returns_ok_for_valid_invocation() {
+        let _guard = lock_write_fail_point_test();
+        let dir = TempDir::new().or_abort("");
+        let todo_path = dir.path().join("git-rebase-todo");
+        fs::write(&todo_path, "pick abc1234 first\n").or_abort("");
+        set_write_fail_point(WriteFailPoint::None);
+
+        let code = super::main_entry_with_args_vec(vec![
+            OsString::from("git-sequence-editor"),
+            todo_path.into_os_string(),
+        ]);
+        assert_eq!(code, EXIT_OK);
+    }
+
+    #[test]
+    fn main_entry_reports_usage_under_test_harness_arguments() {
+        assert_eq!(super::main_entry(), EXIT_USAGE);
+    }
+
+    #[test]
+    fn run_for_cli_returns_error_for_invalid_todo_action() {
+        let _guard = lock_write_fail_point_test();
+        set_write_fail_point(WriteFailPoint::None);
+        let dir = TempDir::new().or_abort("");
+        let todo_path = dir.path().join("git-rebase-todo");
+        fs::write(&todo_path, "unknown abc1234 first\n").or_abort("");
+        let cli = Cli::for_tests(vec![], vec![], todo_path, vec![]);
+        let err = run_for(&cli).err_or_abort("").to_string();
+        assert_eq!(err, "unsupported todo action: unknown".to_owned());
+    }
+
+    #[test]
+    fn option_or_abort_returns_inner_value() {
+        assert_eq!(Some("value").or_abort(""), "value");
+    }
+
+    #[test]
+    fn result_or_abort_returns_inner_value() {
+        let value: Result<&str, &str> = Ok("value");
+        assert_eq!(value.or_abort(""), "value");
+    }
+
+    #[test]
+    fn result_err_or_abort_returns_inner_error() {
+        let value: Result<&str, &str> = Err("error");
+        assert_eq!(value.err_or_abort(""), "error");
+    }
+
+    #[test]
+    fn proptest_run_unit_suite() {
+        build_requested_actions_rejects_cross_action_duplicates();
+        is_hex40_accepts_uppercase_hex();
+        main_entry_reports_usage_under_test_harness_arguments();
+        main_entry_with_args_vec_returns_error_for_runtime_failures();
+        main_entry_with_args_vec_returns_ok_for_help();
+        main_entry_with_args_vec_returns_ok_for_valid_invocation();
+        main_entry_with_args_vec_returns_ok_for_version();
+        main_entry_with_args_vec_returns_usage_for_parse_errors();
+        main_entry_with_args_vec_returns_usage_for_unknown_flag();
+        option_or_abort_returns_inner_value();
+        result_err_or_abort_returns_inner_error();
+        result_or_abort_returns_inner_value();
+        parse_todo_action_ignores_blank_and_comment_lines();
+        parse_todo_sha_accepts_short_commit_actions();
+        parse_todo_sha_ignores_blank_comment_and_non_commit_actions();
+        resolve_requested_sha_requires_exact_match_for_short_sha();
+        rewrite_todo_rewrites_action_for_matching_sha_only();
+        rewrite_todo_warns_when_action_is_already_set();
+        run_for_cli_returns_error_for_invalid_todo_action();
+        run_for_propagates_atomic_write_errors();
+        run_for_propagates_requested_action_resolution_errors();
+        run_for_reports_missing_todo_file();
+        run_for_writes_idempotent_action_warnings();
+        todo_sha_new_rejects_empty_token();
+        validate_no_duplicates_rejects_duplicates();
+        validate_todo_format_accepts_supported_actions();
+        validate_todo_format_rejects_unsupported_actions();
+        write_file_atomic_rejects_paths_without_parent_or_file_name();
+        write_file_atomic_reports_exhausted_temp_names();
+        write_file_atomic_reports_parent_directory_open_and_sync_failpoints();
+        write_file_atomic_reports_rename_failure_for_directory_target();
+        write_file_atomic_reports_temp_create_failure_for_missing_parent();
+        write_file_atomic_reports_write_and_sync_failpoints();
+        write_file_atomic_skips_existing_temp_slot_and_succeeds();
+    }
 }
