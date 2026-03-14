@@ -137,3 +137,302 @@ pub(in crate::git_factor) fn print_session_started(
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::env;
+    use std::ffi::OsString;
+    use std::os::unix::process::ExitStatusExt as _;
+    use std::process::Output;
+    use std::sync::{Mutex, PoisonError};
+    use tempfile::TempDir;
+
+    struct HintEnv {
+        claude_code: bool,
+        cwd: PathBuf,
+    }
+
+    impl Env for HintEnv {
+        fn current_dir(&self) -> io::Result<PathBuf> {
+            Ok(self.cwd.clone())
+        }
+
+        fn current_exe(&self) -> io::Result<PathBuf> {
+            env::current_exe()
+        }
+
+        fn var_os(&self, key: &str) -> Option<OsString> {
+            if key == "CLAUDECODE" && self.claude_code {
+                return Some(OsString::from("1"));
+            }
+            None
+        }
+    }
+
+    #[derive(Default)]
+    struct BufferIo {
+        stderr: Mutex<String>,
+        stdout: Mutex<String>,
+    }
+
+    impl BufferIo {
+        fn stdout(&self) -> String {
+            self.stdout
+                .lock()
+                .or_abort("stdout lock should not be poisoned")
+                .clone()
+        }
+    }
+
+    impl Io for BufferIo {
+        fn err(&self, text: &str) -> io::Result<()> {
+            self.stderr
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .push_str(text);
+            Ok(())
+        }
+
+        fn errln(&self, line: &str) -> io::Result<()> {
+            let mut stderr = self.stderr.lock().unwrap_or_else(PoisonError::into_inner);
+            stderr.push_str(line);
+            stderr.push('\n');
+            drop(stderr);
+            Ok(())
+        }
+
+        fn out(&self, text: &str) -> io::Result<()> {
+            self.stdout
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .push_str(text);
+            Ok(())
+        }
+
+        fn outln(&self, line: &str) -> io::Result<()> {
+            self.out(&format!("{line}\n"))
+        }
+    }
+
+    #[derive(Copy, Clone, Eq, PartialEq)]
+    enum HintFailure {
+        DiffStat,
+        TopLevel,
+        Untracked,
+    }
+
+    struct HintRunner {
+        diff_stat: String,
+        fail_on: Option<HintFailure>,
+        toplevel: PathBuf,
+        untracked: String,
+    }
+
+    impl Runner for HintRunner {
+        fn output(&self, _bin: &str, args: &[&str], _cwd: &Path) -> io::Result<Output> {
+            if args == ["diff", "--stat"] && self.fail_on == Some(HintFailure::DiffStat) {
+                return Err(io::Error::other("forced diff failure"));
+            }
+            if args == ["ls-files", "--others", "--exclude-standard"]
+                && self.fail_on == Some(HintFailure::Untracked)
+            {
+                return Err(io::Error::other("forced untracked failure"));
+            }
+            if args == ["rev-parse", "--show-toplevel"]
+                && self.fail_on == Some(HintFailure::TopLevel)
+            {
+                return Err(io::Error::other("forced show-toplevel failure"));
+            }
+            let stdout = match *args {
+                ["diff", "--stat"] => self.diff_stat.as_bytes().to_vec(),
+                ["ls-files", "--others", "--exclude-standard"] => {
+                    self.untracked.as_bytes().to_vec()
+                }
+                ["rev-parse", "--show-toplevel"] => {
+                    format!("{}\n", self.toplevel.display()).into_bytes()
+                }
+                _ => {
+                    return Err(io::Error::other(format!(
+                        "unexpected args: {}",
+                        args.join(" ")
+                    )));
+                }
+            };
+
+            Ok(Output {
+                status: ExitStatus::from_raw(0),
+                stdout,
+                stderr: Vec::new(),
+            })
+        }
+
+        fn status(
+            &self,
+            _bin: &str,
+            _args: &[&str],
+            _envs: &[(&str, &str)],
+            _quiet: bool,
+            _cwd: &Path,
+        ) -> io::Result<ExitStatus> {
+            Ok(ExitStatus::from_raw(0))
+        }
+    }
+
+    struct FailOnExactTextIo {
+        text: String,
+    }
+
+    impl Io for FailOnExactTextIo {
+        fn err(&self, _text: &str) -> io::Result<()> {
+            Ok(())
+        }
+
+        fn errln(&self, line: &str) -> io::Result<()> {
+            self.err(&format!("{line}\n"))
+        }
+
+        fn out(&self, text: &str) -> io::Result<()> {
+            if text == self.text {
+                Err(io::Error::other("io fail"))
+            } else {
+                Ok(())
+            }
+        }
+
+        fn outln(&self, line: &str) -> io::Result<()> {
+            self.out(line)?;
+            self.out("\n")
+        }
+    }
+
+    fn git_command_message(error: &FactorError) -> Option<String> {
+        if let &FactorError::GitCommand(_) = error {
+            return error
+                .to_string()
+                .strip_prefix("git command failed: ")
+                .map(str::to_owned);
+        }
+        None
+    }
+
+    #[test]
+    fn io_helpers_cover_buffer_and_error_extractor_paths() {
+        let buffer = BufferIo::default();
+        buffer.err("warn").or_abort("buffer err");
+        buffer.errln("note").or_abort("buffer errln");
+        buffer.out("ok").or_abort("buffer out");
+        buffer.outln("done").or_abort("buffer outln");
+
+        let stderr = buffer
+            .stderr
+            .lock()
+            .or_abort("stderr lock should not be poisoned")
+            .clone();
+        assert_eq!(stderr, "warnnote\n");
+        assert_eq!(buffer.stdout(), "okdone\n");
+
+        let fail_io = FailOnExactTextIo {
+            text: "trigger".to_owned(),
+        };
+        fail_io.errln("ignored").or_abort("fail io errln");
+        let out_err = fail_io
+            .out("trigger")
+            .err_or_abort("exact text should fail");
+        assert_eq!(out_err.to_string(), "io fail");
+        let outln_err = fail_io
+            .outln("trigger")
+            .err_or_abort("exact line should fail");
+        assert_eq!(outln_err.to_string(), "io fail");
+
+        assert!(git_command_message(&FactorError::NoActiveSession).is_none());
+    }
+
+    #[test]
+    fn print_hints_in_includes_reference_and_claude_guidance() {
+        let dir = TempDir::new().or_abort("tempdir");
+        let references_dir = dir.path().join("references");
+        fs::create_dir_all(&references_dir).or_abort("create references dir");
+        let rust_reference = references_dir.join("rust.md");
+        fs::write(&rust_reference, "# rust\n").or_abort("write rust reference");
+
+        let runner = HintRunner {
+            diff_stat: " file.txt | 1 +\n 1 file changed, 1 insertion(+)\n".to_owned(),
+            untracked: String::new(),
+            toplevel: dir.path().to_path_buf(),
+            fail_on: None,
+        };
+        let io = BufferIo::default();
+        let env = HintEnv {
+            cwd: dir.path().to_path_buf(),
+            claude_code: true,
+        };
+        assert_eq!(
+            env.current_dir().or_abort("hint env cwd"),
+            dir.path().to_path_buf()
+        );
+        let exe = env.current_exe().or_abort("hint env current_exe");
+        assert!(exe.is_absolute(), "current_exe should be absolute: {exe:?}");
+        assert_eq!(env.var_os("CLAUDECODE"), Some(OsString::from("1")));
+        assert!(env.var_os("OTHER_ENV").is_none());
+        io.err("note").or_abort("write stderr");
+        let ctx = Ctx {
+            runner: &runner,
+            cwd: dir.path().to_path_buf(),
+            io: &io,
+            env: &env,
+            fs: &REAL_FS,
+        };
+
+        print_hints_in(&ctx).or_abort("print_hints_in should succeed");
+        let stdout = io.stdout();
+        assert!(stdout.contains("HINTS:"), "stdout: {stdout}");
+        assert!(stdout.contains("REMAINING:"), "stdout: {stdout}");
+        assert!(
+            stdout.contains("1 file changed, 1 insertion(+)"),
+            "stdout: {stdout}"
+        );
+        assert!(
+            stdout.contains(&format!("REFERENCE: {}", rust_reference.display())),
+            "stdout: {stdout}"
+        );
+        assert!(stdout.contains("<claude>"), "stdout: {stdout}");
+        assert!(
+            stdout.contains("ONLY use git-factor --continue"),
+            "stdout: {stdout}"
+        );
+    }
+
+    #[test]
+    fn print_hints_in_omits_remaining_when_diff_stat_is_empty() {
+        let dir = TempDir::new().or_abort("tempdir");
+        let runner = HintRunner {
+            diff_stat: String::new(),
+            untracked: String::new(),
+            toplevel: dir.path().to_path_buf(),
+            fail_on: None,
+        };
+        let io = BufferIo::default();
+        let env = HintEnv {
+            cwd: dir.path().to_path_buf(),
+            claude_code: false,
+        };
+        let ctx = Ctx {
+            runner: &runner,
+            cwd: dir.path().to_path_buf(),
+            io: &io,
+            env: &env,
+            fs: &REAL_FS,
+        };
+
+        print_hints_in(&ctx).or_abort("print_hints_in should succeed");
+        let stdout = io.stdout();
+        assert!(stdout.contains("HINTS:"), "stdout: {stdout}");
+        assert!(!stdout.contains("REMAINING:"), "stdout: {stdout}");
+        assert!(
+            stdout.contains("RECOVERY: git factor --abort"),
+            "stdout: {stdout}"
+        );
+    }
+
+}
