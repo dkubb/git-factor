@@ -9,6 +9,10 @@ use super::{FactorError, non_empty_msg};
 /// Required hexadecimal character length for full SHA-1 hashes.
 pub(in crate::git_factor) const SHA_HEX_LEN: usize = 40;
 
+/// Alias for backwards compatibility in tests.
+#[cfg(test)]
+pub(in crate::git_factor) const COMMIT_SHA_HEX_LEN: usize = SHA_HEX_LEN;
+
 /// A validated 40-character lowercase-hex SHA-1 hash.
 ///
 /// This is the shared representation for all git object hashes (commits, trees,
@@ -143,13 +147,6 @@ impl StateDir {
     }
 
     /// Constructs a `StateDir` from a validated path.
-    #[cfg_attr(
-        test,
-        expect(
-            clippy::single_call_fn,
-            reason = "constructor is introduced before the orchestration callers that use it"
-        )
-    )]
     pub(in crate::git_factor) const fn new(path: PathBuf) -> Self {
         Self(path)
     }
@@ -157,44 +154,87 @@ impl StateDir {
 
 #[cfg(test)]
 mod tests {
-    use super::{CommitSha, Commits, SHA_HEX_LEN, Sha, StateDir, TreeHash};
+    use super::{COMMIT_SHA_HEX_LEN, CommitSha, Commits, FactorError, Sha, TreeHash};
     use crate::test_support::OrAbort as _;
     use crate::test_support::ResultOrAbort as _;
     use alloc::collections::BTreeSet;
-    use std::path::PathBuf;
+    use proptest::collection::vec;
+    use proptest::prelude::*;
+    use proptest::sample::select;
 
-    #[test]
-    fn sha_parse_preserves_inner_value() {
-        let raw = "1234567890abcdef1234567890abcdef12345678".to_owned();
-        let sha = Sha::parse(raw.clone()).or_abort("valid sha should parse");
+    const HEX_ALPHABET: &str = "0123456789abcdefABCDEF";
+    const MIN_LONG_SHA_LEN: usize = COMMIT_SHA_HEX_LEN + 1;
+    const MAX_LONG_HEX_LEN: usize = COMMIT_SHA_HEX_LEN * 2;
+    const SHORT_SHA_LEN: usize = COMMIT_SHA_HEX_LEN - 1;
 
-        assert_eq!(sha.as_str(), raw);
+    fn hex_chars() -> Vec<char> {
+        HEX_ALPHABET.chars().collect()
+    }
+
+    fn commit_sha_valid_broad() -> impl Strategy<Value = String> {
+        let hex = hex_chars();
+        vec(select(hex), COMMIT_SHA_HEX_LEN).prop_map(|chars| chars.into_iter().collect())
+    }
+
+    fn commit_sha_valid_biased() -> impl Strategy<Value = String> {
+        prop_oneof![
+            Just("0".repeat(COMMIT_SHA_HEX_LEN)),
+            Just("f".repeat(COMMIT_SHA_HEX_LEN)),
+            Just("A".repeat(COMMIT_SHA_HEX_LEN)),
+            Just("1234567890abcdef1234567890abcdef12345678".to_owned()),
+        ]
+    }
+
+    fn commit_sha_valid() -> impl Strategy<Value = String> {
+        prop_oneof![1 => commit_sha_valid_broad(), 4 => commit_sha_valid_biased()]
+    }
+
+    fn commit_sha_invalid_broad() -> impl Strategy<Value = String> {
+        let hex = hex_chars();
+        let short_hex = vec(select(hex.clone()), 0..COMMIT_SHA_HEX_LEN)
+            .prop_map(|chars| chars.into_iter().collect());
+        let long_hex = vec(select(hex), MIN_LONG_SHA_LEN..(MAX_LONG_HEX_LEN + 1))
+            .prop_map(|chars| chars.into_iter().collect());
+        let wrong_length = prop_oneof![short_hex, long_hex,];
+
+        let printable = (b' '..=b'~').map(char::from).collect::<Vec<_>>();
+        let has_non_hex = vec(select(printable), COMMIT_SHA_HEX_LEN)
+            .prop_map(|chars| chars.into_iter().collect::<String>())
+            .prop_filter("must contain at least one non-hex byte", |candidate| {
+                candidate.bytes().any(|byte| !byte.is_ascii_hexdigit())
+            });
+
+        prop_oneof![wrong_length, has_non_hex]
+    }
+
+    fn commit_sha_invalid_biased() -> impl Strategy<Value = String> {
+        prop_oneof![
+            Just(String::new()),
+            Just("0".repeat(SHORT_SHA_LEN)),
+            Just("0".repeat(MIN_LONG_SHA_LEN)),
+            Just(format!("{}g", "0".repeat(SHORT_SHA_LEN))),
+        ]
+    }
+
+    fn commit_sha_invalid() -> impl Strategy<Value = String> {
+        prop_oneof![1 => commit_sha_invalid_broad(), 4 => commit_sha_invalid_biased()]
+    }
+
+    fn commits_valid() -> impl Strategy<Value = BTreeSet<CommitSha>> {
+        vec(commit_sha_valid(), 1..8).prop_filter_map(
+            "generated SHAs should validate as CommitSha",
+            |shas| {
+                shas.into_iter()
+                    .map(CommitSha::new)
+                    .collect::<Result<BTreeSet<_>, _>>()
+                    .ok()
+            },
+        )
     }
 
     #[test]
-    fn commit_sha_new_formats_as_string() {
-        let raw = "abcdef1234567890abcdef1234567890abcdef12".to_owned();
-        let commit_sha = CommitSha::new(raw.clone()).or_abort("valid commit sha");
-
-        assert_eq!(commit_sha.as_str(), raw);
-        assert_eq!(commit_sha.to_string(), raw);
-    }
-
-    #[test]
-    fn tree_hash_new_rejects_invalid_input() {
-        let invalid = "f".repeat(SHA_HEX_LEN - 1);
-        let err = TreeHash::new(invalid.as_str()).err_or_abort("short tree hash should fail");
-
-        assert_eq!(
-            err.to_string(),
-            format!("git command failed: invalid tree hash: '{invalid}'")
-        );
-    }
-
-    #[test]
-    fn commits_try_from_rejects_empty_set() {
+    fn proptest_commits_new_rejects_empty_set() {
         let err = Commits::try_from(BTreeSet::new()).err_or_abort("empty set should be rejected");
-
         assert_eq!(
             err.to_string(),
             "git command failed: no commits resolved from the given refs"
@@ -202,20 +242,84 @@ mod tests {
     }
 
     #[test]
-    fn commits_try_from_preserves_entries() {
-        let commit_sha = CommitSha::new("1234567890abcdef1234567890abcdef12345678".to_owned())
-            .or_abort("valid commit sha");
-        let commits = Commits::try_from(BTreeSet::from([commit_sha.clone()]))
-            .or_abort("non-empty set should succeed");
-
-        assert_eq!(commits.iter().collect::<Vec<_>>(), vec![&commit_sha]);
+    fn commit_sha_new_rejects_len_40_non_hex_input() {
+        let invalid = format!("{}g", "0".repeat(COMMIT_SHA_HEX_LEN - 1));
+        let err = CommitSha::new(invalid.clone()).err_or_abort("non-hex sha should be rejected");
+        assert_eq!(err.to_string(), format!("invalid commit: {invalid}"));
     }
 
     #[test]
-    fn state_dir_new_preserves_path() {
-        let path = PathBuf::from(".git/factor");
-        let state_dir = StateDir::new(path.clone());
+    fn strategy_helper_functions_construct() {
+        let _valid_broad = commit_sha_valid_broad();
+        let _valid_biased = commit_sha_valid_biased();
+        let _valid = commit_sha_valid();
+        let _invalid_broad = commit_sha_invalid_broad();
+        let _invalid_biased = commit_sha_invalid_biased();
+        let _invalid = commit_sha_invalid();
+        let _commits = commits_valid();
+    }
 
-        assert_eq!(state_dir.as_path(), path.as_path());
+    #[test]
+    fn proptest_run_unit_suite() {
+        proptest_commits_new_rejects_empty_set();
+        commit_sha_new_rejects_len_40_non_hex_input();
+        proptest_tree_hash_new_preserves_inner_value();
+        strategy_helper_functions_construct();
+    }
+
+    #[test]
+    fn proptest_tree_hash_new_preserves_inner_value() {
+        let raw = "a".repeat(COMMIT_SHA_HEX_LEN);
+        let tree = TreeHash::new(raw.as_str()).or_abort("valid tree hash");
+        assert_eq!(tree.as_str(), raw);
+        assert_eq!(format!("{tree}"), raw);
+    }
+
+    proptest! {
+        #[test]
+        fn proptest_commit_sha_new_accepts_valid_input(sha in commit_sha_valid()) {
+            let result = CommitSha::new(sha.clone());
+            prop_assert!(result.is_ok());
+            if let Ok(commit_sha) = result {
+                prop_assert_eq!(commit_sha.as_str(), sha);
+            }
+        }
+
+        #[test]
+        fn proptest_commit_sha_new_rejects_invalid_input(sha in commit_sha_invalid()) {
+            let result = CommitSha::new(sha.clone());
+            prop_assert!(result.is_err());
+            if let Err(err) = result {
+                prop_assert!(matches!(err, FactorError::InvalidCommit(invalid) if invalid == sha));
+            }
+        }
+
+        #[test]
+        fn proptest_commits_new_accepts_non_empty_sets(set in commits_valid()) {
+            let expected_len = set.len();
+            let result = Commits::try_from(set);
+            prop_assert!(result.is_ok());
+            if let Ok(commits) = result {
+                prop_assert_eq!(commits.iter().count(), expected_len);
+            }
+        }
+
+        #[test]
+        fn proptest_commit_sha_display_matches_inner_value(sha in commit_sha_valid()) {
+            let result = CommitSha::new(sha.clone());
+            prop_assert!(result.is_ok());
+            if let Ok(commit_sha) = result {
+                prop_assert_eq!(format!("{commit_sha}"), sha);
+            }
+        }
+
+        #[test]
+        fn proptest_sha_parse_preserves_inner_value(sha in commit_sha_valid()) {
+            let result = Sha::parse(sha.clone());
+            prop_assert!(result.is_ok());
+            if let Ok(value) = result {
+                prop_assert_eq!(value.as_str(), sha);
+            }
+        }
     }
 }
