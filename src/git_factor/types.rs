@@ -147,6 +147,13 @@ impl StateDir {
     }
 
     /// Constructs a `StateDir` from a validated path.
+    #[cfg_attr(
+        not(test),
+        expect(
+            clippy::single_call_fn,
+            reason = "smart constructor keeps the path wrapper explicit at call sites"
+        )
+    )]
     pub(in crate::git_factor) const fn new(path: PathBuf) -> Self {
         Self(path)
     }

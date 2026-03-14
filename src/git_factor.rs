@@ -27,6 +27,9 @@ mod ctx;
 /// Error model for `git-factor`.
 #[path = "git_factor/error.rs"]
 mod error;
+/// Shared utility helpers for `git-factor`.
+#[path = "git_factor/helpers.rs"]
+mod helpers;
 /// State file read/write operations for `git-factor`.
 #[path = "git_factor/state.rs"]
 mod state;
@@ -54,6 +57,7 @@ use self::cli::Cli;
 )]
 use self::ctx::*;
 use self::error::{FactorError, non_empty_msg};
+use self::helpers::error_to_exit;
 use self::state::{read_state, read_state_bool_or_default, read_state_parsed};
 use self::types::StateDir;
 
@@ -593,29 +597,6 @@ fn cmd_status_in(ctx: &Ctx<'_>) -> Result<i32, FactorError> {
     ctx.outln(&format!("IS_ROOT: {is_root}"))?;
 
     Ok(EXIT_OK)
-}
-
-/// Maps a `FactorError` to an `(exit_code, message)` tuple.
-fn error_to_exit(error: &FactorError) -> (i32, String) {
-    let code = match error {
-        &FactorError::ActiveRebase
-        | &FactorError::ActiveSession
-        | &FactorError::NoActiveSession
-        | &FactorError::NoStagedChanges
-        | &FactorError::Usage(_) => EXIT_USAGE,
-        &FactorError::GitDir(_)
-        | &FactorError::InvalidCommit(_)
-        | &FactorError::InvalidExecSyntax(_)
-        | &FactorError::MergeCommit(_)
-        | &FactorError::NotAncestor(_)
-        | &FactorError::NotGitRepo => EXIT_DATAERR,
-        &FactorError::ExecFailed { .. } | &FactorError::TreeHashMismatch { .. } => EXIT_TEMPFAIL,
-        &FactorError::GitCommand(_)
-        | &FactorError::StateRead(_)
-        | &FactorError::StateWrite(_)
-        | &FactorError::Io(_) => EXIT_SOFTWARE,
-    };
-    (code, error.to_string())
 }
 
 /// Runs the `git-factor` CLI entrypoint.
