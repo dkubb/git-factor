@@ -13,7 +13,7 @@ mod support;
 #[cfg(test)]
 mod tests {
     use std::env;
-    use std::ffi::OsString;
+    use std::ffi::{OsStr, OsString};
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::process::{self, Command};
@@ -23,6 +23,7 @@ mod tests {
     use tempfile::TempDir;
 
     use super::support::*;
+    const FULL_SHA_LEN: usize = 40;
 
     #[derive(Clone, Debug, Eq, PartialEq)]
     struct GitSequenceEditorExpectation {
@@ -125,6 +126,19 @@ mod tests {
         expectation.assert();
     }
 
+    fn run_editor_with_prefixed_path(
+        args: &[&str],
+        expected: GitSequenceEditorExpectation,
+        path_env: OsString,
+        todo_path: &Path,
+    ) {
+        let mut expectation = expected;
+        expectation.args = args.iter().map(OsString::from).collect();
+        expectation.path_env = Some(path_env);
+        expectation.todo_path = todo_path.to_path_buf();
+        expectation.assert();
+    }
+
     #[test]
     fn help_flag_exits_success_and_writes_stdout() {
         Command::new(assert_cmd::cargo::cargo_bin!("git-sequence-editor"))
@@ -223,6 +237,198 @@ exec echo hi\n\
             },
             &path,
         );
+    }
+
+    #[test]
+    fn rejects_duplicate_pick_flags_after_sha_normalization() {
+        let dir = TempDir::new().or_abort();
+        let path = dir.path().join("todo");
+        fs::write(&path, "pick abc1234 first\n").or_abort();
+
+        let long_sha = "a".repeat(FULL_SHA_LEN);
+        let resolved = format!("abc1234{}", "0".repeat(33));
+        let steps = vec![GitWrapperStep {
+            args: vec![
+                "rev-parse".to_owned(),
+                "--verify".to_owned(),
+                "--quiet".to_owned(),
+                format!("{long_sha}^{{commit}}"),
+            ],
+            stdout: format!("{resolved}\n"),
+            stderr: String::new(),
+            exit_code: 0,
+        }];
+        let (wrap_dir, wrap_bin, count_file) = make_ordered_git_wrapper(&steps);
+
+        let original_path = env::var_os("PATH").or_abort();
+        let prefixed_path = {
+            let mut joined = OsString::new();
+            joined.push(wrap_bin.as_os_str());
+            joined.push(OsStr::new(":"));
+            joined.push(original_path);
+            joined
+        };
+
+        run_editor_with_prefixed_path(
+            &["--pick", "abc1234", "--pick", long_sha.as_str()],
+            GitSequenceEditorExpectation {
+                code: EXIT_FAILURE,
+                ordered_git_replay: Some(OrderedGitReplayExpectation::from_count_file(
+                    count_file,
+                    steps.len(),
+                )),
+                stderr: "sha specified multiple times: abc1234\n".to_owned(),
+                todo_content: Some("pick abc1234 first\n".to_owned()),
+                ..Default::default()
+            },
+            prefixed_path,
+            &path,
+        );
+        let _keep_alive = wrap_dir;
+    }
+
+    #[test]
+    fn rejects_duplicate_edit_flags_after_sha_normalization() {
+        let dir = TempDir::new().or_abort();
+        let path = dir.path().join("todo");
+        fs::write(&path, "pick abc1234 first\n").or_abort();
+
+        let long_sha = "a".repeat(FULL_SHA_LEN);
+        let resolved = format!("abc1234{}", "0".repeat(33));
+        let steps = vec![GitWrapperStep {
+            args: vec![
+                "rev-parse".to_owned(),
+                "--verify".to_owned(),
+                "--quiet".to_owned(),
+                format!("{long_sha}^{{commit}}"),
+            ],
+            stdout: format!("{resolved}\n"),
+            stderr: String::new(),
+            exit_code: 0,
+        }];
+        let (wrap_dir, wrap_bin, count_file) = make_ordered_git_wrapper(&steps);
+
+        let original_path = env::var_os("PATH").or_abort();
+        let prefixed_path = {
+            let mut joined = OsString::new();
+            joined.push(wrap_bin.as_os_str());
+            joined.push(OsStr::new(":"));
+            joined.push(original_path);
+            joined
+        };
+
+        run_editor_with_prefixed_path(
+            &["--edit", "abc1234", "--edit", long_sha.as_str()],
+            GitSequenceEditorExpectation {
+                code: EXIT_FAILURE,
+                ordered_git_replay: Some(OrderedGitReplayExpectation::from_count_file(
+                    count_file,
+                    steps.len(),
+                )),
+                stderr: "sha specified multiple times: abc1234\n".to_owned(),
+                todo_content: Some("pick abc1234 first\n".to_owned()),
+                ..Default::default()
+            },
+            prefixed_path,
+            &path,
+        );
+        let _keep_alive = wrap_dir;
+    }
+
+    #[test]
+    fn rejects_duplicate_pick_flags_after_sha_normalization_via_resolved_long_sha() {
+        let dir = TempDir::new().or_abort();
+        let path = dir.path().join("todo");
+        fs::write(&path, "pick abc1234 first\n").or_abort();
+
+        let requested = "a".repeat(FULL_SHA_LEN);
+        let resolved = format!("abc1234{}", "0".repeat(33));
+        let steps = vec![GitWrapperStep {
+            args: vec![
+                "rev-parse".to_owned(),
+                "--verify".to_owned(),
+                "--quiet".to_owned(),
+                format!("{requested}^{{commit}}"),
+            ],
+            stdout: format!("{resolved}\n"),
+            stderr: String::new(),
+            exit_code: 0,
+        }];
+
+        let (wrap_dir, wrap_bin, count_file) = make_ordered_git_wrapper(&steps);
+        let original_path = env::var_os("PATH").or_abort();
+        let prefixed_path = {
+            let mut joined = OsString::new();
+            joined.push(wrap_bin.as_os_str());
+            joined.push(OsStr::new(":"));
+            joined.push(original_path);
+            joined
+        };
+
+        run_editor_with_prefixed_path(
+            &["--pick", "abc1234", "--pick", requested.as_str()],
+            GitSequenceEditorExpectation {
+                code: EXIT_FAILURE,
+                ordered_git_replay: Some(OrderedGitReplayExpectation::from_count_file(
+                    count_file,
+                    steps.len(),
+                )),
+                stderr: "sha specified multiple times: abc1234\n".to_owned(),
+                todo_content: Some("pick abc1234 first\n".to_owned()),
+                ..Default::default()
+            },
+            prefixed_path,
+            &path,
+        );
+        let _keep_alive = wrap_dir;
+    }
+
+    #[test]
+    fn rejects_duplicate_drop_flags_after_sha_normalization() {
+        let dir = TempDir::new().or_abort();
+        let path = dir.path().join("todo");
+        fs::write(&path, "pick abc1234 first\n").or_abort();
+
+        let long_sha = "a".repeat(FULL_SHA_LEN);
+        let resolved = format!("abc1234{}", "0".repeat(33));
+        let steps = vec![GitWrapperStep {
+            args: vec![
+                "rev-parse".to_owned(),
+                "--verify".to_owned(),
+                "--quiet".to_owned(),
+                format!("{long_sha}^{{commit}}"),
+            ],
+            stdout: format!("{resolved}\n"),
+            stderr: String::new(),
+            exit_code: 0,
+        }];
+        let (wrap_dir, wrap_bin, count_file) = make_ordered_git_wrapper(&steps);
+
+        let original_path = env::var_os("PATH").or_abort();
+        let prefixed_path = {
+            let mut joined = OsString::new();
+            joined.push(wrap_bin.as_os_str());
+            joined.push(OsStr::new(":"));
+            joined.push(original_path);
+            joined
+        };
+
+        run_editor_with_prefixed_path(
+            &["--drop", "abc1234", "--drop", long_sha.as_str()],
+            GitSequenceEditorExpectation {
+                code: EXIT_FAILURE,
+                ordered_git_replay: Some(OrderedGitReplayExpectation::from_count_file(
+                    count_file,
+                    steps.len(),
+                )),
+                stderr: "sha specified multiple times: abc1234\n".to_owned(),
+                todo_content: Some("pick abc1234 first\n".to_owned()),
+                ..Default::default()
+            },
+            prefixed_path,
+            &path,
+        );
+        let _keep_alive = wrap_dir;
     }
 
     #[test]
