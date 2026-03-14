@@ -3121,3 +3121,158 @@ fn cmd_start_range_ref_inserts_shas_and_starts_multi_commit_session() {
 }
 
 #[test]
+fn main_entry_with_prints_error_when_ctx_cannot_be_built() {
+    let io = TestIo::default();
+    let env = FailingEnv { message: "no cwd" };
+    let ctx = ctx_from_parts(&env, &REAL_RUNNER, &io, &REAL_FS);
+
+    let code = main_entry_with_vec(&io, ctx, vec![OsString::from("git-factor")]);
+
+    assert_eq!(code, EXIT_SOFTWARE);
+    assert_eq!(
+        io.stderr(),
+        "git command failed: cannot resolve cwd: no cwd\n"
+    );
+    assert_eq!(io.stdout(), "");
+}
+
+#[test]
+fn cmd_abort_reports_rebase_hint_when_rebase_still_active() {
+    let dir = TempDir::new().or_abort("tempdir");
+    let repo = dir.path();
+    let git_dir = repo.join(".git");
+    let state_dir = git_dir.join("factor");
+    fs::create_dir_all(&state_dir).or_abort("create factor dir");
+    fs::create_dir_all(git_dir.join("rebase-merge")).or_abort("create rebase-merge");
+
+    let sha = "a".repeat(SHA_LEN);
+    fs::write(state_dir.join("commits"), format!("{sha}\n")).or_abort("write commits");
+    fs::write(state_dir.join("current_index"), "0\n").or_abort("write current index");
+
+    let runner = ScriptedRunner::default()
+        .with_output("git", &["rev-parse", "--git-dir"], repo, ".git\n")
+        .with_status(
+            "git",
+            &["reset", "--hard", "--quiet", &sha],
+            &[],
+            false,
+            repo,
+            0,
+        )
+        .with_status(
+            "git",
+            &["clean", "--force", "--quiet", "-d"],
+            &[],
+            false,
+            repo,
+            0,
+        );
+    let io = TestIo::default();
+    let env = TestEnv {
+        cwd: repo.to_path_buf(),
+    };
+    let ctx = Ctx {
+        runner: &runner,
+        cwd: repo.to_path_buf(),
+        io: &io,
+        env: &env,
+        fs: &REAL_FS,
+    };
+
+    let code = cmd_abort_in(&ctx).or_abort("abort should succeed");
+
+    assert_eq!(code, EXIT_OK);
+    assert_eq!(
+        io.stdout(),
+        concat!(
+            "FACTOR: Session aborted for current commit step.\n",
+            "FACTOR: Rebase still active. To abort full rebase, run: git rebase --abort\n"
+        )
+    );
+    assert!(io.stderr().is_empty(), "stderr should be empty");
+    assert!(
+        !state_dir.exists(),
+        "factor state dir should be removed after abort"
+    );
+}
+
+#[test]
+fn cmd_status_reports_no_active_session_message() {
+    let dir = TempDir::new().or_abort("tempdir");
+    let repo = dir.path();
+    let git_dir = repo.join(".git");
+    fs::create_dir_all(&git_dir).or_abort("create git dir");
+
+    let runner = with_git_dir_outputs(ScriptedRunner::default(), repo, 8);
+    let io = TestIo::default();
+    let env = TestEnv {
+        cwd: repo.to_path_buf(),
+    };
+    let ctx = Ctx {
+        runner: &runner,
+        cwd: repo.to_path_buf(),
+        io: &io,
+        env: &env,
+        fs: &REAL_FS,
+    };
+
+    let code = cmd_status_in(&ctx).or_abort("status should succeed");
+
+    assert_eq!(code, EXIT_OK);
+    assert_eq!(io.stdout(), "FACTOR: No active session.\n");
+    assert!(io.stderr().is_empty(), "stderr should be empty");
+}
+
+#[test]
+fn cmd_status_reports_active_session_fields() {
+    let dir = TempDir::new().or_abort("tempdir");
+    let repo = dir.path();
+    let git_dir = repo.join(".git");
+    let state_dir = git_dir.join("factor");
+    fs::create_dir_all(&state_dir).or_abort("create factor dir");
+    fs::create_dir_all(git_dir.join("rebase-merge")).or_abort("create rebase-merge");
+
+    let sha = "a".repeat(SHA_LEN);
+    fs::write(state_dir.join("commits"), format!("{sha}\n")).or_abort("write commits");
+    fs::write(state_dir.join("current_index"), "0\n").or_abort("write current index");
+    fs::write(state_dir.join("split_count"), "2\n").or_abort("write split count");
+    fs::write(state_dir.join("requires_rebase"), "false\n").or_abort("write requires rebase");
+    fs::write(state_dir.join("is_root"), "true\n").or_abort("write is root");
+
+    let runner = with_git_dir_outputs(ScriptedRunner::default(), repo, 8);
+    let io = TestIo::default();
+    let env = TestEnv {
+        cwd: repo.to_path_buf(),
+    };
+    let ctx = Ctx {
+        runner: &runner,
+        cwd: repo.to_path_buf(),
+        io: &io,
+        env: &env,
+        fs: &REAL_FS,
+    };
+
+    let code = cmd_status_in(&ctx).or_abort("status should succeed");
+
+    assert_eq!(code, EXIT_OK);
+    assert_eq!(
+        io.stdout(),
+        format!(
+            concat!(
+                "FACTOR: Active session.\n",
+                "CURRENT_COMMIT: {}\n",
+                "CURRENT_INDEX: 0\n",
+                "SPLIT_COUNT: 2\n",
+                "PHASE: splitting\n",
+                "REQUIRES_REBASE: false\n",
+                "REBASE_IN_PROGRESS: true\n",
+                "IS_ROOT: true\n"
+            ),
+            sha
+        )
+    );
+    assert!(io.stderr().is_empty(), "stderr should be empty");
+}
+
+
+#[test]
