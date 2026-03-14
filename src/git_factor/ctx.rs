@@ -1,11 +1,90 @@
-use std::fs;
+use std::env;
+use std::ffi::OsString;
+pub(in crate::git_factor) use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-/// Shared filesystem implementation for the real CLI.
+use super::error::FactorError;
+
+/// Shared `Io` for the real CLI.
+pub(in crate::git_factor) static REAL_IO: RealIo = RealIo;
+/// Shared `Env` for the real CLI.
+pub(in crate::git_factor) static REAL_ENV: RealEnv = RealEnv;
+/// Shared `Fs` for the real CLI.
 pub(in crate::git_factor) static REAL_FS: RealFs = RealFs;
 
-/// Filesystem access used by state helpers.
+/// Handles all user-facing IO (stdout/stderr) for the CLI.
+pub(in crate::git_factor) trait Io {
+    /// Writes raw text to stderr.
+    fn err(&self, text: &str) -> io::Result<()>;
+
+    /// Writes a line to stderr.
+    fn errln(&self, line: &str) -> io::Result<()>;
+
+    /// Writes raw text to stdout.
+    fn out(&self, text: &str) -> io::Result<()>;
+
+    /// Writes a line to stdout.
+    fn outln(&self, line: &str) -> io::Result<()>;
+}
+
+/// Production [`Io`] implementation.
+pub(in crate::git_factor) struct RealIo;
+
+impl Io for RealIo {
+    fn err(&self, text: &str) -> io::Result<()> {
+        use io::Write as _;
+        let mut err = io::stderr().lock();
+        err.write_all(text.as_bytes())
+    }
+
+    fn errln(&self, line: &str) -> io::Result<()> {
+        self.err(&format!("{line}\n"))
+    }
+
+    fn out(&self, text: &str) -> io::Result<()> {
+        use io::Write as _;
+        let mut out = io::stdout().lock();
+        out.write_all(text.as_bytes())
+    }
+
+    fn outln(&self, line: &str) -> io::Result<()> {
+        use io::Write as _;
+        let mut out = io::stdout().lock();
+        out.write_all(format!("{line}\n").as_bytes())
+    }
+}
+
+/// Environment access (current directory, current executable, etc.).
+pub(in crate::git_factor) trait Env {
+    /// Returns the current working directory.
+    fn current_dir(&self) -> io::Result<PathBuf>;
+
+    /// Returns the path of the currently running executable.
+    fn current_exe(&self) -> io::Result<PathBuf>;
+
+    /// Returns the value of an environment variable, if present.
+    fn var_os(&self, key: &str) -> Option<OsString>;
+}
+
+/// Production [`Env`] implementation.
+pub(in crate::git_factor) struct RealEnv;
+
+impl Env for RealEnv {
+    fn current_dir(&self) -> io::Result<PathBuf> {
+        env::current_dir()
+    }
+
+    fn current_exe(&self) -> io::Result<PathBuf> {
+        env::current_exe()
+    }
+
+    fn var_os(&self, key: &str) -> Option<OsString> {
+        env::var_os(key)
+    }
+}
+
+/// Filesystem access.
 pub(in crate::git_factor) trait Fs {
     /// Canonicalizes a path.
     fn canonicalize(&self, path: &Path) -> io::Result<PathBuf>;
@@ -69,23 +148,110 @@ impl Fs for RealFs {
     }
 }
 
-/// Execution context for state operations.
+/// Execution context for git-factor operations.
+#[derive(Clone)]
 #[expect(
     clippy::field_scoped_visibility_modifiers,
-    reason = "field must be visible to sibling modules within git_factor"
+    reason = "fields must be visible to sibling modules within git_factor"
 )]
-pub(in crate::git_factor) struct Ctx<'fs> {
+pub(in crate::git_factor) struct Ctx<'ctx> {
+    /// Working directory for command execution.
+    pub(in crate::git_factor) cwd: PathBuf,
+    /// Environment access.
+    pub(in crate::git_factor) env: &'ctx dyn Env,
     /// Filesystem access.
-    pub(in crate::git_factor) fs: &'fs dyn Fs,
+    pub(in crate::git_factor) fs: &'ctx dyn Fs,
+    /// User-facing IO (stdout/stderr).
+    pub(in crate::git_factor) io: &'ctx dyn Io,
+}
+
+impl Ctx<'_> {
+    /// Writes raw text to stderr.
+    pub(in crate::git_factor) fn err(&self, text: &str) -> Result<(), FactorError> {
+        self.io.err(text).map_err(FactorError::Io)
+    }
+
+    /// Writes a line to stderr.
+    pub(in crate::git_factor) fn errln(&self, line: &str) -> Result<(), FactorError> {
+        self.io.errln(line).map_err(FactorError::Io)
+    }
+
+    /// Writes raw text to stdout.
+    pub(in crate::git_factor) fn out(&self, text: &str) -> Result<(), FactorError> {
+        self.io.out(text).map_err(FactorError::Io)
+    }
+
+    /// Writes a line to stdout.
+    pub(in crate::git_factor) fn outln(&self, line: &str) -> Result<(), FactorError> {
+        self.io.outln(line).map_err(FactorError::Io)
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Ctx, REAL_FS};
-    use crate::git_factor::ctx::Fs as _;
+    use super::{Ctx, Env as _, Fs as _, Io as _, REAL_ENV, REAL_FS, REAL_IO};
     use crate::test_support::OrAbort as _;
-    use std::path::Path;
+    use core::cell::RefCell;
+    use std::env;
+    use std::io;
+    use std::path::{Path, PathBuf};
     use tempfile::TempDir;
+
+    #[derive(Default)]
+    struct RecordingIo {
+        err: RefCell<String>,
+        out: RefCell<String>,
+    }
+
+    impl super::Io for RecordingIo {
+        fn err(&self, text: &str) -> io::Result<()> {
+            self.err.borrow_mut().push_str(text);
+            Ok(())
+        }
+
+        fn errln(&self, line: &str) -> io::Result<()> {
+            self.err.borrow_mut().push_str(line);
+            self.err.borrow_mut().push('\n');
+            Ok(())
+        }
+
+        fn out(&self, text: &str) -> io::Result<()> {
+            self.out.borrow_mut().push_str(text);
+            Ok(())
+        }
+
+        fn outln(&self, line: &str) -> io::Result<()> {
+            self.out.borrow_mut().push_str(line);
+            self.out.borrow_mut().push('\n');
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn real_io_accepts_empty_writes() {
+        REAL_IO.out("").or_abort("stdout write should succeed");
+        REAL_IO.err("").or_abort("stderr write should succeed");
+        REAL_IO
+            .outln("")
+            .or_abort("stdout line write should succeed");
+        REAL_IO
+            .errln("")
+            .or_abort("stderr line write should succeed");
+    }
+
+    #[test]
+    fn real_env_reports_process_state() {
+        let cwd = REAL_ENV.current_dir().or_abort("cwd should resolve");
+        assert_eq!(cwd, env::current_dir().or_abort("std cwd should resolve"));
+
+        let current_exe = REAL_ENV
+            .current_exe()
+            .or_abort("current exe should resolve");
+        assert!(current_exe.is_absolute());
+        assert!(current_exe.exists());
+
+        assert_eq!(REAL_ENV.var_os("PATH"), env::var_os("PATH"));
+    }
 
     #[test]
     fn real_fs_supports_directory_and_file_lifecycle() {
@@ -126,19 +292,43 @@ mod tests {
     }
 
     #[test]
-    fn ctx_holds_fs_reference() {
-        let ctx = Ctx { fs: &REAL_FS };
+    fn ctx_carries_runtime_dependencies() {
         let dir = TempDir::new().or_abort("tempdir");
-        let path = dir.path().join("ctx.txt");
+        let ctx = Ctx {
+            cwd: dir.path().to_path_buf(),
+            env: &REAL_ENV,
+            fs: &REAL_FS,
+            io: &REAL_IO,
+        };
 
-        ctx.fs
-            .write_string(&path, "ctx\n")
-            .or_abort("ctx write should succeed");
+        assert_eq!(ctx.cwd, PathBuf::from(dir.path()));
+        assert_eq!(
+            ctx.env.current_dir().or_abort("cwd should resolve"),
+            env::current_dir().or_abort("std cwd should resolve")
+        );
+        assert!(ctx.fs.exists(dir.path()));
+        let _: &dyn super::Io = ctx.io;
+    }
 
-        let content = ctx
-            .fs
-            .read_to_string(&path)
-            .or_abort("ctx read should succeed");
-        assert_eq!(content, "ctx\n");
+    #[test]
+    fn ctx_io_helpers_delegate_to_the_inner_io() {
+        let dir = TempDir::new().or_abort("tempdir");
+        let io = RecordingIo::default();
+        let ctx = Ctx {
+            cwd: dir.path().to_path_buf(),
+            env: &REAL_ENV,
+            fs: &REAL_FS,
+            io: &io,
+        };
+
+        ctx.out("out").or_abort("stdout write should succeed");
+        ctx.outln("line")
+            .or_abort("stdout line write should succeed");
+        ctx.err("err").or_abort("stderr write should succeed");
+        ctx.errln("warn")
+            .or_abort("stderr line write should succeed");
+
+        assert_eq!(io.out.borrow().as_str(), "outline\n");
+        assert_eq!(io.err.borrow().as_str(), "errwarn\n");
     }
 }

@@ -82,15 +82,21 @@ pub(in crate::git_factor) fn write_state(
 
 #[cfg(test)]
 mod tests {
-    use super::super::ctx::REAL_FS;
+    use super::super::ctx::{REAL_ENV, REAL_FS, REAL_IO};
     use super::*;
     use std::fs;
+    use std::path::PathBuf;
 
     use crate::test_support::{OrAbort as _, ResultOrAbort as _};
     use tempfile::TempDir;
 
     fn ctx() -> Ctx<'static> {
-        Ctx { fs: &REAL_FS }
+        Ctx {
+            cwd: PathBuf::from("."),
+            env: &REAL_ENV,
+            fs: &REAL_FS,
+            io: &REAL_IO,
+        }
     }
 
     fn assert_state_read_error(err: &FactorError) {
