@@ -275,4 +275,57 @@ exec echo hi\n\
             &path,
         );
     }
+
+    #[test]
+    fn rejects_contradictory_action_requests() {
+        let dir = TempDir::new().or_abort();
+        let path = dir.path().join("todo");
+        fs::write(&path, "pick abc1234 first\n").or_abort();
+
+        run_editor(
+            &["--pick", "abc1234", "--drop", "abc1234"],
+            GitSequenceEditorExpectation {
+                code: EXIT_FAILURE,
+                stderr: "sha specified multiple times: abc1234\n".to_owned(),
+                ..Default::default()
+            },
+            &path,
+        );
+    }
+
+    #[test]
+    fn rejects_contradictory_pick_and_edit_requests() {
+        let dir = TempDir::new().or_abort();
+        let path = dir.path().join("todo");
+        fs::write(&path, "pick abc1234 first\n").or_abort();
+
+        run_editor(
+            &["--pick", "abc1234", "--edit", "abc1234"],
+            GitSequenceEditorExpectation {
+                code: EXIT_FAILURE,
+                stderr: "sha specified multiple times: abc1234\n".to_owned(),
+                todo_content: Some("pick abc1234 first\n".to_owned()),
+                ..Default::default()
+            },
+            &path,
+        );
+    }
+
+    #[test]
+    fn rejects_contradictory_edit_and_drop_requests() {
+        let dir = TempDir::new().or_abort();
+        let path = dir.path().join("todo");
+        fs::write(&path, "pick abc1234 first\n").or_abort();
+
+        run_editor(
+            &["--edit", "abc1234", "--drop", "abc1234"],
+            GitSequenceEditorExpectation {
+                code: EXIT_FAILURE,
+                stderr: "sha specified multiple times: abc1234\n".to_owned(),
+                todo_content: Some("pick abc1234 first\n".to_owned()),
+                ..Default::default()
+            },
+            &path,
+        );
+    }
 }
