@@ -1339,3 +1339,188 @@ mod proptests {
         ]
     }
 
+    proptest! {
+        #[test]
+        fn proptest_todo_sha_new_accepts_hex_tokens(token in string_regex(format!("[0-9A-Fa-f]{{1,{FULL_HEX_SHA_LEN}}}").as_str()).or_abort("")) {
+            let sha = TodoSha::new(token.as_str()).or_abort("");
+            prop_assert_eq!(sha.as_str(), token);
+        }
+
+        #[test]
+        fn proptest_todo_sha_new_rejects_non_hex_tokens(token in non_whitespace_token()) {
+            prop_assume!(!is_hex_token(token.as_str()));
+
+            let err = TodoSha::new(token.as_str()).err_or_abort("");
+
+            prop_assert_eq!(err.to_string(), format!("invalid todo sha token: {token}"));
+        }
+
+        #[test]
+        fn proptest_is_hex40_accepts_valid_hex(value in hex40_valid()) {
+            prop_assert!(is_hex40(value.as_str()));
+        }
+
+        #[test]
+        fn proptest_is_hex40_rejects_invalid_hex(value in hex40_invalid()) {
+            prop_assert!(!is_hex40(value.as_str()));
+        }
+
+        #[test]
+        fn proptest_parse_todo_action_returns_first_token(indent in indent(), action in action_token(), tail in optional_tail()) {
+            let line = if tail.is_empty() {
+                format!("{indent}{action}")
+            } else {
+                format!("{indent}{action} {tail}")
+            };
+
+            prop_assert_eq!(parse_todo_action(line.as_str()), Some(action.as_str()));
+        }
+
+        #[test]
+        fn proptest_parse_todo_action_ignores_blank_and_comment_lines(indent in indent(), comment in optional_tail()) {
+            let blank = indent.clone();
+            let comment_line = format!("{indent}#{comment}");
+
+            prop_assert_eq!(parse_todo_action(blank.as_str()), None);
+            prop_assert_eq!(parse_todo_action(comment_line.as_str()), None);
+        }
+
+        #[test]
+        fn proptest_parse_todo_sha_extracts_sha_for_commit_actions(action in commit_action(), sha in non_whitespace_token(), tail in optional_tail()) {
+            let line = if tail.is_empty() {
+                format!("{action} {sha}")
+            } else {
+                format!("{action} {sha} {tail}")
+            };
+
+            prop_assert_eq!(parse_todo_sha(line.as_str()), Some(sha.as_str()));
+        }
+
+        #[test]
+        fn proptest_parse_todo_sha_rejects_non_commit_actions(action in non_commit_action(), sha in non_whitespace_token(), tail in optional_tail()) {
+            let line = if tail.is_empty() {
+                format!("{action} {sha}")
+            } else {
+                format!("{action} {sha} {tail}")
+            };
+
+            prop_assert_eq!(parse_todo_sha(line.as_str()), None);
+        }
+
+        #[test]
+        fn proptest_validate_todo_format_accepts_supported_actions(lines in vec((supported_action(), non_whitespace_token(), optional_tail()), 1..16)) {
+            let mut content = String::new();
+            for (action, sha, tail) in lines {
+                if is_commit_action(action.as_str()) {
+                    let commit_sha = if is_hex_token(sha.as_str()) {
+                        sha
+                    } else {
+                        "deadbeef".to_owned()
+                    };
+                    if tail.is_empty() {
+                        content.push_str(format!("{action} {commit_sha}\n").as_str());
+                    } else {
+                        content.push_str(format!("{action} {commit_sha} {tail}\n").as_str());
+                    }
+                } else if tail.is_empty() {
+                    content.push_str(format!("{action}\n").as_str());
+                } else {
+                    content.push_str(format!("{action} {tail}\n").as_str());
+                }
+            }
+
+            prop_assert!(validate_todo_format(content.as_str()).is_ok());
+        }
+
+        #[test]
+        fn proptest_validate_todo_format_rejects_unsupported_actions(suffix in string_regex("[a-z]{0,12}").or_abort("")) {
+            let action = format!("zz{suffix}");
+            let line = format!("{action} abcdef0 message");
+            let err = validate_todo_format(line.as_str()).err_or_abort("");
+
+            prop_assert_eq!(err.to_string(), format!("unsupported todo action: {action}"));
+        }
+
+        #[test]
+        fn proptest_validate_todo_format_rejects_non_hex_commit_sha(action in commit_action(), tail in optional_tail()) {
+            let invalid_sha = "not_hex_sha";
+            let line = if tail.is_empty() {
+                format!("{action} {invalid_sha}")
+            } else {
+                format!("{action} {invalid_sha} {tail}")
+            };
+            let err = validate_todo_format(line.as_str()).err_or_abort("");
+
+            prop_assert_eq!(err.to_string(), format!("invalid todo sha token: {invalid_sha}"));
+        }
+
+        #[test]
+        fn proptest_rewrite_todo_rewrites_only_the_action_token((current, target) in rewrite_change_case(), indent in indent(), sha in string_regex("[0-9a-f]{7,12}").or_abort(""), tail in optional_tail()) {
+            let line = if tail.is_empty() {
+                format!("{indent}{current} {sha}")
+            } else {
+                format!("{indent}{current} {sha} {tail}")
+            };
+            let todo_sha = TodoSha::new(sha.as_str()).or_abort("");
+            let requested = BTreeMap::from([(todo_sha, target)]);
+
+            let (rewritten, warnings) = rewrite_todo(line.as_str(), &requested).into_parts();
+
+            let trimmed = line.trim_start();
+            let indent_len = line
+                .len()
+                .checked_sub(trimmed.len())
+                .or_abort("");
+            let (indent_prefix, rest) = line.split_at(indent_len);
+            let rest_without_action = rest
+                .strip_prefix(current)
+                .or_abort("");
+            let expected = format!("{indent_prefix}{}{rest_without_action}\n", target.as_str());
+
+            prop_assert!(warnings.is_empty());
+            prop_assert_eq!(rewritten, expected);
+        }
+
+        #[test]
+        fn proptest_rewrite_todo_warns_when_action_is_already_requested((current, target) in rewrite_same_case(), indent in indent(), sha in string_regex("[0-9a-f]{7,12}").or_abort(""), tail in optional_tail()) {
+            let line = if tail.is_empty() {
+                format!("{indent}{current} {sha}")
+            } else {
+                format!("{indent}{current} {sha} {tail}")
+            };
+            let todo_sha = TodoSha::new(sha.as_str()).or_abort("");
+            let requested = BTreeMap::from([(todo_sha, target)]);
+            let target_action = target.as_str();
+
+            let (rewritten, warnings) = rewrite_todo(line.as_str(), &requested).into_parts();
+
+            prop_assert_eq!(rewritten, format!("{line}\n"));
+            prop_assert_eq!(
+                warnings,
+                vec![format!(
+                    "WARN: {sha}: requested '{target_action}', but todo already had '{target_action}'"
+                )]
+            );
+        }
+
+        #[test]
+        fn proptest_todo_shas_in_collects_unique_commit_tokens(lines in vec((commit_action(), string_regex("[0-9a-f]{7,12}").or_abort(""), optional_tail()), 1..24)) {
+            let mut content = String::new();
+            let mut expected = BTreeSet::<String>::new();
+            for (action, sha, tail) in lines {
+                let _inserted = expected.insert(sha.clone());
+                if tail.is_empty() {
+                    content.push_str(format!("{action} {sha}\n").as_str());
+                } else {
+                    content.push_str(format!("{action} {sha} {tail}\n").as_str());
+                }
+            }
+
+            let actual = todo_shas_in(content.as_str())
+                .into_iter()
+                .map(|todo_sha| todo_sha.as_str().to_owned())
+                .collect::<BTreeSet<_>>();
+
+            prop_assert_eq!(actual, expected);
+        }
+    }
