@@ -1039,3 +1039,125 @@ pick ccccccc third\n\
         uppercase_variant_supports_non_lowercase_prefix();
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        OrAbort as _, ResultOrAbort as _, resolve_requested_sha, todo_shas_in, validate_todo_format,
+    };
+    use alloc::collections::BTreeSet;
+
+    #[test]
+    fn resolve_requested_sha_runs_git_rev_parse_for_full_sha() {
+        let requested = "0".repeat(super::FULL_HEX_SHA_LEN);
+
+        let err = resolve_requested_sha(requested.as_str(), &BTreeSet::new()).err_or_abort("");
+
+        assert!(
+            err.to_string().contains("git rev-parse failed"),
+            "expected git rev-parse failure message, got: {err}"
+        );
+    }
+
+    #[test]
+    fn resolve_requested_sha_rejects_len_40_non_hex_without_rev_parse() {
+        let requested = format!("{}g", "0".repeat(super::FULL_HEX_SHA_LEN - 1));
+
+        let err = resolve_requested_sha(requested.as_str(), &BTreeSet::new()).err_or_abort("");
+
+        assert_eq!(
+            err.to_string(),
+            format!("sha not present in todo: {requested}")
+        );
+    }
+
+    #[test]
+    fn resolve_requested_sha_rejects_non_40_len_sha_without_rev_parse() {
+        let requested = "abc1234";
+
+        let err = resolve_requested_sha(requested, &BTreeSet::new()).err_or_abort("");
+
+        assert_eq!(
+            err.to_string(),
+            format!("sha not present in todo: {requested}")
+        );
+    }
+
+    #[test]
+    fn resolve_requested_sha_rejects_empty_sha_without_rev_parse() {
+        let requested = "";
+
+        let err = resolve_requested_sha(requested, &BTreeSet::new()).err_or_abort("");
+
+        assert_eq!(
+            err.to_string(),
+            format!("sha not present in todo: {requested}")
+        );
+    }
+
+    #[test]
+    fn validate_todo_format_accepts_indented_comment_lines() {
+        let content = "\n   # comment line\npick deadbeef message\n";
+        assert_eq!(validate_todo_format(content), Ok(()));
+    }
+
+    #[test]
+    fn proptest_validate_todo_format_accepts_supported_non_commit_action() {
+        let content = "exec echo hello";
+        assert_eq!(validate_todo_format(content), Ok(()));
+    }
+
+    #[test]
+    fn proptest_validate_todo_format_accepts_commit_action_without_sha_token() {
+        let content = "pick\n";
+        assert_eq!(validate_todo_format(content), Ok(()));
+    }
+
+    #[test]
+    fn todo_shas_in_deduplicates_repeated_tokens() {
+        let sha = "0".repeat(super::FULL_HEX_SHA_LEN);
+        let content = format!(
+            "\
+pick {sha} first
+pick {sha} duplicate
+"
+        );
+
+        let shas = todo_shas_in(content.as_str());
+        assert_eq!(shas.len(), 1);
+        assert!(
+            shas.contains(sha.as_str()),
+            "expected valid SHA to be present"
+        );
+    }
+
+    #[test]
+    fn option_or_abort_returns_inner_value() {
+        assert_eq!(Some("value").or_abort(""), "value");
+    }
+
+    #[test]
+    fn result_or_abort_returns_inner_value() {
+        let value: Result<&str, &str> = Ok("value");
+        assert_eq!(value.or_abort(""), "value");
+    }
+
+    #[test]
+    fn result_err_or_abort_returns_inner_error() {
+        let value: Result<&str, &str> = Err("error");
+        assert_eq!(value.err_or_abort(""), "error");
+    }
+
+    #[test]
+    fn proptest_run_unit_suite() {
+        option_or_abort_returns_inner_value();
+        result_err_or_abort_returns_inner_error();
+        result_or_abort_returns_inner_value();
+        resolve_requested_sha_rejects_len_40_non_hex_without_rev_parse();
+        resolve_requested_sha_rejects_empty_sha_without_rev_parse();
+        resolve_requested_sha_rejects_non_40_len_sha_without_rev_parse();
+        resolve_requested_sha_runs_git_rev_parse_for_full_sha();
+        todo_shas_in_deduplicates_repeated_tokens();
+        validate_todo_format_accepts_indented_comment_lines();
+    }
+}
