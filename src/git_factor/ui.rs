@@ -562,4 +562,232 @@ mod tests {
         );
     }
 
+    #[test]
+    fn print_hints_in_reports_io_failures_for_reference_and_claude_lines() {
+        let dir = TempDir::new().or_abort("tempdir");
+        let references_dir = dir.path().join("references");
+        fs::create_dir_all(&references_dir).or_abort("create references dir");
+        let rust_reference = references_dir.join("rust.md");
+        fs::write(&rust_reference, "# rust\n").or_abort("write rust reference");
+
+        let runner = HintRunner {
+            diff_stat: " file.txt | 1 +\n 1 file changed, 1 insertion(+)\n".to_owned(),
+            untracked: String::new(),
+            toplevel: dir.path().to_path_buf(),
+            fail_on: None,
+        };
+        let env = HintEnv {
+            cwd: dir.path().to_path_buf(),
+            claude_code: false,
+        };
+        let io_reference = FailOnExactTextIo {
+            text: format!("  REFERENCE: {}", rust_reference.display()),
+        };
+        io_reference.err("stderr").or_abort("err should succeed");
+        let ctx_reference = Ctx {
+            runner: &runner,
+            cwd: dir.path().to_path_buf(),
+            io: &io_reference,
+            env: &env,
+            fs: &REAL_FS,
+        };
+
+        let reference_err =
+            print_hints_in(&ctx_reference).err_or_abort("reference output should fail");
+        assert!(
+            reference_err.to_string().contains("io fail"),
+            "unexpected error: {reference_err:?}"
+        );
+
+        let claude_env = HintEnv {
+            cwd: dir.path().to_path_buf(),
+            claude_code: true,
+        };
+        let io_claude = FailOnExactTextIo {
+            text: "</claude>".to_owned(),
+        };
+        let ctx_claude = Ctx {
+            runner: &runner,
+            cwd: dir.path().to_path_buf(),
+            io: &io_claude,
+            env: &claude_env,
+            fs: &REAL_FS,
+        };
+
+        let claude_err = print_hints_in(&ctx_claude).err_or_abort("claude output should fail");
+        assert!(
+            claude_err.to_string().contains("io fail"),
+            "unexpected error: {claude_err:?}"
+        );
+
+        let toplevel_failure_runner = HintRunner {
+            diff_stat: " file.txt | 1 +\n".to_owned(),
+            untracked: String::new(),
+            toplevel: dir.path().to_path_buf(),
+            fail_on: Some(HintFailure::TopLevel),
+        };
+        let toplevel_ctx = Ctx {
+            runner: &toplevel_failure_runner,
+            cwd: dir.path().to_path_buf(),
+            io: &REAL_IO,
+            env: &env,
+            fs: &REAL_FS,
+        };
+        let toplevel_err = print_hints_in(&toplevel_ctx).err_or_abort("show-toplevel should fail");
+        let toplevel_message = git_command_message(&toplevel_err).or_abort("expected GitCommand");
+        assert!(
+            toplevel_message.contains("forced show-toplevel failure"),
+            "unexpected error: {toplevel_err:?}"
+        );
+    }
+
+    #[test]
+    fn print_session_started_reports_runner_failures() {
+        let dir = TempDir::new().or_abort("tempdir");
+        let started = "FACTOR: Split session started for aaaaaaa.";
+        let env = HintEnv {
+            cwd: dir.path().to_path_buf(),
+            claude_code: false,
+        };
+
+        let diff_failure_runner = HintRunner {
+            diff_stat: String::new(),
+            untracked: String::new(),
+            toplevel: dir.path().to_path_buf(),
+            fail_on: Some(HintFailure::DiffStat),
+        };
+        let diff_ctx = Ctx {
+            runner: &diff_failure_runner,
+            cwd: dir.path().to_path_buf(),
+            io: &REAL_IO,
+            env: &env,
+            fs: &REAL_FS,
+        };
+        let diff_err = print_session_started(&diff_ctx, started, "feat: test")
+            .err_or_abort("diff command should fail");
+        let diff_message = git_command_message(&diff_err).or_abort("expected GitCommand");
+        assert!(
+            diff_message.contains("forced diff failure"),
+            "unexpected error: {diff_err:?}"
+        );
+
+        let untracked_failure_runner = HintRunner {
+            diff_stat: " file.txt | 1 +\n".to_owned(),
+            untracked: String::new(),
+            toplevel: dir.path().to_path_buf(),
+            fail_on: Some(HintFailure::Untracked),
+        };
+        let untracked_ctx = Ctx {
+            runner: &untracked_failure_runner,
+            cwd: dir.path().to_path_buf(),
+            io: &REAL_IO,
+            env: &env,
+            fs: &REAL_FS,
+        };
+        let untracked_err = print_session_started(&untracked_ctx, started, "feat: test")
+            .err_or_abort("untracked command should fail");
+        let untracked_message = git_command_message(&untracked_err).or_abort("expected GitCommand");
+        assert!(
+            untracked_message.contains("forced untracked failure"),
+            "unexpected error: {untracked_err:?}"
+        );
+    }
+
+    #[test]
+    fn print_session_started_reports_output_failures() {
+        let dir = TempDir::new().or_abort("tempdir");
+        let started = "FACTOR: Split session started for aaaaaaa.";
+        let env = HintEnv {
+            claude_code: false,
+            cwd: dir.path().to_path_buf(),
+        };
+
+        let io_runner = HintRunner {
+            diff_stat: " file.txt | 1 +\n".to_owned(),
+            fail_on: None,
+            toplevel: dir.path().to_path_buf(),
+            untracked: "new.txt\n".to_owned(),
+        };
+
+        let stat_line_io = FailOnExactTextIo {
+            text: "  file.txt | 1 +".to_owned(),
+        };
+        let stat_line_ctx = Ctx {
+            runner: &io_runner,
+            cwd: dir.path().to_path_buf(),
+            io: &stat_line_io,
+            env: &env,
+            fs: &REAL_FS,
+        };
+        let stat_line_err = print_session_started(&stat_line_ctx, started, "feat: test")
+            .err_or_abort("stat line should fail");
+        assert!(
+            stat_line_err.to_string().contains("io fail"),
+            "unexpected error: {stat_line_err:?}"
+        );
+
+        let header_io = FailOnExactTextIo {
+            text: "UNTRACKED:".to_owned(),
+        };
+        let header_ctx = Ctx {
+            runner: &io_runner,
+            cwd: dir.path().to_path_buf(),
+            io: &header_io,
+            env: &env,
+            fs: &REAL_FS,
+        };
+        let header_err = print_session_started(&header_ctx, started, "feat: test")
+            .err_or_abort("untracked header should fail");
+        assert!(
+            header_err.to_string().contains("io fail"),
+            "unexpected error: {header_err:?}"
+        );
+
+        let line_io = FailOnExactTextIo {
+            text: "  new.txt".to_owned(),
+        };
+        let line_ctx = Ctx {
+            runner: &io_runner,
+            cwd: dir.path().to_path_buf(),
+            io: &line_io,
+            env: &env,
+            fs: &REAL_FS,
+        };
+        let line_err = print_session_started(&line_ctx, started, "feat: test")
+            .err_or_abort("untracked line should fail");
+        assert!(
+            line_err.to_string().contains("io fail"),
+            "unexpected error: {line_err:?}"
+        );
+
+        let footer_io = FailOnExactTextIo {
+            text: "Run git factor --help for the full workflow guide.".to_owned(),
+        };
+        let footer_ctx = Ctx {
+            runner: &io_runner,
+            cwd: dir.path().to_path_buf(),
+            io: &footer_io,
+            env: &env,
+            fs: &REAL_FS,
+        };
+        let footer_err = print_session_started(&footer_ctx, started, "feat: test")
+            .err_or_abort("footer output should fail");
+        assert!(
+            footer_err.to_string().contains("io fail"),
+            "unexpected error: {footer_err:?}"
+        );
+    }
+
+    #[test]
+    fn proptest_run_non_panicking_unit_suite() {
+        io_helpers_cover_buffer_and_error_extractor_paths();
+        print_hints_in_includes_reference_and_claude_guidance();
+        print_hints_in_omits_remaining_when_diff_stat_is_empty();
+        print_hints_in_reports_io_failures_for_reference_and_claude_lines();
+        print_session_started_reports_advance_guidance();
+        print_session_started_reports_advance_guidance_output_failure();
+        print_session_started_reports_output_failures();
+        print_session_started_reports_runner_failures();
+        print_session_started_reports_single_commit_and_untracked_paths();
+    }
 }
