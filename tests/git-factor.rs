@@ -341,4 +341,166 @@ EXAMPLES:
                 "finish workflow lands in later commits\n".to_owned(),
             ));
     }
+
+    #[test]
+    fn rejects_abort_when_combined_with_finish() {
+        let dir = init_repo();
+        let repo = dir.path();
+
+        Command::new(git_factor_bin())
+            .current_dir(repo)
+            .args(["--abort", "--finish"])
+            .assert()
+            .code(EXIT_USAGE)
+            .stdout(predicate::str::is_empty())
+            .stderr(predicate::str::diff(
+                "--abort cannot be combined with other options\n".to_owned(),
+            ));
+    }
+
+    #[test]
+    fn rejects_abort_when_combined_with_continue() {
+        let dir = init_repo();
+        let repo = dir.path();
+
+        Command::new(git_factor_bin())
+            .current_dir(repo)
+            .args(["--abort", "--continue", "--message", "test: msg"])
+            .assert()
+            .code(EXIT_USAGE)
+            .stdout(predicate::str::is_empty())
+            .stderr(predicate::str::diff(
+                "--abort cannot be combined with other options\n".to_owned(),
+            ));
+    }
+
+    #[test]
+    fn rejects_abort_when_combined_with_exec() {
+        let dir = init_repo();
+        let repo = dir.path();
+
+        Command::new(git_factor_bin())
+            .current_dir(repo)
+            .args(["--abort", "--exec", "true"])
+            .assert()
+            .code(EXIT_USAGE)
+            .stdout(predicate::str::is_empty())
+            .stderr(predicate::str::diff(
+                "--abort cannot be combined with other options\n".to_owned(),
+            ));
+    }
+
+    #[test]
+    fn rejects_abort_when_combined_with_commit() {
+        let dir = init_repo();
+        let repo = dir.path();
+
+        commit_file(repo, "file.txt", "one\n", "chore: base");
+
+        Command::new(git_factor_bin())
+            .current_dir(repo)
+            .args(["--abort", "HEAD"])
+            .assert()
+            .code(EXIT_USAGE)
+            .stdout(predicate::str::is_empty())
+            .stderr(predicate::str::diff(
+                "--abort cannot be combined with other options\n".to_owned(),
+            ));
+    }
+
+    #[test]
+    fn rejects_abort_when_combined_with_status() {
+        let dir = init_repo();
+        let repo = dir.path();
+
+        Command::new(git_factor_bin())
+            .current_dir(repo)
+            .args(["--abort", "--status"])
+            .assert()
+            .code(EXIT_USAGE)
+            .stdout(predicate::str::is_empty())
+            .stderr(predicate::str::diff(
+                "--abort cannot be combined with other options\n".to_owned(),
+            ));
+    }
+
+    #[test]
+    fn rejects_status_when_combined_with_exec() {
+        let dir = init_repo();
+        let repo = dir.path();
+
+        Command::new(git_factor_bin())
+            .current_dir(repo)
+            .args(["--status", "--exec", "true"])
+            .assert()
+            .code(EXIT_USAGE)
+            .stdout(predicate::str::is_empty())
+            .stderr(predicate::str::diff(
+                "--status cannot be combined with other options\n".to_owned(),
+            ));
+    }
+
+    #[test]
+    fn rejects_status_when_combined_with_continue() {
+        let dir = init_repo();
+        let repo = dir.path();
+
+        Command::new(git_factor_bin())
+            .current_dir(repo)
+            .args(["--status", "--continue", "--message", "test: msg"])
+            .assert()
+            .code(EXIT_USAGE)
+            .stdout(predicate::str::is_empty())
+            .stderr(predicate::str::diff(
+                "--status cannot be combined with other options\n".to_owned(),
+            ));
+    }
+
+    #[test]
+    fn rejects_status_when_combined_with_finish() {
+        let dir = init_repo();
+        let repo = dir.path();
+
+        Command::new(git_factor_bin())
+            .current_dir(repo)
+            .args(["--status", "--finish"])
+            .assert()
+            .code(EXIT_USAGE)
+            .stdout(predicate::str::is_empty())
+            .stderr(predicate::str::diff(
+                "--status cannot be combined with other options\n".to_owned(),
+            ));
+    }
+
+    #[test]
+    fn rejects_status_when_combined_with_commit() {
+        let dir = init_repo();
+        let repo = dir.path();
+
+        Command::new(git_factor_bin())
+            .current_dir(repo)
+            .args(["--status", "HEAD"])
+            .assert()
+            .code(EXIT_USAGE)
+            .stdout(predicate::str::is_empty())
+            .stderr(predicate::str::diff(
+                "--status cannot be combined with other options\n".to_owned(),
+            ));
+    }
+
+    #[test]
+    fn rejects_status_when_combined_with_message() {
+        let dir = init_repo();
+        let repo = dir.path();
+
+        Command::new(git_factor_bin())
+            .current_dir(repo)
+            .args(["--status", "--message", "test: message"])
+            .assert()
+            .code(EXIT_USAGE)
+            .stdout(predicate::str::is_empty())
+            .stderr(predicate::str::diff(
+                "--status cannot be combined with other options\n".to_owned(),
+            ));
+    }
 }
