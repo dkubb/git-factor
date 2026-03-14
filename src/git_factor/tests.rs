@@ -1915,3 +1915,237 @@ fn default_outln_success_path_is_reachable_for_coverage() {
 }
 
 #[test]
+fn run_for_rejects_finish_with_continue_usage() {
+    let dir = TempDir::new().or_abort("tempdir");
+    let repo = dir.path();
+    let io = TestIo::default();
+    let env = TestEnv {
+        cwd: repo.to_path_buf(),
+    };
+    let runner = with_git_dir_outputs(ScriptedRunner::default(), repo, 3);
+    let ctx = Ctx {
+        runner: &runner,
+        cwd: repo.to_path_buf(),
+        io: &io,
+        env: &env,
+        fs: &REAL_FS,
+    };
+
+    let err = run_with_args_vec(
+        &ctx,
+        vec![
+            OsString::from("git-factor"),
+            OsString::from("--finish"),
+            OsString::from("--continue"),
+        ],
+    )
+    .err_or_abort("expected usage error");
+    assert_eq!(
+        err.to_string(),
+        "--finish cannot be combined with --continue, --exec, or COMMIT"
+    );
+}
+
+#[test]
+fn run_for_rejects_finish_with_exec_usage() {
+    let dir = TempDir::new().or_abort("tempdir");
+    let repo = dir.path();
+    let io = TestIo::default();
+    let env = TestEnv {
+        cwd: repo.to_path_buf(),
+    };
+    let runner = with_git_dir_outputs(ScriptedRunner::default(), repo, 8);
+    let ctx = Ctx {
+        runner: &runner,
+        cwd: repo.to_path_buf(),
+        io: &io,
+        env: &env,
+        fs: &REAL_FS,
+    };
+
+    let err = run_with_args_vec(
+        &ctx,
+        vec![
+            OsString::from("git-factor"),
+            OsString::from("--finish"),
+            OsString::from("--exec"),
+            OsString::from("true"),
+        ],
+    )
+    .err_or_abort("expected usage error");
+    assert_eq!(
+        err.to_string(),
+        "--finish cannot be combined with --continue, --exec, or COMMIT"
+    );
+}
+
+#[test]
+fn run_for_rejects_finish_with_commit_usage() {
+    let dir = TempDir::new().or_abort("tempdir");
+    let repo = dir.path();
+    let io = TestIo::default();
+    let env = TestEnv {
+        cwd: repo.to_path_buf(),
+    };
+    let runner = with_git_dir_outputs(ScriptedRunner::default(), repo, 8);
+    let ctx = Ctx {
+        runner: &runner,
+        cwd: repo.to_path_buf(),
+        io: &io,
+        env: &env,
+        fs: &REAL_FS,
+    };
+
+    let err = run_with_args_vec(
+        &ctx,
+        vec![
+            OsString::from("git-factor"),
+            OsString::from("--finish"),
+            OsString::from("HEAD"),
+        ],
+    )
+    .err_or_abort("expected usage error");
+    assert_eq!(
+        err.to_string(),
+        "--finish cannot be combined with --continue, --exec, or COMMIT"
+    );
+}
+
+#[test]
+fn cmd_continue_returns_original_exec_error_when_rehydrate_succeeds() {
+    let dir = TempDir::new().or_abort("tempdir");
+    let repo = dir.path();
+    let original = "a".repeat(SHA_LEN);
+    setup_factor_state(
+        repo,
+        &original,
+        "0\n",
+        Some("false\n"),
+        Some(&format!("{}\n", "b".repeat(SHA_LEN))),
+    );
+
+    let idx_tree = format!("{}\n", "c".repeat(SHA_LEN));
+    let base = continue_runner_with_commit(repo, &original, "")
+        .with_output("git", &["write-tree"], repo, &idx_tree)
+        .with_status(
+            "git",
+            &[
+                "cherry-pick",
+                "--no-commit",
+                "--strategy-option",
+                "theirs",
+                original.as_str(),
+            ],
+            &[],
+            false,
+            repo,
+            0,
+        )
+        .with_status("git", &["cherry-pick", "--quit"], &[], false, repo, 0)
+        .with_status("git", &["read-tree", idx_tree.trim()], &[], false, repo, 0);
+    let runner = BashStatusFailureRunner { inner: base };
+    let io = TestIo::default();
+    let env = TestEnv {
+        cwd: repo.to_path_buf(),
+    };
+    let ctx = Ctx {
+        runner: &runner,
+        cwd: repo.to_path_buf(),
+        io: &io,
+        env: &env,
+        fs: &REAL_FS,
+    };
+    let messages = test_messages();
+
+    let err = cmd_continue_in(&ctx, &messages).err_or_abort("expected exec status failure");
+    assert!(
+        err.to_string().contains("forced bash status failure"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn cmd_continue_returns_rehydrate_error_when_exec_status_call_fails() {
+    let dir = TempDir::new().or_abort("tempdir");
+    let repo = dir.path();
+    let original = "a".repeat(SHA_LEN);
+    setup_factor_state(
+        repo,
+        &original,
+        "0\n",
+        Some("false\n"),
+        Some(TREE_EXPECTED_NL),
+    );
+
+    let base = continue_runner_with_commit(repo, &original, "");
+    let runner = BashStatusFailureRunner { inner: base };
+    let io = TestIo::default();
+    let env = TestEnv {
+        cwd: repo.to_path_buf(),
+    };
+    let ctx = Ctx {
+        runner: &runner,
+        cwd: repo.to_path_buf(),
+        io: &io,
+        env: &env,
+        fs: &REAL_FS,
+    };
+    let messages = test_messages();
+
+    let err = cmd_continue_in(&ctx, &messages).err_or_abort("expected rehydrate failure");
+    assert!(
+        matches!(&err, FactorError::GitCommand(msg) if msg.contains("git write-tree") && msg.contains("unexpected output call")),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn validate_not_merge_treats_status_error_as_non_merge() {
+    let dir = TempDir::new().or_abort("tempdir");
+    let repo = dir.path();
+    let runner = ScriptedRunner::default();
+    let io = TestIo::default();
+    let env = TestEnv {
+        cwd: repo.to_path_buf(),
+    };
+    let ctx = Ctx {
+        runner: &runner,
+        cwd: repo.to_path_buf(),
+        io: &io,
+        env: &env,
+        fs: &REAL_FS,
+    };
+    let sha = CommitSha::new("a".repeat(SHA_LEN)).or_abort("valid sha");
+
+    validate_not_merge(&ctx, &sha).or_abort("status errors should be treated as non-merge");
+}
+
+#[test]
+fn validate_not_merge_treats_nonzero_status_as_non_merge() {
+    let dir = TempDir::new().or_abort("tempdir");
+    let repo = dir.path();
+    let sha = CommitSha::new("a".repeat(SHA_LEN)).or_abort("valid sha");
+    let runner = ScriptedRunner::default().with_status(
+        "git",
+        &["rev-parse", "--quiet", "--verify", &format!("{sha}^2")],
+        &[],
+        true,
+        repo,
+        1,
+    );
+    let io = TestIo::default();
+    let env = TestEnv {
+        cwd: repo.to_path_buf(),
+    };
+    let ctx = Ctx {
+        runner: &runner,
+        cwd: repo.to_path_buf(),
+        io: &io,
+        env: &env,
+        fs: &REAL_FS,
+    };
+
+    validate_not_merge(&ctx, &sha).or_abort("nonzero status should be treated as non-merge");
+}
+
+#[test]
