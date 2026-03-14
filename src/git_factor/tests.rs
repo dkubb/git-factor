@@ -3274,5 +3274,103 @@ fn cmd_status_reports_active_session_fields() {
     assert!(io.stderr().is_empty(), "stderr should be empty");
 }
 
+#[test]
+fn advance_to_next_commit_prints_untracked_changes_when_present() {
+    let dir = TempDir::new().or_abort("tempdir");
+    let repo = dir.path();
+    let git_dir = repo.join(".git");
+    fs::create_dir_all(git_dir.join("rebase-merge")).or_abort("create rebase-merge");
+
+    let state_dir = git_dir.join("factor");
+    fs::create_dir_all(&state_dir).or_abort("create factor dir");
+    fs::write(
+        state_dir.join("commits"),
+        format!("{}\n{}\n", "a".repeat(SHA_LEN), "b".repeat(SHA_LEN)),
+    )
+    .or_abort("write commits");
+    fs::write(state_dir.join("current_index"), "0\n").or_abort("write current_index");
+    fs::write(state_dir.join("split_count"), "3\n").or_abort("write split_count");
+
+    let runner = ScriptedRunner::default()
+        .with_output("git", &["rev-parse", "--git-dir"], repo, ".git\n")
+        .with_status(
+            "git",
+            &["rebase", "--continue"],
+            &[("GIT_EDITOR", "false"), ("GIT_SEQUENCE_EDITOR", "false")],
+            false,
+            repo,
+            0,
+        )
+        .with_output("git", &["status", "--porcelain=v1"], repo, "")
+        .with_status("git", &["reset", "--quiet", "HEAD~1"], &[], false, repo, 0)
+        .with_output("git", &["rev-parse", "--git-dir"], repo, ".git\n")
+        .with_output(
+            "git",
+            &["show", "--format=%B", "--no-patch", &"b".repeat(SHA_LEN)],
+            repo,
+            "original message\n",
+        )
+        .with_output(
+            "git",
+            &["diff", "--stat"],
+            repo,
+            "file.txt | 1 +\n1 file changed, 1 insertion(+)\n",
+        )
+        .with_output(
+            "git",
+            &["ls-files", "--others", "--exclude-standard"],
+            repo,
+            "newfile.txt\n",
+        )
+        .with_output(
+            "git",
+            &["rev-parse", "--short", &"b".repeat(SHA_LEN)],
+            repo,
+            "bbbbbbb\n",
+        )
+        .with_output(
+            "git",
+            &["rev-parse", "--show-toplevel"],
+            repo,
+            repo.to_string_lossy().as_ref(),
+        );
+
+    let io = TestIo::default();
+    let env = TestEnv {
+        cwd: repo.to_path_buf(),
+    };
+    let ctx = Ctx {
+        runner: &runner,
+        cwd: repo.to_path_buf(),
+        io: &io,
+        env: &env,
+        fs: &REAL_FS,
+    };
+
+    let commits = vec![
+        CommitSha::new("a".repeat(SHA_LEN)).or_abort("sha"),
+        CommitSha::new("b".repeat(SHA_LEN)).or_abort("sha"),
+    ];
+    let outcome = Session::with_state(&ctx, StateDir::new(state_dir), commits)
+        .advance_to_next_commit()
+        .or_abort("advance ok");
+
+    assert!(
+        matches!(&outcome, AdvanceOutcome::Advanced { .. }),
+        "expected Advanced, got Completed"
+    );
+    if let AdvanceOutcome::Advanced {
+        next_message,
+        next_short_sha,
+        previous_split_count,
+    } = outcome
+    {
+        assert_eq!(previous_split_count.get(), 3);
+        assert_eq!(next_short_sha.as_str(), "bbbbbbb");
+        assert_eq!(next_message.as_str(), "original message");
+    }
+    assert!(io.stdout().is_empty(), "advance should produce no output");
+    assert_eq!(io.stderr(), "");
+}
 
 #[test]
