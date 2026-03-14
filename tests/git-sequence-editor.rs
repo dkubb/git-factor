@@ -536,6 +536,242 @@ exec echo hi\n\
     }
 
     #[test]
+    fn rejects_non_hex_40_char_sha_without_rev_parse() {
+        let dir = TempDir::new().or_abort();
+        let path = dir.path().join("todo");
+        fs::write(&path, "pick abc1234 first\n").or_abort();
+
+        let requested = format!("{}g", "a".repeat(39));
+
+        run_editor(
+            &["--drop", requested.as_str()],
+            GitSequenceEditorExpectation {
+                code: 2,
+                stderr: format!(
+                    "error: invalid value '{requested}' for '--drop <SHA>': invalid todo sha token: {requested}\n\nFor more information, try '--help'.\n"
+                ),
+                ..Default::default()
+            },
+            &path,
+        );
+    }
+
+    #[test]
+    fn resolves_hex40_via_rev_parse_and_maps_to_todo_token() {
+        let dir = TempDir::new().or_abort();
+        let path = dir.path().join("todo");
+        fs::write(&path, "pick abc1234 first\n").or_abort();
+
+        let requested = "a".repeat(FULL_SHA_LEN);
+        let resolved = format!("abc1234{}", "0".repeat(33));
+
+        let steps = vec![GitWrapperStep {
+            args: vec![
+                "rev-parse".to_owned(),
+                "--verify".to_owned(),
+                "--quiet".to_owned(),
+                format!("{requested}^{{commit}}"),
+            ],
+            stdout: format!("{resolved}\n"),
+            stderr: String::new(),
+            exit_code: 0,
+        }];
+
+        let (wrap_dir, wrap_bin, count_file) = make_ordered_git_wrapper(&steps);
+
+        let original_path = env::var_os("PATH").or_abort();
+        let prefixed_path = {
+            let mut joined = OsString::new();
+            joined.push(wrap_bin.as_os_str());
+            joined.push(OsStr::new(":"));
+            joined.push(original_path);
+            joined
+        };
+
+        run_editor_with_prefixed_path(
+            &["--drop", requested.as_str()],
+            GitSequenceEditorExpectation {
+                ordered_git_replay: Some(OrderedGitReplayExpectation::from_count_file(
+                    count_file,
+                    steps.len(),
+                )),
+                todo_content: Some("drop abc1234 first\n".to_owned()),
+                ..Default::default()
+            },
+            prefixed_path,
+            &path,
+        );
+        let _keep_alive = wrap_dir;
+    }
+
+    #[test]
+    fn resolves_hex40_to_full_sha_token_present_in_todo() {
+        let dir = TempDir::new().or_abort();
+        let path = dir.path().join("todo");
+
+        let requested = "a".repeat(FULL_SHA_LEN);
+        let resolved = format!("deadbeef{}", "0".repeat(32));
+        fs::write(&path, format!("pick {resolved} first\n")).or_abort();
+
+        let steps = vec![GitWrapperStep {
+            args: vec![
+                "rev-parse".to_owned(),
+                "--verify".to_owned(),
+                "--quiet".to_owned(),
+                format!("{requested}^{{commit}}"),
+            ],
+            stdout: format!("{resolved}\n"),
+            stderr: String::new(),
+            exit_code: 0,
+        }];
+
+        let (wrap_dir, wrap_bin, count_file) = make_ordered_git_wrapper(&steps);
+
+        let original_path = env::var_os("PATH").or_abort();
+        let prefixed_path = {
+            let mut joined = OsString::new();
+            joined.push(wrap_bin.as_os_str());
+            joined.push(OsStr::new(":"));
+            joined.push(original_path);
+            joined
+        };
+
+        run_editor_with_prefixed_path(
+            &["--drop", requested.as_str()],
+            GitSequenceEditorExpectation {
+                ordered_git_replay: Some(OrderedGitReplayExpectation::from_count_file(
+                    count_file,
+                    steps.len(),
+                )),
+                todo_content: Some(format!("drop {resolved} first\n")),
+                ..Default::default()
+            },
+            prefixed_path,
+            &path,
+        );
+        let _keep_alive = wrap_dir;
+    }
+
+    #[test]
+    fn resolves_uppercase_hex40_via_rev_parse_and_maps_to_todo_token() {
+        let dir = TempDir::new().or_abort();
+        let path = dir.path().join("todo");
+        fs::write(&path, "pick abc1234 first\n").or_abort();
+
+        let requested = "A".repeat(FULL_SHA_LEN);
+        let resolved = format!("abc1234{}", "0".repeat(33));
+
+        let steps = vec![GitWrapperStep {
+            args: vec![
+                "rev-parse".to_owned(),
+                "--verify".to_owned(),
+                "--quiet".to_owned(),
+                format!("{requested}^{{commit}}"),
+            ],
+            stdout: format!("{resolved}\n"),
+            stderr: String::new(),
+            exit_code: 0,
+        }];
+
+        let (wrap_dir, wrap_bin, count_file) = make_ordered_git_wrapper(&steps);
+        let original_path = env::var_os("PATH").or_abort();
+        let prefixed_path = {
+            let mut joined = OsString::new();
+            joined.push(wrap_bin.as_os_str());
+            joined.push(OsStr::new(":"));
+            joined.push(original_path);
+            joined
+        };
+
+        run_editor_with_prefixed_path(
+            &["--drop", requested.as_str()],
+            GitSequenceEditorExpectation {
+                ordered_git_replay: Some(OrderedGitReplayExpectation::from_count_file(
+                    count_file,
+                    steps.len(),
+                )),
+                todo_content: Some("drop abc1234 first\n".to_owned()),
+                ..Default::default()
+            },
+            prefixed_path,
+            &path,
+        );
+        let _keep_alive = wrap_dir;
+    }
+
+    #[test]
+    fn reports_error_when_rev_parse_fails() {
+        let dir = TempDir::new().or_abort();
+        let path = dir.path().join("todo");
+        fs::write(&path, "pick abc1234 first\n").or_abort();
+
+        let requested = "a".repeat(FULL_SHA_LEN);
+        let steps = vec![GitWrapperStep {
+            args: vec![
+                "rev-parse".to_owned(),
+                "--verify".to_owned(),
+                "--quiet".to_owned(),
+                format!("{requested}^{{commit}}"),
+            ],
+            stdout: String::new(),
+            stderr: "fatal: bad object\n".to_owned(),
+            exit_code: 1,
+        }];
+
+        let (wrap_dir, wrap_bin, count_file) = make_ordered_git_wrapper(&steps);
+
+        let original_path = env::var_os("PATH").or_abort();
+        let prefixed_path = {
+            let mut joined = OsString::new();
+            joined.push(wrap_bin.as_os_str());
+            joined.push(OsStr::new(":"));
+            joined.push(original_path);
+            joined
+        };
+
+        run_editor_with_prefixed_path(
+            &["--drop", requested.as_str()],
+            GitSequenceEditorExpectation {
+                code: EXIT_FAILURE,
+                ordered_git_replay: Some(OrderedGitReplayExpectation::from_count_file(
+                    count_file,
+                    steps.len(),
+                )),
+                stderr: "git rev-parse failed (exit 1): fatal: bad object\n".to_owned(),
+                todo_content: Some("pick abc1234 first\n".to_owned()),
+                ..Default::default()
+            },
+            prefixed_path,
+            &path,
+        );
+        let _keep_alive = wrap_dir;
+    }
+
+    #[test]
+    fn reports_error_when_rev_parse_cannot_spawn() {
+        let dir = TempDir::new().or_abort();
+        let path = dir.path().join("todo");
+        fs::write(&path, "pick abc1234 first\n").or_abort();
+
+        let no_git_path = TempDir::new().or_abort();
+        let prefixed_path = OsString::from(no_git_path.path().as_os_str());
+        let requested = "a".repeat(FULL_SHA_LEN);
+
+        run_editor_with_prefixed_path(
+            &["--drop", requested.as_str()],
+            GitSequenceEditorExpectation {
+                code: EXIT_FAILURE,
+                stderr: "failed to run git rev-parse: No such file or directory (os error 2)\n"
+                    .to_owned(),
+                todo_content: Some("pick abc1234 first\n".to_owned()),
+                ..Default::default()
+            },
+            prefixed_path,
+            &path,
+        );
+    }
+
+    #[test]
     fn warns_when_pick_request_is_idempotent() {
         let dir = TempDir::new().or_abort();
         let path = dir.path().join("todo");
