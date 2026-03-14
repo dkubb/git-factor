@@ -1,10 +1,12 @@
+#[cfg_attr(
+    not(test),
+    expect(
+        clippy::wildcard_imports,
+        reason = "state helpers intentionally consume shared imports from the root module"
+    )
+)]
+use super::*;
 use core::str::FromStr;
-use std::io;
-use std::path::Path;
-
-use super::ctx::Ctx;
-use super::error::{FactorError, non_empty_msg};
-use crate::non_empty_string::NonEmptyString;
 
 /// Reads a state file from the factor state directory.
 pub(in crate::git_factor) fn read_state(

@@ -34,14 +34,26 @@ mod state;
 #[path = "git_factor/types.rs"]
 mod types;
 
-use crate::exit_codes::EXIT_OK;
+use std::io;
+use std::path::Path;
 
+use crate::exit_codes::EXIT_OK;
+use crate::non_empty_string::NonEmptyString;
+
+#[cfg_attr(
+    not(test),
+    expect(
+        clippy::wildcard_imports,
+        reason = "re-exports ctx items for sibling module access via `use super::*`"
+    )
+)]
+use self::ctx::*;
 use self::error::{FactorError, non_empty_msg};
 
 /// Runs the `git-factor` CLI entrypoint.
 ///
 /// The full factor workflow is added in later commits. This placeholder keeps
-/// the binary wiring intact while the core CLI and state support land first.
+/// the binary wiring intact while the shared support layers land first.
 #[must_use]
 #[inline]
 pub const fn main_entry() -> i32 {
