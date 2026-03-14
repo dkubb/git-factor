@@ -237,6 +237,93 @@ impl SplitCount {
     }
 }
 
+/// Full commit message (1-65,536 bytes).
+#[derive(Debug)]
+struct CommitMessage(NonEmptyString);
+
+impl CommitMessage {
+    /// Maximum byte length for a commit message.
+    const MAX_LEN: usize = 0x0001_0000;
+
+    /// Returns the message as a string slice.
+    const fn as_str(&self) -> &str {
+        self.0.as_str()
+    }
+}
+
+impl TryFrom<String> for CommitMessage {
+    type Error = FactorError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        if value.len() > Self::MAX_LEN {
+            return Err(FactorError::GitCommand(non_empty_msg(format!(
+                "commit message exceeds {} bytes ({} bytes)",
+                Self::MAX_LEN,
+                value.len()
+            ))));
+        }
+        if value
+            .chars()
+            .any(|ch| ch.is_control() && ch != '\n' && ch != '\t')
+        {
+            return Err(FactorError::GitCommand(non_empty_msg(
+                "commit message contains control characters".to_owned(),
+            )));
+        }
+        let non_empty = match NonEmptyString::try_from(value) {
+            Ok(non_empty) => non_empty,
+            Err(_err) => {
+                return Err(FactorError::GitCommand(non_empty_msg(
+                    "empty commit message".to_owned(),
+                )));
+            }
+        };
+        Ok(Self(non_empty))
+    }
+}
+
+/// Abbreviated commit SHA from `rev-parse --short` (1-40 lowercase hex chars).
+#[derive(Debug)]
+struct ShortSha(NonEmptyString);
+
+impl ShortSha {
+    /// Maximum length of an abbreviated SHA (full SHA-1 hex).
+    const MAX_LEN: usize = 40;
+
+    /// Returns the short SHA as a string slice.
+    const fn as_str(&self) -> &str {
+        self.0.as_str()
+    }
+}
+
+impl TryFrom<String> for ShortSha {
+    type Error = FactorError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        if value.len() > Self::MAX_LEN {
+            return Err(FactorError::GitCommand(non_empty_msg(format!(
+                "short SHA exceeds {} chars ({} chars)",
+                Self::MAX_LEN,
+                value.len()
+            ))));
+        }
+        if !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err(FactorError::GitCommand(non_empty_msg(format!(
+                "short SHA contains non-hex characters: {value}"
+            ))));
+        }
+        let non_empty = match NonEmptyString::try_from(value) {
+            Ok(non_empty) => non_empty,
+            Err(_err) => {
+                return Err(FactorError::GitCommand(non_empty_msg(
+                    "empty short SHA".to_owned(),
+                )));
+            }
+        };
+        Ok(Self(non_empty))
+    }
+}
+
 /// Runs the `git-factor` CLI entrypoint.
 ///
 /// The full factor workflow is added in later commits. This placeholder keeps
@@ -250,8 +337,8 @@ pub const fn main_entry() -> i32 {
 #[cfg(test)]
 mod tests {
     use super::{
-        Ctx, CurrentIndex, REAL_ENV, REAL_FS, REAL_IO, REAL_RUNNER, SessionPhase, SplitCount,
-        StateBool, StateDir, StateFileKey,
+        CommitMessage, Ctx, CurrentIndex, REAL_ENV, REAL_FS, REAL_IO, REAL_RUNNER, SessionPhase,
+        ShortSha, SplitCount, StateBool, StateDir, StateFileKey,
     };
     use crate::test_support::{OrAbort as _, ResultOrAbort as _};
     use core::num::NonZeroU8;
@@ -363,6 +450,68 @@ mod tests {
                 .as_u8(),
             2
         );
+    }
+
+    #[test]
+    fn commit_message_try_from_rejects_invalid_values() {
+        let too_long = "a".repeat(CommitMessage::MAX_LEN + 1);
+        let too_long_err = CommitMessage::try_from(too_long).err_or_abort("too-long message");
+        assert_eq!(
+            too_long_err.to_string(),
+            format!(
+                "git command failed: commit message exceeds {} bytes ({} bytes)",
+                CommitMessage::MAX_LEN,
+                CommitMessage::MAX_LEN + 1
+            )
+        );
+
+        let newline_message = CommitMessage::try_from("line 1\nline 2".to_owned())
+            .or_abort("newline should be accepted");
+        assert_eq!(newline_message.as_str(), "line 1\nline 2");
+
+        let tab_message =
+            CommitMessage::try_from("column\tvalue".to_owned()).or_abort("tab should be accepted");
+        assert_eq!(tab_message.as_str(), "column\tvalue");
+
+        let control_err =
+            CommitMessage::try_from("bad\u{7f}message".to_owned()).err_or_abort("control char");
+        assert_eq!(
+            control_err.to_string(),
+            "git command failed: commit message contains control characters"
+        );
+
+        let empty_err = CommitMessage::try_from(String::new()).err_or_abort("empty message");
+        assert_eq!(
+            empty_err.to_string(),
+            "git command failed: empty commit message"
+        );
+    }
+
+    #[test]
+    fn short_sha_try_from_validates_format() {
+        let valid_short_sha =
+            ShortSha::try_from("abcdef1".to_owned()).or_abort("valid short sha should parse");
+        assert_eq!(valid_short_sha.as_str(), "abcdef1");
+
+        let too_long = "a".repeat(ShortSha::MAX_LEN + 1);
+        let too_long_err = ShortSha::try_from(too_long).err_or_abort("too-long short sha");
+        assert_eq!(
+            too_long_err.to_string(),
+            format!(
+                "git command failed: short SHA exceeds {} chars ({} chars)",
+                ShortSha::MAX_LEN,
+                ShortSha::MAX_LEN + 1
+            )
+        );
+
+        let non_hex_err = ShortSha::try_from("xyz".to_owned()).err_or_abort("non-hex short sha");
+        assert_eq!(
+            non_hex_err.to_string(),
+            "git command failed: short SHA contains non-hex characters: xyz"
+        );
+
+        let empty_err = ShortSha::try_from(String::new()).err_or_abort("empty short sha");
+        assert_eq!(empty_err.to_string(), "git command failed: empty short SHA");
     }
 
     #[test]
