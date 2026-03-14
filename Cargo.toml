@@ -23,6 +23,7 @@ test = false
 workspace = true
 
 [workspace]
+members = [".", "expect-fail-macro"]
 
 [dependencies]
 clap = { version = "4.5.56", features = ["derive"] }
