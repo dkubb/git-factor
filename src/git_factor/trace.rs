@@ -4,7 +4,9 @@ use std::fs::{self, OpenOptions};
 use std::io::Write as _;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use super::*;
+use super::{
+    Ctx, Path, PathBuf, REBASE_APPLY_DIR, REBASE_MERGE_DIR, StateBool, git_dir_in, status_code,
+};
 
 /// Parses the first actionable line from rebase todo text.
 macro_rules! first_rebase_todo_line_inline {

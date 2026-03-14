@@ -14,13 +14,6 @@ use std::collections::HashSet;
 /// After a root-commit factor session completes, the history contains an empty
 /// commit at the root. This function rebases `--root --interactive` with a
 /// sequence editor that drops the empty commit by SHA.
-#[cfg_attr(
-    not(test),
-    expect(
-        clippy::single_call_fn,
-        reason = "root-commit cleanup is extracted for clarity and targeted tests"
-    )
-)]
 pub(in crate::git_factor) fn remove_empty_root_in(ctx: &Ctx<'_>) -> Result<(), FactorError> {
     let roots = git_output(ctx, &["rev-list", "--max-parents=0", "HEAD"])?;
     let root_lines: Vec<&str> = roots
@@ -103,6 +96,13 @@ pub(in crate::git_factor) fn mixed_reset_to_empty(ctx: &Ctx<'_>) -> Result<(), F
 }
 
 /// Resolves a commit reference to a full SHA.
+#[cfg_attr(
+    not(test),
+    expect(
+        clippy::single_call_fn,
+        reason = "single-ref resolution stays isolated from ref-list expansion for clarity"
+    )
+)]
 pub(in crate::git_factor) fn resolve_commit(
     ctx: &Ctx<'_>,
     commit: &str,
@@ -125,13 +125,6 @@ pub(in crate::git_factor) fn resolve_head_commit(ctx: &Ctx<'_>) -> Result<Commit
 /// resolved via `git rev-parse --verify`. The final list is sorted in
 /// chronological order (oldest first) to match the order that interactive
 /// rebase will stop at each `edit` commit.
-#[cfg_attr(
-    not(test),
-    expect(
-        clippy::single_call_fn,
-        reason = "ref resolution is extracted for clarity and targeted tests"
-    )
-)]
 pub(in crate::git_factor) fn resolve_commit_refs(
     ctx: &Ctx<'_>,
     refs: &NonEmpty<NonEmptyString>,
@@ -169,13 +162,6 @@ pub(in crate::git_factor) fn resolve_commit_refs(
 /// Uses a single `git rev-list --topo-order --reverse` call with all target
 /// SHAs as tips, then filters the output to only the target commits. This
 /// ensures the order matches how interactive rebase processes commits.
-#[cfg_attr(
-    not(test),
-    expect(
-        clippy::single_call_fn,
-        reason = "topological sorting is extracted for clarity and targeted tests"
-    )
-)]
 pub(in crate::git_factor) fn sort_topologically(
     ctx: &Ctx<'_>,
     commits: &Commits,
@@ -225,13 +211,6 @@ pub(in crate::git_factor) fn validate_ancestor(
 }
 
 /// Validates that an exec command has valid bash syntax.
-#[cfg_attr(
-    not(test),
-    expect(
-        clippy::single_call_fn,
-        reason = "syntax validation remains extracted for focused tests and error mapping"
-    )
-)]
 pub(in crate::git_factor) fn validate_exec_syntax(
     ctx: &Ctx<'_>,
     command: &str,

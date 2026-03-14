@@ -57,6 +57,10 @@ pub(in crate::git_factor) fn shell_quote(arg: &str) -> String {
 
 /// Returns the absolute path to `git-sequence-editor`, resolved as a sibling
 /// of the current executable.
+#[expect(
+    clippy::single_call_fn,
+    reason = "resolved once here so callers do not repeat executable-path handling"
+)]
 pub(in crate::git_factor) fn editor_path(ctx: &Ctx<'_>) -> Result<PathBuf, FactorError> {
     let exe = match ctx.env.current_exe() {
         Ok(exe) => exe,
@@ -84,6 +88,10 @@ pub(in crate::git_factor) fn editor_path(ctx: &Ctx<'_>) -> Result<PathBuf, Facto
 }
 
 /// Returns the path to the factor state directory.
+#[expect(
+    clippy::single_call_fn,
+    reason = "centralizes the factor-state location behind a typed path wrapper"
+)]
 pub(in crate::git_factor) fn factor_dir_in(ctx: &Ctx<'_>) -> Result<StateDir, FactorError> {
     Ok(StateDir::new(git_dir_in(ctx)?.join("factor")))
 }

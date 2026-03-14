@@ -229,10 +229,6 @@ pub(in crate::git_factor) fn command_output_with(
 }
 
 /// Runs `git <args...>` and returns captured output, regardless of exit status.
-#[expect(
-    clippy::single_call_fn,
-    reason = "raw git output is intentionally centralized for status-command diagnostics"
-)]
 pub(in crate::git_factor) fn git_raw_output(
     ctx: &Ctx<'_>,
     args: &[&str],
