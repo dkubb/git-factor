@@ -224,4 +224,55 @@ exec echo hi\n\
             &path,
         );
     }
+
+    #[test]
+    fn rejects_drop_sha_not_present_in_todo() {
+        let dir = TempDir::new().or_abort();
+        let path = dir.path().join("todo");
+        fs::write(&path, "pick abc1234 first\n").or_abort();
+
+        run_editor(
+            &["--drop", "deadbeef"],
+            GitSequenceEditorExpectation {
+                code: EXIT_FAILURE,
+                stderr: "sha not present in todo: deadbeef\n".to_owned(),
+                ..Default::default()
+            },
+            &path,
+        );
+    }
+
+    #[test]
+    fn rejects_pick_sha_not_present_in_todo() {
+        let dir = TempDir::new().or_abort();
+        let path = dir.path().join("todo");
+        fs::write(&path, "pick abc1234 first\n").or_abort();
+
+        run_editor(
+            &["--pick", "deadbeef"],
+            GitSequenceEditorExpectation {
+                code: EXIT_FAILURE,
+                stderr: "sha not present in todo: deadbeef\n".to_owned(),
+                ..Default::default()
+            },
+            &path,
+        );
+    }
+
+    #[test]
+    fn rejects_edit_sha_not_present_in_todo() {
+        let dir = TempDir::new().or_abort();
+        let path = dir.path().join("todo");
+        fs::write(&path, "pick abc1234 first\n").or_abort();
+
+        run_editor(
+            &["--edit", "deadbeef"],
+            GitSequenceEditorExpectation {
+                code: EXIT_FAILURE,
+                stderr: "sha not present in todo: deadbeef\n".to_owned(),
+                ..Default::default()
+            },
+            &path,
+        );
+    }
 }
