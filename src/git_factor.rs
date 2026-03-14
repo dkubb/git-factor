@@ -34,6 +34,7 @@ mod state;
 #[path = "git_factor/types.rs"]
 mod types;
 
+use core::num::NonZeroU8;
 use std::io;
 use std::path::Path;
 
@@ -49,6 +50,8 @@ use crate::non_empty_string::NonEmptyString;
 )]
 use self::ctx::*;
 use self::error::{FactorError, non_empty_msg};
+use self::state::read_state_parsed;
+use self::types::StateDir;
 
 /// Canonical state-file keys used in `.git/factor`.
 #[derive(Clone, Copy)]
@@ -152,6 +155,88 @@ impl SessionPhase {
     }
 }
 
+/// Current commit index in persisted factor state.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct CurrentIndex(usize);
+
+impl CurrentIndex {
+    /// Returns the underlying index value.
+    const fn as_usize(self) -> usize {
+        self.0
+    }
+
+    /// Returns the next index, failing on overflow.
+    fn increment(self) -> Result<Self, FactorError> {
+        let Some(value) = self.0.checked_add(1) else {
+            return Err(FactorError::GitCommand(non_empty_msg(
+                "current_index overflow".to_owned(),
+            )));
+        };
+        Ok(Self(value))
+    }
+
+    /// Reads `current_index` from persisted state.
+    #[cfg_attr(
+        test,
+        expect(
+            clippy::single_call_fn,
+            reason = "called in later workflow commits; kept on CurrentIndex for type cohesion"
+        )
+    )]
+    fn read(ctx: &Ctx<'_>, state_dir: &StateDir) -> Result<Self, FactorError> {
+        read_state_parsed::<usize>(
+            ctx,
+            state_dir.as_path(),
+            StateFileKey::CurrentIndex.as_str(),
+        )
+        .map(Self)
+    }
+}
+
+/// Number of split commits produced for the current commit.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct SplitCount(u8);
+
+impl SplitCount {
+    /// Returns the split count as a `NonZeroU8`, or `None` when zero.
+    const fn as_non_zero(self) -> Option<NonZeroU8> {
+        NonZeroU8::new(self.0)
+    }
+
+    /// Returns the underlying split-count value.
+    const fn as_u8(self) -> u8 {
+        self.0
+    }
+
+    /// Returns the incremented split count, failing on overflow.
+    fn increment(self) -> Result<Self, FactorError> {
+        let Some(value) = self.0.checked_add(1) else {
+            return Err(FactorError::GitCommand(non_empty_msg(
+                "split_count overflow".to_owned(),
+            )));
+        };
+        Ok(Self(value))
+    }
+
+    /// Reads `split_count` from persisted state.
+    #[cfg_attr(
+        test,
+        expect(
+            clippy::single_call_fn,
+            reason = "called via Session::split_count; kept on SplitCount for type cohesion"
+        )
+    )]
+    fn read(ctx: &Ctx<'_>, state_dir: &StateDir) -> Result<Self, FactorError> {
+        read_state_parsed::<u8>(ctx, state_dir.as_path(), StateFileKey::SplitCount.as_str())
+            .map(Self)
+    }
+
+    /// Returns the initial split count for a new step.
+    const fn zero() -> Self {
+        Self(0)
+    }
+}
+
 /// Runs the `git-factor` CLI entrypoint.
 ///
 /// The full factor workflow is added in later commits. This placeholder keeps
@@ -164,8 +249,25 @@ pub const fn main_entry() -> i32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{SessionPhase, StateBool, StateFileKey};
+    use super::{
+        Ctx, CurrentIndex, REAL_ENV, REAL_FS, REAL_IO, REAL_RUNNER, SessionPhase, SplitCount,
+        StateBool, StateDir, StateFileKey,
+    };
     use crate::test_support::{OrAbort as _, ResultOrAbort as _};
+    use core::num::NonZeroU8;
+    use std::fs;
+    use std::path::Path;
+    use tempfile::TempDir;
+
+    fn ctx_for(path: &Path) -> Ctx<'static> {
+        Ctx {
+            runner: &REAL_RUNNER,
+            cwd: path.to_path_buf(),
+            io: &REAL_IO,
+            env: &REAL_ENV,
+            fs: &REAL_FS,
+        }
+    }
 
     #[test]
     fn state_file_key_as_str_matches_expected_names() {
@@ -209,5 +311,65 @@ mod tests {
             err.to_string(),
             "git command failed: corrupted state file 'phase': invalid value 'bogus'"
         );
+    }
+
+    #[test]
+    fn current_index_reads_and_increments() {
+        let dir = TempDir::new().or_abort("tempdir");
+        let state_dir = dir.path().join("factor");
+        fs::create_dir_all(&state_dir).or_abort("create factor dir");
+        fs::write(state_dir.join("current_index"), "41\n").or_abort("write current_index");
+        let ctx = ctx_for(dir.path());
+
+        let current_index =
+            CurrentIndex::read(&ctx, &StateDir::new(state_dir)).or_abort("read current_index");
+        assert_eq!(current_index.as_usize(), 41);
+        assert_eq!(
+            current_index
+                .increment()
+                .or_abort("increment current_index")
+                .as_usize(),
+            42
+        );
+    }
+
+    #[test]
+    fn current_index_increment_reports_overflow() {
+        let err = CurrentIndex(usize::MAX)
+            .increment()
+            .err_or_abort("usize::MAX current_index should overflow");
+        assert_eq!(
+            err.to_string(),
+            "git command failed: current_index overflow"
+        );
+    }
+
+    #[test]
+    fn split_count_reads_and_increments() {
+        let dir = TempDir::new().or_abort("tempdir");
+        let state_dir = dir.path().join("factor");
+        fs::create_dir_all(&state_dir).or_abort("create factor dir");
+        fs::write(state_dir.join("split_count"), "1\n").or_abort("write split_count");
+        let ctx = ctx_for(dir.path());
+
+        let split_count =
+            SplitCount::read(&ctx, &StateDir::new(state_dir)).or_abort("read split_count");
+        assert_eq!(split_count.as_non_zero(), NonZeroU8::new(1));
+        assert_eq!(split_count.as_u8(), 1);
+        assert_eq!(
+            split_count
+                .increment()
+                .or_abort("increment split_count")
+                .as_u8(),
+            2
+        );
+    }
+
+    #[test]
+    fn split_count_increment_reports_overflow() {
+        let err = SplitCount(u8::MAX)
+            .increment()
+            .err_or_abort("u8::MAX split_count should overflow");
+        assert_eq!(err.to_string(), "git command failed: split_count overflow");
     }
 }
