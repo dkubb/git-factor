@@ -1109,3 +1109,101 @@ fn continue_runner_with_remaining_output(
         .with_status("git", &["read-tree", TREE_EXPECTED], &[], false, repo, 0)
         .with_status("git", &["read-tree", TREE_REHYDRATE], &[], false, repo, 0)
 }
+
+fn finish_advance_runner(repo: &Path, original: &str, next: &str) -> ScriptedRunner {
+    with_git_dir_outputs(ScriptedRunner::default(), repo, 6)
+        .with_status(
+            "git",
+            &["checkout", "--quiet", "--", "."],
+            &[],
+            false,
+            repo,
+            0,
+        )
+        .with_status(
+            "git",
+            &["clean", "--force", "--quiet", "-d"],
+            &[],
+            false,
+            repo,
+            0,
+        )
+        .with_status(
+            "git",
+            &[
+                "restore",
+                "--source",
+                original,
+                "--staged",
+                "--worktree",
+                "--",
+                ".",
+            ],
+            &[],
+            false,
+            repo,
+            0,
+        )
+        .with_output("git", &["write-tree"], repo, TREE_EXPECTED_NL)
+        .with_status("git", &["diff", "--quiet", "--staged"], &[], false, repo, 1)
+        .with_output(
+            "git",
+            &[
+                "show",
+                "--format=%an%x00%ae%x00%aI%x00%cn%x00%ce%x00%cI",
+                "--no-patch",
+                original,
+            ],
+            repo,
+            TEST_COMMIT_META,
+        )
+        .with_status(
+            "git",
+            &["commit", "--quiet", "--message", "test: message"],
+            &TEST_COMMIT_ENVS,
+            false,
+            repo,
+            0,
+        )
+        .with_status(
+            "git",
+            &["rebase", "--continue"],
+            &[("GIT_EDITOR", "false"), ("GIT_SEQUENCE_EDITOR", "false")],
+            false,
+            repo,
+            0,
+        )
+        .with_output("git", &["status", "--porcelain=v1"], repo, "")
+        .with_status("git", &["reset", "--quiet", "HEAD~1"], &[], false, repo, 0)
+        .with_output(
+            "git",
+            &["show", "--format=%B", "--no-patch", next],
+            repo,
+            "next subject\n",
+        )
+        .with_output("git", &["rev-parse", "--short", next], repo, "bbbbbbb\n")
+        .with_output(
+            "git",
+            &["diff", "--stat"],
+            repo,
+            "file.txt | 1 +\n1 file changed, 1 insertion(+)\n",
+        )
+        .with_output(
+            "git",
+            &["diff", "--stat"],
+            repo,
+            "file.txt | 1 +\n1 file changed, 1 insertion(+)\n",
+        )
+        .with_output(
+            "git",
+            &["ls-files", "--others", "--exclude-standard"],
+            repo,
+            "",
+        )
+        .with_output(
+            "git",
+            &["rev-parse", "--show-toplevel"],
+            repo,
+            &format!("{}\n", repo.display()),
+        )
+}
