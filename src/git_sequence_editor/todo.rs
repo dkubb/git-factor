@@ -253,3 +253,152 @@ impl RewriteTodoResult {
         self.warnings.as_slice()
     }
 }
+
+/// Parsed todo action token.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TodoActionKind {
+    /// `break` / `b` action.
+    Break,
+    /// `drop` / `d` action.
+    Drop,
+    /// `edit` / `e` action.
+    Edit,
+    /// `exec` / `x` action.
+    Exec,
+    /// `fixup` / `f` action.
+    Fixup,
+    /// `label` / `l` action.
+    Label,
+    /// `merge` / `m` action.
+    Merge,
+    /// `noop` action.
+    Noop,
+    /// `pick` / `p` action.
+    Pick,
+    /// `reset` / `t` action.
+    Reset,
+    /// `reword` / `r` action.
+    Reword,
+    /// `squash` / `s` action.
+    Squash,
+    /// `update-ref` / `u` action.
+    UpdateRef,
+}
+
+impl TodoActionKind {
+    /// Parses long-form and short-form todo action tokens.
+    fn parse(action: &str) -> Option<Self> {
+        match action {
+            "break" | "b" => Some(Self::Break),
+            "drop" | "d" => Some(Self::Drop),
+            "edit" | "e" => Some(Self::Edit),
+            "exec" | "x" => Some(Self::Exec),
+            "fixup" | "f" => Some(Self::Fixup),
+            "label" | "l" => Some(Self::Label),
+            "merge" | "m" => Some(Self::Merge),
+            "noop" => Some(Self::Noop),
+            "pick" | "p" => Some(Self::Pick),
+            "reset" | "t" => Some(Self::Reset),
+            "reword" | "r" => Some(Self::Reword),
+            "squash" | "s" => Some(Self::Squash),
+            "update-ref" | "u" => Some(Self::UpdateRef),
+            _ => None,
+        }
+    }
+}
+
+/// Returns true if this parsed todo action carries a commit SHA token.
+const fn is_commit_action_kind(action: TodoActionKind) -> bool {
+    matches!(
+        action,
+        TodoActionKind::Drop
+            | TodoActionKind::Edit
+            | TodoActionKind::Fixup
+            | TodoActionKind::Pick
+            | TodoActionKind::Reword
+            | TodoActionKind::Squash
+    )
+}
+
+/// Returns true if `candidate` is a non-empty hexadecimal token.
+fn is_hex_token(candidate: &str) -> bool {
+    candidate
+        .as_bytes()
+        .iter()
+        .copied()
+        .all(|byte| byte.is_ascii_hexdigit())
+}
+
+/// Returns true if the string is exactly `FULL_HEX_SHA_LEN` hex characters (case-insensitive).
+#[cfg(test)]
+pub(in crate::git_sequence_editor) fn is_hex40(candidate: &str) -> bool {
+    let bytes = candidate.as_bytes();
+    bytes.len() == FULL_HEX_SHA_LEN && is_hex_token(candidate)
+}
+
+/// Returns the canonical long-form action for supported long/short actions.
+#[cfg(test)]
+fn canonical_action(action: &str) -> Option<&'static str> {
+    let parsed = match TodoActionKind::parse(action) {
+        Some(parsed) => parsed,
+        None => return None,
+    };
+    Some(match parsed {
+        TodoActionKind::Break => "break",
+        TodoActionKind::Drop => "drop",
+        TodoActionKind::Edit => "edit",
+        TodoActionKind::Exec => "exec",
+        TodoActionKind::Fixup => "fixup",
+        TodoActionKind::Label => "label",
+        TodoActionKind::Merge => "merge",
+        TodoActionKind::Noop => "noop",
+        TodoActionKind::Pick => "pick",
+        TodoActionKind::Reset => "reset",
+        TodoActionKind::Reword => "reword",
+        TodoActionKind::Squash => "squash",
+        TodoActionKind::UpdateRef => "update-ref",
+    })
+}
+
+/// Returns true if the action denotes a commit line containing a SHA token.
+#[cfg(test)]
+fn is_commit_action(action: &str) -> bool {
+    TodoActionKind::parse(action).is_some_and(is_commit_action_kind)
+}
+
+/// Returns true if the action is supported by this parser.
+#[cfg_attr(
+    not(test),
+    expect(
+        clippy::single_call_fn,
+        reason = "isolated todo validator keeps parser behavior explicit"
+    )
+)]
+pub(in crate::git_sequence_editor) fn validate_todo_format(content: &str) -> Result<(), TodoError> {
+    for line in content.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+
+        let action_token = trimmed.split_whitespace().next().unwrap_or_default();
+        let action = match TodoActionKind::parse(action_token) {
+            Some(action) => action,
+            None => {
+                return Err(TodoError::UnsupportedTodoAction {
+                    action: action_token.to_owned(),
+                });
+            }
+        };
+        if is_commit_action_kind(action)
+            && let Some(sha) = trimmed.split_whitespace().nth(1)
+            && !is_hex_token(sha)
+        {
+            return Err(TodoError::InvalidShaToken {
+                token: sha.to_owned(),
+            });
+        }
+    }
+
+    Ok(())
+}
