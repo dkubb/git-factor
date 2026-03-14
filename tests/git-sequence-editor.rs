@@ -328,4 +328,277 @@ exec echo hi\n\
             &path,
         );
     }
+
+    #[test]
+    fn warns_when_pick_request_is_idempotent() {
+        let dir = TempDir::new().or_abort();
+        let path = dir.path().join("todo");
+        fs::write(&path, "pick abc1234 first\n").or_abort();
+
+        run_editor(
+            &["--pick", "abc1234"],
+            GitSequenceEditorExpectation {
+                stderr: "WARN: abc1234: requested 'pick', but todo already had 'pick'\n".to_owned(),
+                todo_content: Some("pick abc1234 first\n".to_owned()),
+                ..Default::default()
+            },
+            &path,
+        );
+    }
+
+    #[test]
+    fn warns_when_edit_request_is_idempotent() {
+        let dir = TempDir::new().or_abort();
+        let path = dir.path().join("todo");
+        fs::write(&path, "edit abc1234 first\n").or_abort();
+
+        run_editor(
+            &["--edit", "abc1234"],
+            GitSequenceEditorExpectation {
+                stderr: "WARN: abc1234: requested 'edit', but todo already had 'edit'\n".to_owned(),
+                todo_content: Some("edit abc1234 first\n".to_owned()),
+                ..Default::default()
+            },
+            &path,
+        );
+    }
+
+    #[test]
+    fn warns_when_drop_request_is_idempotent() {
+        let dir = TempDir::new().or_abort();
+        let path = dir.path().join("todo");
+        fs::write(&path, "drop abc1234 first\n").or_abort();
+
+        run_editor(
+            &["--drop", "abc1234"],
+            GitSequenceEditorExpectation {
+                stderr: "WARN: abc1234: requested 'drop', but todo already had 'drop'\n".to_owned(),
+                todo_content: Some("drop abc1234 first\n".to_owned()),
+                ..Default::default()
+            },
+            &path,
+        );
+    }
+
+    #[test]
+    fn warns_when_drop_request_is_idempotent_for_short_action() {
+        let dir = TempDir::new().or_abort();
+        let path = dir.path().join("todo");
+        fs::write(&path, "d abc1234 first\n").or_abort();
+
+        run_editor(
+            &["--drop", "abc1234"],
+            GitSequenceEditorExpectation {
+                stderr: "WARN: abc1234: requested 'drop', but todo already had 'drop'\n".to_owned(),
+                todo_content: Some("d abc1234 first\n".to_owned()),
+                ..Default::default()
+            },
+            &path,
+        );
+    }
+
+    #[test]
+    fn rejects_unsupported_todo_actions() {
+        let dir = TempDir::new().or_abort();
+        let path = dir.path().join("todo");
+        let original = "foo abc1234 first\n";
+        fs::write(&path, original).or_abort();
+
+        run_editor(
+            &["--drop", "abc1234"],
+            GitSequenceEditorExpectation {
+                code: EXIT_FAILURE,
+                stderr: "unsupported todo action: foo\n".to_owned(),
+                todo_content: Some(original.to_owned()),
+                ..Default::default()
+            },
+            &path,
+        );
+    }
+
+    #[test]
+    fn rejects_uppercase_todo_action() {
+        let dir = TempDir::new().or_abort();
+        let path = dir.path().join("todo");
+        let original = "Pick abc1234 first\n";
+        fs::write(&path, original).or_abort();
+
+        run_editor(
+            &["--drop", "abc1234"],
+            GitSequenceEditorExpectation {
+                code: EXIT_FAILURE,
+                stderr: "unsupported todo action: Pick\n".to_owned(),
+                todo_content: Some(original.to_owned()),
+                ..Default::default()
+            },
+            &path,
+        );
+    }
+
+    #[test]
+    fn rejects_non_hex_todo_sha_token_on_commit_actions() {
+        let dir = TempDir::new().or_abort();
+        let path = dir.path().join("todo");
+        let original = "pick not_hex first\n";
+        fs::write(&path, original).or_abort();
+
+        run_editor(
+            &[],
+            GitSequenceEditorExpectation {
+                code: EXIT_FAILURE,
+                stderr: "invalid todo sha token: not_hex\n".to_owned(),
+                todo_content: Some(original.to_owned()),
+                ..Default::default()
+            },
+            &path,
+        );
+    }
+
+    #[test]
+    fn preserves_comments_and_blank_lines() {
+        let dir = TempDir::new().or_abort();
+        let path = dir.path().join("todo");
+        let original = "\
+# comment
+
+pick abc1234 first # trailing comment
+exec echo hi
+";
+        fs::write(&path, original).or_abort();
+
+        run_editor(
+            &["--drop", "abc1234"],
+            GitSequenceEditorExpectation {
+                todo_content: Some(
+                    "\
+# comment
+
+drop abc1234 first # trailing comment
+exec echo hi
+"
+                    .to_owned(),
+                ),
+                ..Default::default()
+            },
+            &path,
+        );
+    }
+
+    #[test]
+    fn accepts_all_supported_non_commit_actions() {
+        let dir = TempDir::new().or_abort();
+        let path = dir.path().join("todo");
+        let original = "\
+pick abc1234 first
+exec echo hi
+break
+label topic
+reset topic
+merge -C deadbeef topic
+noop
+update-ref refs/heads/main
+";
+        fs::write(&path, original).or_abort();
+
+        run_editor(
+            &["--drop", "abc1234"],
+            GitSequenceEditorExpectation {
+                todo_content: Some(
+                    "\
+drop abc1234 first
+exec echo hi
+break
+label topic
+reset topic
+merge -C deadbeef topic
+noop
+update-ref refs/heads/main
+"
+                    .to_owned(),
+                ),
+                ..Default::default()
+            },
+            &path,
+        );
+    }
+
+    #[test]
+    fn accepts_abbreviated_commit_and_non_commit_actions() {
+        let dir = TempDir::new().or_abort();
+        let path = dir.path().join("todo");
+        let original = "\
+p abc1234 first
+x echo hi
+b
+l topic
+t topic
+m -C deadbeef topic
+u refs/heads/main
+";
+        fs::write(&path, original).or_abort();
+
+        run_editor(
+            &["--drop", "abc1234"],
+            GitSequenceEditorExpectation {
+                todo_content: Some(
+                    "\
+drop abc1234 first
+x echo hi
+b
+l topic
+t topic
+m -C deadbeef topic
+u refs/heads/main
+"
+                    .to_owned(),
+                ),
+                ..Default::default()
+            },
+            &path,
+        );
+    }
+
+    #[test]
+    fn accepts_indented_comments_and_blank_lines() {
+        let dir = TempDir::new().or_abort();
+        let path = dir.path().join("todo");
+        let original = "\
+   # comment with indentation
+
+pick abc1234 first
+";
+        fs::write(&path, original).or_abort();
+
+        run_editor(
+            &["--edit", "abc1234"],
+            GitSequenceEditorExpectation {
+                todo_content: Some(
+                    "\
+   # comment with indentation
+
+edit abc1234 first
+"
+                    .to_owned(),
+                ),
+                ..Default::default()
+            },
+            &path,
+        );
+    }
+
+    #[test]
+    fn preserves_malformed_pick_line_without_sha_when_no_actions_requested() {
+        let dir = TempDir::new().or_abort();
+        let path = dir.path().join("todo");
+        fs::write(&path, "pick\n").or_abort();
+
+        run_editor(
+            &[],
+            GitSequenceEditorExpectation {
+                todo_content: Some("pick\n".to_owned()),
+                ..Default::default()
+            },
+            &path,
+        );
+    }
 }
