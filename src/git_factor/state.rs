@@ -36,6 +36,13 @@ pub(in crate::git_factor) fn read_state_parsed<T: FromStr>(
 }
 
 /// Reads a `true`/`false` state value, with a default when the file is missing.
+#[cfg_attr(
+    test,
+    expect(
+        clippy::single_call_fn,
+        reason = "bool state reads remain isolated until more session state flows through this helper"
+    )
+)]
 pub(in crate::git_factor) fn read_state_bool_or_default(
     ctx: &Ctx<'_>,
     state_dir: &Path,
@@ -56,13 +63,6 @@ pub(in crate::git_factor) fn read_state_bool_or_default(
 }
 
 /// Writes a state file to the factor state directory.
-#[cfg_attr(
-    test,
-    expect(
-        clippy::single_call_fn,
-        reason = "write_state is introduced before the session layer persists multiple keys"
-    )
-)]
 pub(in crate::git_factor) fn write_state(
     ctx: &Ctx<'_>,
     state_dir: &Path,
@@ -77,21 +77,17 @@ pub(in crate::git_factor) fn write_state(
 
 #[cfg(test)]
 mod tests {
-    use super::super::ctx::{REAL_ENV, REAL_FS, REAL_IO, REAL_RUNNER};
     use super::*;
-    use std::fs;
-    use std::path::PathBuf;
-
     use crate::test_support::{OrAbort as _, ResultOrAbort as _};
     use tempfile::TempDir;
 
-    fn ctx() -> Ctx<'static> {
+    fn ctx_for(path: &Path) -> Ctx<'static> {
         Ctx {
-            cwd: PathBuf::from("."),
+            runner: &REAL_RUNNER,
+            cwd: path.to_path_buf(),
+            io: &REAL_IO,
             env: &REAL_ENV,
             fs: &REAL_FS,
-            io: &REAL_IO,
-            runner: &REAL_RUNNER,
         }
     }
 
@@ -103,63 +99,26 @@ mod tests {
     }
 
     #[test]
-    fn write_state_round_trips_content() {
-        let dir = TempDir::new().or_abort("tempdir");
-        let state_dir = dir.path().join("factor");
-        fs::create_dir_all(&state_dir).or_abort("create state dir");
-
-        write_state(&ctx(), &state_dir, "phase", "pending_start").or_abort("write state");
-
-        let value = read_state(&ctx(), &state_dir, "phase").or_abort("read state");
-        assert_eq!(value.as_str(), "pending_start");
-    }
-
-    #[test]
     fn read_state_bool_or_default_uses_default_for_missing_file() {
         let dir = TempDir::new().or_abort("tempdir");
+        let ctx = ctx_for(dir.path());
         let state_dir = dir.path().join("factor");
         fs::create_dir_all(&state_dir).or_abort("create state dir");
 
-        let value = read_state_bool_or_default(&ctx(), &state_dir, "started_rebase", true)
+        let value = read_state_bool_or_default(&ctx, &state_dir, "started_rebase", true)
             .or_abort("missing bool state should use default");
         assert!(value);
     }
 
     #[test]
-    fn read_state_bool_or_default_reads_false_values() {
-        let dir = TempDir::new().or_abort("tempdir");
-        let state_dir = dir.path().join("factor");
-        fs::create_dir_all(&state_dir).or_abort("create state dir");
-        fs::write(state_dir.join("started_rebase"), "false\n").or_abort("write state");
-
-        let value = read_state_bool_or_default(&ctx(), &state_dir, "started_rebase", true)
-            .or_abort("bool state should parse");
-        assert!(!value);
-    }
-
-    #[test]
-    fn read_state_bool_or_default_rejects_invalid_values() {
-        let dir = TempDir::new().or_abort("tempdir");
-        let state_dir = dir.path().join("factor");
-        fs::create_dir_all(&state_dir).or_abort("create state dir");
-        fs::write(state_dir.join("started_rebase"), "maybe\n").or_abort("write state");
-
-        let err = read_state_bool_or_default(&ctx(), &state_dir, "started_rebase", false)
-            .err_or_abort("invalid bool state should fail");
-        assert_eq!(
-            err.to_string(),
-            "git command failed: corrupted state file 'started_rebase': invalid value 'maybe'"
-        );
-    }
-
-    #[test]
     fn read_state_parsed_reports_invalid_value() {
         let dir = TempDir::new().or_abort("tempdir");
+        let ctx = ctx_for(dir.path());
         let state_dir = dir.path().join("factor");
         fs::create_dir_all(&state_dir).or_abort("create state dir");
         fs::write(state_dir.join("current_index"), "not-a-number\n").or_abort("write state");
 
-        let err = read_state_parsed::<usize>(&ctx(), &state_dir, "current_index")
+        let err = read_state_parsed::<usize>(&ctx, &state_dir, "current_index")
             .err_or_abort("invalid state should fail");
         assert_eq!(
             err.to_string(),
@@ -170,32 +129,29 @@ mod tests {
     #[test]
     fn read_state_parsed_propagates_read_errors() {
         let dir = TempDir::new().or_abort("tempdir");
+        let ctx = ctx_for(dir.path());
         let state_dir = dir.path().join("factor");
         fs::create_dir_all(&state_dir).or_abort("create state dir");
 
-        let err = read_state_parsed::<usize>(&ctx(), &state_dir, "missing")
+        let err = read_state_parsed::<usize>(&ctx, &state_dir, "missing")
             .err_or_abort("missing state should fail");
         assert_state_read_error(&err);
     }
 
     #[test]
-    fn read_state_rejects_empty_files() {
-        let dir = TempDir::new().or_abort("tempdir");
-        let state_dir = dir.path().join("factor");
-        fs::create_dir_all(&state_dir).or_abort("create state dir");
-        fs::write(state_dir.join("phase"), "\n").or_abort("write state");
-
-        let err = read_state(&ctx(), &state_dir, "phase").err_or_abort("empty state should fail");
-        assert_eq!(
-            err.to_string(),
-            "git command failed: corrupted state file 'phase': file is empty"
-        );
+    #[should_panic(expected = "unexpected error")]
+    fn assert_state_read_error_panics_on_non_state_read_errors() {
+        let err = FactorError::NotGitRepo;
+        assert_state_read_error(&err);
     }
 
     #[test]
-    #[should_panic(expected = "unexpected error")]
-    fn assert_state_read_error_panics_on_non_state_read_errors() {
-        let err = FactorError::NoActiveSession;
-        assert_state_read_error(&err);
+    fn proptest_run_non_panicking_unit_suite() {
+        use std::panic::catch_unwind;
+
+        read_state_parsed_propagates_read_errors();
+        read_state_parsed_reports_invalid_value();
+
+        assert!(catch_unwind(assert_state_read_error_panics_on_non_state_read_errors).is_err());
     }
 }

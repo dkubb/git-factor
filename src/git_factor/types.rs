@@ -86,7 +86,7 @@ impl TreeHash {
         test,
         expect(
             clippy::single_call_fn,
-            reason = "constructor is introduced before the orchestration callers that use it"
+            reason = "typed tree-hash parsing stays centralized while only tests use it so far"
         )
     )]
     pub(in crate::git_factor) fn new(raw: &str) -> Result<Self, FactorError> {
