@@ -373,24 +373,70 @@ fn build_ctx_from_cwd(cwd_result: io::Result<PathBuf>) -> Result<Ctx<'static>, F
 #[cfg(test)]
 mod tests {
     use super::{
-        CommitMessage, Ctx, CurrentIndex, FactorError, REAL_ENV, REAL_FS, REAL_IO, REAL_RUNNER,
+        CommitMessage, Ctx, CurrentIndex, FactorError, Io, REAL_ENV, REAL_FS, REAL_RUNNER,
         SessionPhase, ShortSha, SplitCount, StateBool, StateDir, StateFileKey, build_ctx_from_cwd,
         error_to_exit,
     };
     use crate::exit_codes::{EXIT_DATAERR, EXIT_SOFTWARE, EXIT_TEMPFAIL, EXIT_USAGE};
     use crate::git_factor::non_empty_msg;
     use crate::test_support::{OrAbort as _, ResultOrAbort as _};
+    use core::cell::RefCell;
     use core::num::NonZeroU8;
     use std::fs;
     use std::io;
     use std::path::{Path, PathBuf};
     use tempfile::TempDir;
 
-    fn ctx_for(path: &Path) -> Ctx<'static> {
+    #[derive(Default)]
+    struct BufferIo {
+        err: RefCell<String>,
+        out: RefCell<String>,
+    }
+
+    impl Io for BufferIo {
+        fn err(&self, text: &str) -> io::Result<()> {
+            self.err.borrow_mut().push_str(text);
+            Ok(())
+        }
+
+        fn errln(&self, line: &str) -> io::Result<()> {
+            let mut err = self.err.borrow_mut();
+            err.push_str(line);
+            err.push('\n');
+            Ok(())
+        }
+
+        fn out(&self, text: &str) -> io::Result<()> {
+            self.out.borrow_mut().push_str(text);
+            Ok(())
+        }
+
+        fn outln(&self, line: &str) -> io::Result<()> {
+            let mut out = self.out.borrow_mut();
+            out.push_str(line);
+            out.push('\n');
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn buffer_io_collects_text() {
+        let io = BufferIo::default();
+
+        io.out("out").or_abort("write stdout");
+        io.outln(" line").or_abort("write stdout line");
+        io.err("err").or_abort("write stderr");
+        io.errln(" line").or_abort("write stderr line");
+
+        assert_eq!(io.out.borrow().as_str(), "out line\n");
+        assert_eq!(io.err.borrow().as_str(), "err line\n");
+    }
+
+    fn ctx_for(path: &Path, io: &'static dyn Io) -> Ctx<'static> {
         Ctx {
             runner: &REAL_RUNNER,
             cwd: path.to_path_buf(),
-            io: &REAL_IO,
+            io,
             env: &REAL_ENV,
             fs: &REAL_FS,
         }
@@ -446,7 +492,8 @@ mod tests {
         let state_dir = dir.path().join("factor");
         fs::create_dir_all(&state_dir).or_abort("create factor dir");
         fs::write(state_dir.join("current_index"), "41\n").or_abort("write current_index");
-        let ctx = ctx_for(dir.path());
+        let io = Box::leak(Box::new(BufferIo::default()));
+        let ctx = ctx_for(dir.path(), io);
 
         let current_index =
             CurrentIndex::read(&ctx, &StateDir::new(state_dir)).or_abort("read current_index");
@@ -477,7 +524,8 @@ mod tests {
         let state_dir = dir.path().join("factor");
         fs::create_dir_all(&state_dir).or_abort("create factor dir");
         fs::write(state_dir.join("split_count"), "1\n").or_abort("write split_count");
-        let ctx = ctx_for(dir.path());
+        let io = Box::leak(Box::new(BufferIo::default()));
+        let ctx = ctx_for(dir.path(), io);
 
         let split_count =
             SplitCount::read(&ctx, &StateDir::new(state_dir)).or_abort("read split_count");
