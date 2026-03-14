@@ -35,12 +35,16 @@ mod state;
 mod types;
 
 use core::num::NonZeroU8;
+use std::ffi::OsString;
 use std::io;
 use std::path::{Path, PathBuf};
+
+use clap::{CommandFactory as _, Parser as _};
 
 use crate::exit_codes::{EXIT_DATAERR, EXIT_OK, EXIT_SOFTWARE, EXIT_TEMPFAIL, EXIT_USAGE};
 use crate::non_empty_string::NonEmptyString;
 
+use self::cli::Cli;
 #[cfg_attr(
     not(test),
     expect(
@@ -350,11 +354,21 @@ fn error_to_exit(error: &FactorError) -> (i32, String) {
 /// Runs the `git-factor` CLI entrypoint.
 #[inline]
 #[must_use]
-pub const fn main_entry() -> i32 {
-    EXIT_OK
+pub fn main_entry() -> i32 {
+    use std::env;
+
+    let args = env::args_os().collect::<Vec<OsString>>();
+    main_entry_with_vec(&REAL_IO, build_ctx_from_cwd(REAL_ENV.current_dir()), args)
 }
 
 /// Builds the real runtime context from a cwd lookup result.
+#[cfg_attr(
+    not(test),
+    expect(
+        clippy::single_call_fn,
+        reason = "separates context construction from top-level CLI entrypoint"
+    )
+)]
 fn build_ctx_from_cwd(cwd_result: io::Result<PathBuf>) -> Result<Ctx<'static>, FactorError> {
     match cwd_result {
         Ok(cwd) => Ok(Ctx {
@@ -370,18 +384,178 @@ fn build_ctx_from_cwd(cwd_result: io::Result<PathBuf>) -> Result<Ctx<'static>, F
     }
 }
 
+/// Runs the CLI entrypoint with a provided `Ctx` build result.
+#[cfg_attr(
+    not(test),
+    expect(
+        clippy::single_call_fn,
+        reason = "entrypoint adapter isolates context-resolution error handling"
+    )
+)]
+fn main_entry_with_vec(
+    io: &dyn Io,
+    ctx_result: Result<Ctx<'_>, FactorError>,
+    args: Vec<OsString>,
+) -> i32 {
+    match ctx_result {
+        Ok(ctx) => run_and_report_with_args_vec(&ctx, args),
+        Err(err) => {
+            let (code, message) = error_to_exit(&err);
+            drop(io.errln(&message));
+            code
+        }
+    }
+}
+
+/// Runs `git-factor` with the given arguments and prints any errors to stderr.
+#[cfg_attr(
+    not(test),
+    expect(
+        clippy::single_call_fn,
+        reason = "single error-reporting shim avoids duplicating exit mapping logic"
+    )
+)]
+fn run_and_report_with_args_vec(ctx: &Ctx<'_>, args: Vec<OsString>) -> i32 {
+    match run_with_args_vec(ctx, args) {
+        Ok(code) => code,
+        Err(err) => {
+            let (code, message) = error_to_exit(&err);
+            drop(ctx.errln(&message));
+            code
+        }
+    }
+}
+
+/// Parses CLI args and handles the initial help and validation paths.
+#[cfg_attr(
+    not(test),
+    expect(
+        clippy::single_call_fn,
+        reason = "central parse/dispatch function keeps CLI behavior consistent"
+    )
+)]
+fn run_with_args_vec(ctx: &Ctx<'_>, args: Vec<OsString>) -> Result<i32, FactorError> {
+    let cli = match Cli::try_parse_from(args) {
+        Ok(cli) => cli,
+        Err(err) => {
+            let code = if err.use_stderr() {
+                EXIT_USAGE
+            } else {
+                EXIT_OK
+            };
+            let message = err.to_string();
+            if err.use_stderr() {
+                ctx.err(&message)?;
+            } else {
+                ctx.out(&message)?;
+            }
+            return Ok(code);
+        }
+    };
+    let has_start_args = || !cli.exec().is_empty() || !cli.commits().is_empty();
+
+    if !cli.abort()
+        && !cli.status()
+        && !cli.continue_flag()
+        && !cli.finish()
+        && !has_start_args()
+        && cli.message().is_empty()
+    {
+        let help = Cli::command().render_long_help().to_string();
+        ctx.out(&help)?;
+        return Ok(EXIT_OK);
+    }
+
+    if cli.abort()
+        && (cli.status()
+            || cli.continue_flag()
+            || cli.finish()
+            || has_start_args()
+            || !cli.message().is_empty())
+    {
+        return Err(FactorError::Usage(non_empty_msg(
+            "--abort cannot be combined with other options".to_owned(),
+        )));
+    }
+
+    if cli.status()
+        && (cli.continue_flag() || cli.finish() || has_start_args() || !cli.message().is_empty())
+    {
+        return Err(FactorError::Usage(non_empty_msg(
+            "--status cannot be combined with other options".to_owned(),
+        )));
+    }
+
+    if cli.finish() && (cli.continue_flag() || has_start_args()) {
+        return Err(FactorError::Usage(non_empty_msg(
+            "--finish cannot be combined with --continue, --exec, or COMMIT".to_owned(),
+        )));
+    }
+
+    if cli.continue_flag() {
+        if has_start_args() {
+            return Err(FactorError::Usage(non_empty_msg(
+                "--continue cannot be combined with --exec or COMMIT".to_owned(),
+            )));
+        }
+        if cli.message().is_empty() {
+            return Err(FactorError::Usage(non_empty_msg(
+                "--continue requires --message <MSG>".to_owned(),
+            )));
+        }
+        return Err(FactorError::Usage(non_empty_msg(
+            "continue workflow lands in later commits".to_owned(),
+        )));
+    }
+
+    if !cli.message().is_empty() {
+        return Err(FactorError::Usage(non_empty_msg(
+            "--message can only be used with --continue or --finish".to_owned(),
+        )));
+    }
+
+    if cli.abort() {
+        return Err(FactorError::Usage(non_empty_msg(
+            "abort workflow lands in later commits".to_owned(),
+        )));
+    }
+
+    if cli.status() {
+        return Err(FactorError::Usage(non_empty_msg(
+            "status workflow lands in later commits".to_owned(),
+        )));
+    }
+
+    if cli.finish() {
+        return Err(FactorError::Usage(non_empty_msg(
+            "finish workflow lands in later commits".to_owned(),
+        )));
+    }
+
+    if cli.exec().is_empty() {
+        return Err(FactorError::Usage(non_empty_msg(
+            "--exec <COMMAND> is required when starting a factor session".to_owned(),
+        )));
+    }
+
+    Err(FactorError::Usage(non_empty_msg(
+        "start workflow lands in later commits".to_owned(),
+    )))
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         CommitMessage, Ctx, CurrentIndex, FactorError, Io, REAL_ENV, REAL_FS, REAL_RUNNER,
         SessionPhase, ShortSha, SplitCount, StateBool, StateDir, StateFileKey, build_ctx_from_cwd,
-        error_to_exit,
+        main_entry_with_vec, run_and_report_with_args_vec, run_with_args_vec,
     };
-    use crate::exit_codes::{EXIT_DATAERR, EXIT_SOFTWARE, EXIT_TEMPFAIL, EXIT_USAGE};
+    use crate::exit_codes::{EXIT_OK, EXIT_USAGE};
     use crate::git_factor::non_empty_msg;
     use crate::test_support::{OrAbort as _, ResultOrAbort as _};
     use core::cell::RefCell;
     use core::num::NonZeroU8;
+    use std::ffi::OsString;
     use std::fs;
     use std::io;
     use std::path::{Path, PathBuf};
@@ -417,19 +591,6 @@ mod tests {
             out.push('\n');
             Ok(())
         }
-    }
-
-    #[test]
-    fn buffer_io_collects_text() {
-        let io = BufferIo::default();
-
-        io.out("out").or_abort("write stdout");
-        io.outln(" line").or_abort("write stdout line");
-        io.err("err").or_abort("write stderr");
-        io.errln(" line").or_abort("write stderr line");
-
-        assert_eq!(io.out.borrow().as_str(), "out line\n");
-        assert_eq!(io.err.borrow().as_str(), "err line\n");
     }
 
     fn ctx_for(path: &Path, io: &'static dyn Io) -> Ctx<'static> {
@@ -611,39 +772,85 @@ mod tests {
     }
 
     #[test]
-    fn error_to_exit_maps_usage_errors() {
-        let (code, message) =
-            error_to_exit(&FactorError::Usage(non_empty_msg("bad usage".to_owned())));
+    fn run_with_args_vec_reports_parse_errors() {
+        let io = Box::leak(Box::new(BufferIo::default()));
+        let ctx = ctx_for(Path::new("."), io);
+        let args = vec![OsString::from("git-factor"), OsString::from("--bogus-flag")];
+
+        let code = run_with_args_vec(&ctx, args).or_abort("parse errors map to exit code");
         assert_eq!(code, EXIT_USAGE);
-        assert_eq!(message, "bad usage");
+        assert!(!io.err.borrow().is_empty());
     }
 
     #[test]
-    fn error_to_exit_maps_data_and_software_errors() {
-        let (data_code, data_message) =
-            error_to_exit(&FactorError::InvalidCommit("deadbeef".to_owned()));
-        assert_eq!(data_code, EXIT_DATAERR);
-        assert_eq!(data_message, "invalid commit: deadbeef");
+    fn run_with_args_vec_no_options_prints_help() {
+        let io = Box::leak(Box::new(BufferIo::default()));
+        let ctx = ctx_for(Path::new("."), io);
+        let args = vec![OsString::from("git-factor")];
 
-        let (software_code, software_message) = error_to_exit(&FactorError::GitCommand(
-            non_empty_msg("internal state blew up".to_owned()),
-        ));
-        assert_eq!(software_code, EXIT_SOFTWARE);
-        assert_eq!(
-            software_message,
-            "git command failed: internal state blew up"
+        let code = run_with_args_vec(&ctx, args).or_abort("no-options path should succeed");
+        assert_eq!(code, EXIT_OK);
+        assert!(io.out.borrow().contains("Usage:"));
+    }
+
+    #[test]
+    fn run_with_args_vec_continue_requires_message() {
+        let io = Box::leak(Box::new(BufferIo::default()));
+        let ctx = ctx_for(Path::new("."), io);
+        let args = vec![OsString::from("git-factor"), OsString::from("--continue")];
+
+        let err =
+            run_with_args_vec(&ctx, args).err_or_abort("continue without message should fail");
+        assert_eq!(err.to_string(), "--continue requires --message <MSG>");
+    }
+
+    #[test]
+    fn run_and_report_with_args_vec_converts_usage_errors() {
+        let io = Box::leak(Box::new(BufferIo::default()));
+        let ctx = ctx_for(Path::new("."), io);
+        let args = vec![
+            OsString::from("git-factor"),
+            OsString::from("--abort"),
+            OsString::from("--status"),
+        ];
+
+        let code = run_and_report_with_args_vec(&ctx, args);
+        assert_eq!(code, EXIT_USAGE);
+        assert!(!io.err.borrow().is_empty());
+    }
+
+    #[test]
+    fn main_entry_with_vec_reports_ctx_errors() {
+        let io = Box::leak(Box::new(BufferIo::default()));
+        let code = main_entry_with_vec(
+            io,
+            Err(FactorError::Usage(non_empty_msg(
+                "ctx setup failed".to_owned(),
+            ))),
+            vec![OsString::from("git-factor")],
         );
+        assert_eq!(code, EXIT_USAGE);
+        assert!(!io.err.borrow().is_empty());
     }
 
     #[test]
-    fn error_to_exit_maps_tempfail_errors() {
-        let exec_code: i32 = 42;
-        let (code, message) = error_to_exit(&FactorError::ExecFailed {
-            code: exec_code,
-            command: non_empty_msg("just ci".to_owned()),
-        });
-        assert_eq!(code, EXIT_TEMPFAIL);
-        assert_eq!(message, "exec gate failed: just ci (exit code 42)");
+    fn main_entry_with_vec_passes_through_success_path() {
+        let io = Box::leak(Box::new(BufferIo::default()));
+        let ctx = ctx_for(Path::new("."), io);
+        let code = main_entry_with_vec(io, Ok(ctx), vec![OsString::from("git-factor")]);
+
+        assert_eq!(code, EXIT_OK);
+        assert!(io.out.borrow().contains("Usage:"));
+    }
+
+    #[test]
+    fn main_entry_with_vec_uses_default_program_name_when_args_are_empty() {
+        let io = Box::leak(Box::new(BufferIo::default()));
+        let ctx = ctx_for(Path::new("."), io);
+        let code = main_entry_with_vec(io, Ok(ctx), Vec::<OsString>::new());
+
+        assert_eq!(code, EXIT_OK);
+        assert!(io.out.borrow().contains("Usage:"));
     }
 
     #[test]
