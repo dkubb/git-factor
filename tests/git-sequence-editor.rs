@@ -12,11 +12,15 @@ mod support;
 
 #[cfg(test)]
 mod tests {
+    use core::panic::AssertUnwindSafe;
+    use core::time::Duration;
     use std::env;
     use std::ffi::{OsStr, OsString};
     use std::fs;
+    use std::panic::{catch_unwind, resume_unwind};
     use std::path::{Path, PathBuf};
     use std::process::{self, Command};
+    use std::thread::sleep;
 
     use assert_cmd::assert::OutputAssertExt as _;
     use predicates::prelude::*;
@@ -223,23 +227,6 @@ exec echo hi\n\
     }
 
     #[test]
-    fn rejects_duplicate_edit_flags() {
-        let dir = TempDir::new().or_abort();
-        let path = dir.path().join("todo");
-        fs::write(&path, "pick abc1234 first\n").or_abort();
-
-        run_editor(
-            &["--edit", "abc1234", "--edit", "abc1234"],
-            GitSequenceEditorExpectation {
-                code: EXIT_FAILURE,
-                stderr: "duplicate edit sha: abc1234\n".to_owned(),
-                ..Default::default()
-            },
-            &path,
-        );
-    }
-
-    #[test]
     fn rejects_duplicate_pick_flags_after_sha_normalization() {
         let dir = TempDir::new().or_abort();
         let path = dir.path().join("todo");
@@ -288,6 +275,23 @@ exec echo hi\n\
     }
 
     #[test]
+    fn rejects_duplicate_edit_flags() {
+        let dir = TempDir::new().or_abort();
+        let path = dir.path().join("todo");
+        fs::write(&path, "pick abc1234 first\n").or_abort();
+
+        run_editor(
+            &["--edit", "abc1234", "--edit", "abc1234"],
+            GitSequenceEditorExpectation {
+                code: EXIT_FAILURE,
+                stderr: "duplicate edit sha: abc1234\n".to_owned(),
+                ..Default::default()
+            },
+            &path,
+        );
+    }
+
+    #[test]
     fn rejects_duplicate_edit_flags_after_sha_normalization() {
         let dir = TempDir::new().or_abort();
         let path = dir.path().join("todo");
@@ -333,6 +337,59 @@ exec echo hi\n\
             &path,
         );
         let _keep_alive = wrap_dir;
+    }
+
+    #[test]
+    fn rejects_contradictory_action_requests() {
+        let dir = TempDir::new().or_abort();
+        let path = dir.path().join("todo");
+        fs::write(&path, "pick abc1234 first\n").or_abort();
+
+        run_editor(
+            &["--pick", "abc1234", "--drop", "abc1234"],
+            GitSequenceEditorExpectation {
+                code: EXIT_FAILURE,
+                stderr: "sha specified multiple times: abc1234\n".to_owned(),
+                ..Default::default()
+            },
+            &path,
+        );
+    }
+
+    #[test]
+    fn rejects_contradictory_pick_and_edit_requests() {
+        let dir = TempDir::new().or_abort();
+        let path = dir.path().join("todo");
+        fs::write(&path, "pick abc1234 first\n").or_abort();
+
+        run_editor(
+            &["--pick", "abc1234", "--edit", "abc1234"],
+            GitSequenceEditorExpectation {
+                code: EXIT_FAILURE,
+                stderr: "sha specified multiple times: abc1234\n".to_owned(),
+                todo_content: Some("pick abc1234 first\n".to_owned()),
+                ..Default::default()
+            },
+            &path,
+        );
+    }
+
+    #[test]
+    fn rejects_contradictory_edit_and_drop_requests() {
+        let dir = TempDir::new().or_abort();
+        let path = dir.path().join("todo");
+        fs::write(&path, "pick abc1234 first\n").or_abort();
+
+        run_editor(
+            &["--edit", "abc1234", "--drop", "abc1234"],
+            GitSequenceEditorExpectation {
+                code: EXIT_FAILURE,
+                stderr: "sha specified multiple times: abc1234\n".to_owned(),
+                todo_content: Some("pick abc1234 first\n".to_owned()),
+                ..Default::default()
+            },
+            &path,
+        );
     }
 
     #[test]
@@ -476,59 +533,6 @@ exec echo hi\n\
             GitSequenceEditorExpectation {
                 code: EXIT_FAILURE,
                 stderr: "sha not present in todo: deadbeef\n".to_owned(),
-                ..Default::default()
-            },
-            &path,
-        );
-    }
-
-    #[test]
-    fn rejects_contradictory_action_requests() {
-        let dir = TempDir::new().or_abort();
-        let path = dir.path().join("todo");
-        fs::write(&path, "pick abc1234 first\n").or_abort();
-
-        run_editor(
-            &["--pick", "abc1234", "--drop", "abc1234"],
-            GitSequenceEditorExpectation {
-                code: EXIT_FAILURE,
-                stderr: "sha specified multiple times: abc1234\n".to_owned(),
-                ..Default::default()
-            },
-            &path,
-        );
-    }
-
-    #[test]
-    fn rejects_contradictory_pick_and_edit_requests() {
-        let dir = TempDir::new().or_abort();
-        let path = dir.path().join("todo");
-        fs::write(&path, "pick abc1234 first\n").or_abort();
-
-        run_editor(
-            &["--pick", "abc1234", "--edit", "abc1234"],
-            GitSequenceEditorExpectation {
-                code: EXIT_FAILURE,
-                stderr: "sha specified multiple times: abc1234\n".to_owned(),
-                todo_content: Some("pick abc1234 first\n".to_owned()),
-                ..Default::default()
-            },
-            &path,
-        );
-    }
-
-    #[test]
-    fn rejects_contradictory_edit_and_drop_requests() {
-        let dir = TempDir::new().or_abort();
-        let path = dir.path().join("todo");
-        fs::write(&path, "pick abc1234 first\n").or_abort();
-
-        run_editor(
-            &["--edit", "abc1234", "--drop", "abc1234"],
-            GitSequenceEditorExpectation {
-                code: EXIT_FAILURE,
-                stderr: "sha specified multiple times: abc1234\n".to_owned(),
-                todo_content: Some("pick abc1234 first\n".to_owned()),
                 ..Default::default()
             },
             &path,
@@ -1188,5 +1192,76 @@ edit abc1234 first
             },
             &path,
         );
+    }
+
+    #[test]
+    fn proptest_run_integration_suite() {
+        const MAX_ATTEMPTS: usize = 3;
+        for attempt in 1..=MAX_ATTEMPTS {
+            let result = catch_unwind(AssertUnwindSafe(|| {
+                accepts_abbreviated_commit_and_non_commit_actions();
+                accepts_all_supported_non_commit_actions();
+                accepts_indented_comments_and_blank_lines();
+                help_flag_exits_success_and_writes_stdout();
+                version_flag_exits_success_and_writes_stdout();
+                preserves_comments_and_blank_lines();
+                preserves_malformed_pick_line_without_sha_when_no_actions_requested();
+                rejects_ambiguous_long_sha_resolution_in_todo();
+                rejects_contradictory_action_requests();
+                rejects_contradictory_edit_and_drop_requests();
+                rejects_contradictory_pick_and_edit_requests();
+                rejects_drop_sha_not_present_in_todo();
+                rejects_duplicate_drop_flags();
+                rejects_duplicate_drop_flags_after_sha_normalization();
+                rejects_duplicate_edit_flags();
+                rejects_duplicate_edit_flags_after_sha_normalization();
+                rejects_duplicate_pick_flags();
+                rejects_duplicate_pick_flags_after_sha_normalization();
+                rejects_duplicate_pick_flags_after_sha_normalization_via_resolved_long_sha();
+                rejects_edit_sha_not_present_in_todo();
+                rejects_non_hex_40_char_sha_without_rev_parse();
+                rejects_non_hex_todo_sha_token_on_commit_actions();
+                rejects_pick_sha_not_present_in_todo();
+                rejects_resolved_long_sha_when_not_present_in_todo();
+                rejects_unsupported_todo_actions();
+                rejects_uppercase_todo_action();
+                reports_error_when_rev_parse_cannot_spawn();
+                reports_error_when_rev_parse_fails();
+                reports_error_when_todo_file_is_missing();
+                resolves_hex40_to_full_sha_token_present_in_todo();
+                resolves_hex40_via_rev_parse_and_maps_to_todo_token();
+                resolves_uppercase_hex40_via_rev_parse_and_maps_to_todo_token();
+                updates_todo_for_drop_and_edit_requests();
+                warns_when_drop_request_is_idempotent();
+                warns_when_drop_request_is_idempotent_for_short_action();
+                warns_when_edit_request_is_idempotent();
+                warns_when_pick_request_is_idempotent();
+                #[cfg(unix)]
+                reports_error_when_todo_file_is_not_writable();
+            }));
+
+            match result {
+                Ok(()) => return,
+                Err(payload) => {
+                    let transient = match (
+                        payload.downcast_ref::<&str>(),
+                        payload.downcast_ref::<String>(),
+                    ) {
+                        (Some(message), _) => {
+                            message.contains("Resource temporarily unavailable (os error 35)")
+                        }
+                        (None, Some(message)) => {
+                            message.contains("Resource temporarily unavailable (os error 35)")
+                        }
+                        (None, None) => false,
+                    };
+                    if attempt < MAX_ATTEMPTS && transient {
+                        sleep(Duration::from_millis(50));
+                        continue;
+                    }
+                    resume_unwind(payload);
+                }
+            }
+        }
     }
 }
