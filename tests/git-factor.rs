@@ -259,4 +259,86 @@ EXAMPLES:
                 "--message can only be used with --continue or --finish\n".to_owned(),
             ));
     }
+
+    #[test]
+    fn start_placeholder_reports_later_workflow() {
+        let dir = init_repo();
+        let repo = dir.path();
+
+        commit_file(repo, "file.txt", "base\n", "chore: base");
+
+        Command::new(git_factor_bin())
+            .current_dir(repo)
+            .args(["--exec", "true", "HEAD"])
+            .assert()
+            .code(EXIT_USAGE)
+            .stdout(predicate::str::is_empty())
+            .stderr(predicate::str::diff(
+                "start workflow lands in later commits\n".to_owned(),
+            ));
+    }
+
+    #[test]
+    fn continue_placeholder_reports_later_workflow() {
+        let dir = init_repo();
+        let repo = dir.path();
+
+        Command::new(git_factor_bin())
+            .current_dir(repo)
+            .args(["--continue", "--message", "test: slice"])
+            .assert()
+            .code(EXIT_USAGE)
+            .stdout(predicate::str::is_empty())
+            .stderr(predicate::str::diff(
+                "continue workflow lands in later commits\n".to_owned(),
+            ));
+    }
+
+    #[test]
+    fn abort_placeholder_reports_later_workflow() {
+        let dir = init_repo();
+        let repo = dir.path();
+
+        Command::new(git_factor_bin())
+            .current_dir(repo)
+            .arg("--abort")
+            .assert()
+            .code(EXIT_USAGE)
+            .stdout(predicate::str::is_empty())
+            .stderr(predicate::str::diff(
+                "abort workflow lands in later commits\n".to_owned(),
+            ));
+    }
+
+    #[test]
+    fn status_placeholder_reports_later_workflow() {
+        let dir = init_repo();
+        let repo = dir.path();
+
+        Command::new(git_factor_bin())
+            .current_dir(repo)
+            .arg("--status")
+            .assert()
+            .code(EXIT_USAGE)
+            .stdout(predicate::str::is_empty())
+            .stderr(predicate::str::diff(
+                "status workflow lands in later commits\n".to_owned(),
+            ));
+    }
+
+    #[test]
+    fn finish_placeholder_reports_later_workflow() {
+        let dir = init_repo();
+        let repo = dir.path();
+
+        Command::new(git_factor_bin())
+            .current_dir(repo)
+            .arg("--finish")
+            .assert()
+            .code(EXIT_USAGE)
+            .stdout(predicate::str::is_empty())
+            .stderr(predicate::str::diff(
+                "finish workflow lands in later commits\n".to_owned(),
+            ));
+    }
 }
