@@ -402,3 +402,150 @@ pub(in crate::git_sequence_editor) fn validate_todo_format(content: &str) -> Res
 
     Ok(())
 }
+
+/// Returns the commit-ish token from a todo line when present.
+pub(in crate::git_sequence_editor) fn parse_todo_sha(line: &str) -> Option<&str> {
+    let action = match parse_todo_action(line).and_then(TodoActionKind::parse) {
+        Some(action) => action,
+        None => return None,
+    };
+    if is_commit_action_kind(action) {
+        line.split_whitespace().nth(1)
+    } else {
+        None
+    }
+}
+
+/// Returns the action keyword token from a todo line when present.
+pub(in crate::git_sequence_editor) fn parse_todo_action(line: &str) -> Option<&str> {
+    let trimmed = line.trim_start();
+    if trimmed.is_empty() || trimmed.starts_with('#') {
+        return None;
+    }
+    trimmed.split_whitespace().next()
+}
+
+/// Errors if `shas` contains duplicates.
+fn validate_no_duplicates(label: RequestedActionKind, shas: &[TodoSha]) -> Result<(), TodoError> {
+    let mut set = BTreeSet::new();
+    for sha in shas {
+        if !set.insert(sha.as_str()) {
+            return Err(TodoError::DuplicateRequestedActionSha {
+                label,
+                sha: sha.as_str().to_owned(),
+            });
+        }
+    }
+    Ok(())
+}
+
+// Test override hook for the `git` binary used by `resolve_requested_sha`.
+// Defaults to `None` (use `"git"`). Unit tests set this thread-local override
+// to exercise spawn-error branches deterministically.
+thread_local! {
+    static TEST_GIT_BIN_OVERRIDE: Cell<Option<&'static str>> = const { Cell::new(None) };
+}
+
+/// Resolves a requested SHA to the exact token used in the todo file.
+pub(in crate::git_sequence_editor) fn resolve_requested_sha(
+    requested: &str,
+    todo_shas: &BTreeSet<TodoSha>,
+) -> Result<TodoSha, TodoError> {
+    let raw = requested;
+
+    if let Some(matched) = todo_shas.get(raw) {
+        return Ok(matched.clone());
+    }
+
+    let full_requested = match FullHexSha::try_from(requested) {
+        Ok(full_requested) => full_requested,
+        Err(err) => return Err(err),
+    };
+
+    let commit_ref = format!("{}^{{commit}}", full_requested.as_str());
+    let git_bin = TEST_GIT_BIN_OVERRIDE.with(|override_bin| override_bin.get().unwrap_or("git"));
+    let output_result = process::Command::new(git_bin)
+        .args(["rev-parse", "--verify", "--quiet", &commit_ref])
+        .output()
+        .map_err(|err| TodoError::GitRevParseSpawn {
+            message: err.to_string(),
+        });
+    let output = match output_result {
+        Ok(command_output) => command_output,
+        Err(err) => return Err(err),
+    };
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(TodoError::GitRevParseFailed {
+            code: output.status.code().unwrap_or(1),
+            stderr: stderr.trim().to_owned(),
+        });
+    }
+
+    let full = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    if let Ok(full_sha) = FullHexSha::try_from(full.as_str())
+        && let Some(matched) = todo_shas.get(full_sha.as_str())
+    {
+        return Ok(matched.clone());
+    }
+
+    // Find a unique todo SHA that is a prefix of the resolved full SHA.
+    let mut candidates = Vec::<TodoSha>::new();
+    for short in todo_shas {
+        if full.starts_with(short.as_str()) {
+            candidates.push(short.clone());
+        }
+    }
+
+    match candidates.len() {
+        0 => Err(TodoError::ShaNotPresentInTodo { sha: full }),
+        1 => Ok(candidates.swap_remove(0)),
+        _ => Err(TodoError::AmbiguousShaInTodo { sha: full }),
+    }
+}
+
+/// Builds the requested action map, rejecting duplicates and contradictions.
+#[cfg_attr(
+    not(test),
+    expect(
+        clippy::single_call_fn,
+        reason = "single helper centralizes duplicate/action conflict validation"
+    )
+)]
+pub(in crate::git_sequence_editor) fn build_requested_actions(
+    cli: &Cli,
+    todo_shas: &BTreeSet<TodoSha>,
+) -> Result<BTreeMap<TodoSha, Action>, TodoError> {
+    if let Err(err) = validate_no_duplicates(RequestedActionKind::Pick, cli.pick()) {
+        return Err(err);
+    }
+    if let Err(err) = validate_no_duplicates(RequestedActionKind::Edit, cli.edit()) {
+        return Err(err);
+    }
+    if let Err(err) = validate_no_duplicates(RequestedActionKind::Drop, cli.drop()) {
+        return Err(err);
+    }
+
+    let mut out = BTreeMap::<TodoSha, Action>::new();
+    macro_rules! insert_requested {
+        ($shas:expr, $action:expr) => {
+            for sha in $shas {
+                let resolved = match resolve_requested_sha(sha.as_str(), todo_shas) {
+                    Ok(resolved) => resolved,
+                    Err(err) => return Err(err),
+                };
+                if out.insert(resolved.clone(), $action).is_some() {
+                    return Err(TodoError::DuplicateRequestedSha {
+                        sha: resolved.as_str().to_owned(),
+                    });
+                }
+            }
+        };
+    }
+    insert_requested!(cli.pick(), Action::Pick);
+    insert_requested!(cli.edit(), Action::Edit);
+    insert_requested!(cli.drop(), Action::Drop);
+
+    Ok(out)
+}
