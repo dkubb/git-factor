@@ -392,6 +392,8 @@ mod tests {
     use alloc::collections::{BTreeMap, BTreeSet};
     use std::path::Path;
 
+    use tempfile::TempDir;
+
     use super::todo::{
         Action, TodoSha, is_hex40, parse_todo_action, parse_todo_sha, resolve_requested_sha,
         rewrite_todo, validate_todo_format,
@@ -542,4 +544,225 @@ exec echo hi\n\
         assert_eq!(parse_todo_sha("s abc1234 squash subject"), Some("abc1234"));
         assert_eq!(parse_todo_sha("f abc1234 fixup subject"), Some("abc1234"));
     }
+
+    #[test]
+    fn run_for_reports_missing_todo_file() {
+        let dir = TempDir::new().or_abort("");
+        let todo_path = dir.path().join("missing-todo");
+        let cli = Cli::for_tests(vec![], vec![], todo_path, vec![]);
+        let err = run_for(&cli).err_or_abort("").to_string();
+        assert!(
+            err.starts_with("failed to read todo file:"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn run_for_propagates_requested_action_resolution_errors() {
+        let _guard = lock_write_fail_point_test();
+        set_write_fail_point(WriteFailPoint::None);
+        let dir = TempDir::new().or_abort("");
+        let todo_path = dir.path().join("git-rebase-todo");
+        fs::write(&todo_path, "pick abc1234 first\n").or_abort("");
+        let cli = Cli::for_tests(
+            vec![TodoSha::new("deadbeef").or_abort("")],
+            vec![],
+            todo_path,
+            vec![],
+        );
+
+        let err = run_for(&cli).err_or_abort("").to_string();
+        assert_eq!(err, "sha not present in todo: deadbeef");
+    }
+
+    #[test]
+    fn run_for_propagates_atomic_write_errors() {
+        let _guard = lock_write_fail_point_test();
+        set_write_fail_point(WriteFailPoint::None);
+        let dir = TempDir::new().or_abort("");
+        let todo_path = dir.path().join("git-rebase-todo");
+        fs::write(&todo_path, "pick abc1234 first\n").or_abort("");
+        let cli = Cli::for_tests(
+            vec![],
+            vec![],
+            todo_path,
+            vec![TodoSha::new("abc1234").or_abort("")],
+        );
+
+        set_write_fail_point(WriteFailPoint::Write);
+        let err = run_for(&cli).err_or_abort("").to_string();
+        assert!(
+            err.contains("failed to write temporary todo file"),
+            "unexpected error: {err}"
+        );
+
+        set_write_fail_point(WriteFailPoint::None);
+    }
+
+    #[test]
+    fn run_for_writes_idempotent_action_warnings() {
+        let _guard = lock_write_fail_point_test();
+        set_write_fail_point(WriteFailPoint::None);
+        let dir = TempDir::new().or_abort("");
+        let todo_path = dir.path().join("git-rebase-todo");
+        fs::write(&todo_path, "pick abc1234 first\n").or_abort("");
+        let cli = Cli::for_tests(
+            vec![],
+            vec![],
+            todo_path.clone(),
+            vec![TodoSha::new("abc1234").or_abort("")],
+        );
+
+        run_for(&cli).or_abort("");
+        let content = fs::read_to_string(&todo_path).or_abort("");
+        assert_eq!(content, "pick abc1234 first\n");
+    }
+
+    #[test]
+    fn write_file_atomic_rejects_paths_without_parent_or_file_name() {
+        let _guard = lock_write_fail_point_test();
+        set_write_fail_point(WriteFailPoint::None);
+        let no_parent = write_file_atomic(Path::new(""), "content")
+            .err_or_abort("")
+            .to_string();
+        assert!(
+            no_parent.contains("failed to determine parent directory"),
+            "unexpected error: {no_parent}"
+        );
+
+        let no_file_name = write_file_atomic(Path::new("."), "content")
+            .err_or_abort("")
+            .to_string();
+        assert!(
+            no_file_name.contains("failed to determine file name"),
+            "unexpected error: {no_file_name}"
+        );
+    }
+
+    #[test]
+    fn write_file_atomic_reports_temp_create_failure_for_missing_parent() {
+        let _guard = lock_write_fail_point_test();
+        set_write_fail_point(WriteFailPoint::None);
+        let dir = TempDir::new().or_abort("");
+        let path = dir.path().join("missing").join("todo");
+        let err = write_file_atomic(&path, "content")
+            .err_or_abort("")
+            .to_string();
+        assert!(
+            err.contains("failed to create temporary todo file"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn write_file_atomic_reports_write_and_sync_failpoints() {
+        let _guard = lock_write_fail_point_test();
+        set_write_fail_point(WriteFailPoint::None);
+        let dir = TempDir::new().or_abort("");
+        let path = dir.path().join("todo");
+
+        set_write_fail_point(WriteFailPoint::Write);
+        let write_err = write_file_atomic(&path, "content")
+            .err_or_abort("")
+            .to_string();
+        assert!(
+            write_err.contains("failed to write temporary todo file"),
+            "unexpected error: {write_err}"
+        );
+
+        set_write_fail_point(WriteFailPoint::Sync);
+        let sync_err = write_file_atomic(&path, "content")
+            .err_or_abort("")
+            .to_string();
+        assert!(
+            sync_err.contains("failed to sync temporary todo file"),
+            "unexpected error: {sync_err}"
+        );
+
+        set_write_fail_point(WriteFailPoint::None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_file_atomic_reports_parent_directory_open_and_sync_failpoints() {
+        let _guard = lock_write_fail_point_test();
+        set_write_fail_point(WriteFailPoint::None);
+        let dir = TempDir::new().or_abort("");
+        let path = dir.path().join("todo");
+
+        set_write_fail_point(WriteFailPoint::OpenParentDir);
+        let open_err = write_file_atomic(&path, "pick abc1234 first\n")
+            .err_or_abort("")
+            .to_string();
+        assert!(
+            open_err.contains("failed to open parent directory"),
+            "unexpected error: {open_err}"
+        );
+
+        set_write_fail_point(WriteFailPoint::SyncParentDir);
+        let sync_err = write_file_atomic(&path, "pick abc1234 first\n")
+            .err_or_abort("")
+            .to_string();
+        assert!(
+            sync_err.contains("failed to sync parent directory"),
+            "unexpected error: {sync_err}"
+        );
+
+        set_write_fail_point(WriteFailPoint::None);
+    }
+
+    #[test]
+    fn write_file_atomic_reports_rename_failure_for_directory_target() {
+        let _guard = lock_write_fail_point_test();
+        set_write_fail_point(WriteFailPoint::None);
+        let dir = TempDir::new().or_abort("");
+        let target = dir.path().join("todo");
+        fs::create_dir_all(&target).or_abort("");
+
+        let err = write_file_atomic(&target, "content")
+            .err_or_abort("")
+            .to_string();
+        assert!(
+            err.contains("failed to atomically replace todo file"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn write_file_atomic_skips_existing_temp_slot_and_succeeds() {
+        let _guard = lock_write_fail_point_test();
+        set_write_fail_point(WriteFailPoint::None);
+        let dir = TempDir::new().or_abort("");
+        let path = dir.path().join("todo");
+        fs::write(&path, "pick abc1234 old\n").or_abort("");
+
+        let pid = process::id();
+        fs::write(dir.path().join(format!("todo.tmp{pid}.0")), "taken").or_abort("");
+
+        write_file_atomic(&path, "pick abc1234 new\n").or_abort("");
+        let actual = fs::read_to_string(&path).or_abort("");
+        assert_eq!(actual, "pick abc1234 new\n");
+    }
+
+    #[test]
+    fn write_file_atomic_reports_exhausted_temp_names() {
+        let _guard = lock_write_fail_point_test();
+        set_write_fail_point(WriteFailPoint::None);
+        let dir = TempDir::new().or_abort("");
+        let path = dir.path().join("todo");
+        let pid = process::id();
+        for attempt in u32::MIN..TEMP_FILE_ATTEMPTS_MAX {
+            let name = format!("todo.tmp{pid}.{attempt}");
+            fs::write(dir.path().join(name), "taken").or_abort("");
+        }
+
+        let err = write_file_atomic(&path, "content")
+            .err_or_abort("")
+            .to_string();
+        assert!(
+            err.contains("failed to create a unique temporary file"),
+            "unexpected error: {err}"
+        );
+    }
+
 }
