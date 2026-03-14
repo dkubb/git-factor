@@ -1635,3 +1635,283 @@ fn start_range_ref_runner(repo: &Path, sha_a: &str, sha_b: &str) -> ScriptedRunn
 }
 
 #[cfg(unix)]
+fn exit_status(code: i32) -> ExitStatus {
+    use std::os::unix::process::ExitStatusExt as _;
+    ExitStatus::from_raw(code)
+}
+
+fn ctx_for(path: &Path) -> Ctx<'static> {
+    Ctx {
+        runner: &REAL_RUNNER,
+        cwd: path.to_path_buf(),
+        io: &REAL_IO,
+        env: &REAL_ENV,
+        fs: &REAL_FS,
+    }
+}
+
+fn ctx_from_parts<'ctx>(
+    env: &'ctx dyn Env,
+    runner: &'ctx dyn Runner,
+    io: &'ctx dyn Io,
+    fs: &'ctx dyn Fs,
+) -> Result<Ctx<'ctx>, FactorError> {
+    let cwd = match env.current_dir() {
+        Ok(cwd) => cwd,
+        Err(err) => {
+            return Err(FactorError::GitCommand(non_empty_msg(format!(
+                "cannot resolve cwd: {err}"
+            ))));
+        }
+    };
+    Ok(Ctx {
+        cwd,
+        env,
+        fs,
+        io,
+        runner,
+    })
+}
+
+#[test]
+fn read_state_reports_corrupted_empty_state_file() {
+    let dir = TempDir::new().or_abort("tempdir");
+    let state_dir = dir.path().join("factor-state");
+    fs::create_dir_all(&state_dir).or_abort("create state dir");
+    fs::write(state_dir.join("short_sha"), "\n").or_abort("write state file");
+    let ctx = ctx_for(dir.path());
+
+    let err =
+        read_state(&ctx, &state_dir, "short_sha").err_or_abort("empty state file should error");
+
+    assert!(matches!(
+        err,
+        FactorError::GitCommand(message)
+            if message.as_str() == "corrupted state file 'short_sha': file is empty"
+    ));
+}
+
+#[test]
+fn scripted_runner_status_includes_env_key() {
+    let dir = TempDir::new().or_abort("tempdir");
+    let runner = ScriptedRunner::default();
+
+    let err = runner
+        .status(
+            "git",
+            &["status"],
+            &[("GIT_OPTIONAL_LOCKS", "0")],
+            false,
+            dir.path(),
+        )
+        .err_or_abort("expected missing scripted status to error");
+
+    assert!(
+        err.to_string().contains("unexpected status call"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn scripted_runner_missing_output_is_an_error() {
+    let dir = TempDir::new().or_abort("tempdir");
+    let runner = ScriptedRunner::default();
+
+    let err = runner
+        .output("git", &["version"], dir.path())
+        .err_or_abort("expected missing scripted output to error");
+
+    assert!(
+        err.to_string().contains("unexpected output call"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn scripted_runner_missing_status_is_an_error() {
+    let dir = TempDir::new().or_abort("tempdir");
+    let runner = ScriptedRunner::default();
+
+    let err = runner
+        .status("git", &["status"], &[], false, dir.path())
+        .err_or_abort("expected missing scripted status to error");
+
+    assert!(
+        err.to_string().contains("unexpected status call"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn git_commit_preserving_metadata_returns_error_on_truncated_format() {
+    let dir = TempDir::new().or_abort("tempdir");
+    let repo = dir.path();
+    let sha = "a".repeat(SHA_LEN);
+    let runner = ScriptedRunner::default()
+        .with_output("git", &["rev-parse", "--git-dir"], repo, ".git\n")
+        .with_output(
+            "git",
+            &[
+                "show",
+                "--format=%an%x00%ae%x00%aI%x00%cn%x00%ce%x00%cI",
+                "--no-patch",
+                &sha,
+            ],
+            repo,
+            "Alice\0alice@example.com",
+        );
+    let io = TestIo::default();
+    let env = TestEnv {
+        cwd: repo.to_path_buf(),
+    };
+    let ctx = Ctx {
+        runner: &runner,
+        cwd: repo.to_path_buf(),
+        io: &io,
+        env: &env,
+        fs: &REAL_FS,
+    };
+
+    let commit = CommitSha::new(sha).or_abort("commit sha");
+    let msg = NonEmptyString::try_from("feat: msg".to_owned()).or_abort("msg");
+    let messages = NonEmpty::new(msg);
+
+    let err = git_commit_preserving_metadata(&ctx, &commit, &messages, false)
+        .err_or_abort("truncated format must return error");
+
+    assert!(
+        err.to_string().contains("truncated commit metadata"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn git_commit_preserving_metadata_propagates_git_output_error() {
+    let dir = TempDir::new().or_abort("tempdir");
+    let repo = dir.path();
+    let runner = with_git_dir_outputs(ScriptedRunner::default(), repo, 6);
+    let io = TestIo::default();
+    let env = TestEnv {
+        cwd: repo.to_path_buf(),
+    };
+    let ctx = Ctx {
+        runner: &runner,
+        cwd: repo.to_path_buf(),
+        io: &io,
+        env: &env,
+        fs: &REAL_FS,
+    };
+
+    let commit = CommitSha::new("a".repeat(SHA_LEN)).or_abort("commit sha");
+    let msg = NonEmptyString::try_from("feat: msg".to_owned()).or_abort("msg");
+    let messages = NonEmpty::new(msg);
+
+    let err = git_commit_preserving_metadata(&ctx, &commit, &messages, false)
+        .err_or_abort("expected git output error");
+
+    assert!(
+        err.to_string().contains("unexpected output call"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn env_returns_configured_cwd_and_exe() {
+    let dir = TempDir::new().or_abort("tempdir");
+    let env = TestEnv {
+        cwd: dir.path().to_path_buf(),
+    };
+
+    assert_eq!(env.current_dir().or_abort("cwd"), dir.path());
+    assert_eq!(
+        env.current_exe().or_abort("exe"),
+        dir.path().join("git-factor")
+    );
+    assert_eq!(env.var_os("ANY"), None);
+}
+
+#[test]
+fn real_env_delegates_to_std_env() {
+    let cwd = env::current_dir().or_abort("cwd");
+    assert_eq!(REAL_ENV.current_dir().or_abort("real cwd"), cwd);
+
+    let exe = env::current_exe().or_abort("exe");
+    assert_eq!(REAL_ENV.current_exe().or_abort("real exe"), exe);
+
+    // Cargo sets this for tests; it avoids env mutation (tests run in parallel).
+    assert!(REAL_ENV.var_os("CARGO_MANIFEST_DIR").is_some());
+}
+
+#[test]
+fn failing_io_out_is_reachable_for_coverage() {
+    let io = FailingIo;
+    let err = io.out("io fail").err_or_abort("expected io failure");
+    assert!(err.to_string().contains("io fail"), "err was: {err:?}");
+}
+
+#[test]
+fn real_io_writes_to_stdout_and_stderr() {
+    // Nextest captures test output; keep it minimal while exercising RealIo.
+    REAL_IO.out("").or_abort("out");
+    REAL_IO.err("").or_abort("err");
+    REAL_IO.outln("").or_abort("outln");
+    REAL_IO.errln("").or_abort("errln");
+}
+
+#[test]
+fn failing_io_errln_is_reachable_for_coverage() {
+    let io = FailingIo;
+    let err = io.errln("io fail").err_or_abort("expected io failure");
+    assert!(err.to_string().contains("io fail"), "err was: {err:?}");
+}
+
+#[test]
+fn failing_io_err_is_reachable_for_coverage() {
+    let io = FailingIo;
+    let err = io.err("io fail").err_or_abort("expected io failure");
+    assert!(err.to_string().contains("io fail"), "err was: {err:?}");
+}
+
+#[test]
+fn nth_io_failure_errln_is_reachable_for_coverage() {
+    let io = NthIoFailure::new(2);
+    let err = io.errln("io fail").err_or_abort("expected io failure");
+    assert!(err.to_string().contains("io fail"), "err was: {err:?}");
+}
+
+#[test]
+fn nth_io_failure_outln_first_write_failure_is_reachable_for_coverage() {
+    let io = NthIoFailure::new(1);
+    let err = io.outln("io fail").err_or_abort("expected io failure");
+    assert!(err.to_string().contains("io fail"), "err was: {err:?}");
+}
+
+#[test]
+fn nth_io_failure_outln_second_write_failure_is_reachable_for_coverage() {
+    let io = NthIoFailure::new(2);
+    let err = io.outln("io fail").err_or_abort("expected io failure");
+    assert!(err.to_string().contains("io fail"), "err was: {err:?}");
+}
+
+#[test]
+fn nth_io_failure_errln_first_write_failure_is_reachable_for_coverage() {
+    let io = NthIoFailure::new(1);
+    let err = io.errln("io fail").err_or_abort("expected io failure");
+    assert!(err.to_string().contains("io fail"), "err was: {err:?}");
+}
+
+#[test]
+fn default_outln_error_path_is_reachable_for_coverage() {
+    let io = DefaultOutlnFailingIo;
+    let err = io.outln("io fail").err_or_abort("expected io failure");
+    assert!(err.to_string().contains("io fail"), "err was: {err:?}");
+    io.err("").or_abort("err ok");
+}
+
+#[test]
+fn default_outln_success_path_is_reachable_for_coverage() {
+    let io = DefaultOutlnFailingIo;
+    io.outln("ok").or_abort("expected io success");
+}
+
+#[test]
