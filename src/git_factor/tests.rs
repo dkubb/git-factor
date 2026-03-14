@@ -1442,3 +1442,196 @@ fn start_single_head_root_runner(
         &format!("{}\n", repo.display()),
     )
 }
+
+fn run_start_two_shas(ctx: &Ctx<'_>, sha_a: &str, sha_b: &str) -> Result<i32, FactorError> {
+    run_with_args_vec(
+        ctx,
+        vec![
+            OsString::from("git-factor"),
+            OsString::from("--exec"),
+            OsString::from("true"),
+            OsString::from(sha_a),
+            OsString::from(sha_b),
+        ],
+    )
+}
+
+fn build_sequence_editor(repo: &Path) -> String {
+    let canon_repo = fs::canonicalize(repo).or_abort("canonicalize repo");
+    let editor = canon_repo.join("git-sequence-editor");
+    let factor = repo.join("git-factor");
+    let editor_str = editor.to_str().or_abort("editor path is UTF-8");
+    let factor_str = factor.to_str().or_abort("factor path is UTF-8");
+    let preflight_zero = format!(
+        "{} {} {}",
+        shell_quote(factor_str),
+        shell_quote("rebase-exec-preflight"),
+        shell_quote("0")
+    );
+    let begin_zero = format!(
+        "{} {} {}",
+        shell_quote(factor_str),
+        shell_quote("rebase-exec-begin"),
+        shell_quote("0")
+    );
+    let preflight_one = format!(
+        "{} {} {}",
+        shell_quote(factor_str),
+        shell_quote("rebase-exec-preflight"),
+        shell_quote("1")
+    );
+    let begin_one = format!(
+        "{} {} {}",
+        shell_quote(factor_str),
+        shell_quote("rebase-exec-begin"),
+        shell_quote("1")
+    );
+    [
+        shell_quote(editor_str),
+        shell_quote("--factor-target"),
+        shell_quote("aaaaaaa"),
+        shell_quote("--factor-preflight"),
+        shell_quote(preflight_zero.as_str()),
+        shell_quote("--factor-begin"),
+        shell_quote(begin_zero.as_str()),
+        shell_quote("--factor-target"),
+        shell_quote("bbbbbbb"),
+        shell_quote("--factor-preflight"),
+        shell_quote(preflight_one.as_str()),
+        shell_quote("--factor-begin"),
+        shell_quote(begin_one.as_str()),
+    ]
+    .join(" ")
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "range start fixture scripts the entire preflight, sequence-editor, and rebase setup flow"
+)]
+fn start_range_ref_runner(repo: &Path, sha_a: &str, sha_b: &str) -> ScriptedRunner {
+    let seq_editor = build_sequence_editor(repo);
+    with_git_dir_outputs(ScriptedRunner::default(), repo, 2)
+        .with_output("git", &["status", "--porcelain=v1"], repo, "")
+        .with_output(
+            "git",
+            &["rev-list", "a..b"],
+            repo,
+            &format!("{sha_a}\n{sha_b}\n"),
+        )
+        .with_output(
+            "git",
+            &["rev-list", "--reverse", "--topo-order", sha_a, sha_b],
+            repo,
+            &format!("{sha_a}\n{sha_b}\n"),
+        )
+        .with_output(
+            "git",
+            &["rev-parse", "--verify", "HEAD"],
+            repo,
+            &format!("{sha_b}\n"),
+        )
+        .with_status(
+            "git",
+            &["merge-base", "--is-ancestor", sha_a, "HEAD"],
+            &[],
+            true,
+            repo,
+            0,
+        )
+        .with_status(
+            "git",
+            &["merge-base", "--is-ancestor", sha_b, "HEAD"],
+            &[],
+            true,
+            repo,
+            0,
+        )
+        .with_status(
+            "git",
+            &["rev-parse", "--quiet", "--verify", &format!("{sha_a}^2")],
+            &[],
+            true,
+            repo,
+            1,
+        )
+        .with_status(
+            "git",
+            &["rev-parse", "--quiet", "--verify", &format!("{sha_b}^2")],
+            &[],
+            true,
+            repo,
+            1,
+        )
+        .with_output("git", &["rev-parse", "--short", sha_a], repo, "aaaaaaa\n")
+        .with_output(
+            "git",
+            &["show", "--format=%B", "--no-patch", sha_a],
+            repo,
+            "msg\n",
+        )
+        .with_status(
+            "bash",
+            &["--norc", "--noprofile", "-n", "-c", "true"],
+            &[],
+            true,
+            repo,
+            0,
+        )
+        .with_status(
+            "git",
+            &["rev-parse", "--quiet", "--verify", &format!("{sha_a}^")],
+            &[],
+            true,
+            repo,
+            0,
+        )
+        .with_output("git", &["rev-parse", "--short", sha_a], repo, "aaaaaaa\n")
+        .with_output("git", &["rev-parse", "--short", sha_b], repo, "bbbbbbb\n")
+        .with_status(
+            "git",
+            &[
+                "rebase",
+                "--empty",
+                "drop",
+                "--interactive",
+                "--no-autosquash",
+                "--no-autostash",
+                "--no-rebase-merges",
+                "--no-stat",
+                "--quiet",
+                "--reschedule-failed-exec",
+                &format!("{sha_a}^"),
+            ],
+            &[
+                ("GIT_EDITOR", "false"),
+                ("GIT_SEQUENCE_EDITOR", seq_editor.as_str()),
+            ],
+            false,
+            repo,
+            0,
+        )
+        .with_output("git", &["status", "--porcelain=v1"], repo, "")
+        .with_status("git", &["reset", "--quiet", "HEAD~1"], &[], false, repo, 0)
+        .with_output(
+            "git",
+            &["show", "--format=%B", "--no-patch", sha_a],
+            repo,
+            "msg\n",
+        )
+        .with_output("git", &["rev-parse", "--short", sha_a], repo, "aaaaaaa\n")
+        .with_output("git", &["diff", "--stat"], repo, "")
+        .with_output(
+            "git",
+            &["ls-files", "--others", "--exclude-standard"],
+            repo,
+            "",
+        )
+        .with_output(
+            "git",
+            &["rev-parse", "--show-toplevel"],
+            repo,
+            &format!("{}\n", repo.display()),
+        )
+}
+
+#[cfg(unix)]
