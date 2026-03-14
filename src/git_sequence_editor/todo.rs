@@ -1524,3 +1524,126 @@ mod proptests {
             prop_assert_eq!(actual, expected);
         }
     }
+
+    proptest! {
+        #[test]
+        fn proptest_supported_action_broad_yields_supported(action in supported_action_broad()) {
+            prop_assert!(canonical_action(action.as_str()).is_some());
+        }
+
+        #[test]
+        fn proptest_supported_action_biased_yields_supported(action in supported_action_biased()) {
+            prop_assert!(canonical_action(action.as_str()).is_some());
+        }
+
+        #[test]
+        fn proptest_supported_action_generator_yields_supported(action in supported_action()) {
+            prop_assert!(canonical_action(action.as_str()).is_some());
+        }
+
+        #[test]
+        fn proptest_non_commit_action_generator_yields_non_commit_actions(action in non_commit_action()) {
+            prop_assert!(!is_commit_action(action.as_str()));
+        }
+
+        #[test]
+        fn proptest_action_token_generator_yields_non_empty_tokens(token in action_token()) {
+            prop_assert!(!token.is_empty());
+        }
+
+        #[test]
+        fn proptest_hex40_valid_generators_yield_hex(value in hex40_valid()) {
+            prop_assert!(is_hex40(value.as_str()));
+        }
+
+        #[test]
+        fn proptest_hex40_valid_broad_generator_yields_hex(value in hex40_valid_broad()) {
+            prop_assert!(is_hex40(value.as_str()));
+        }
+
+        #[test]
+        fn proptest_hex40_valid_biased_generator_yields_hex(value in hex40_valid_biased()) {
+            prop_assert!(is_hex40(value.as_str()));
+        }
+
+        #[test]
+        fn proptest_hex40_invalid_generators_yield_non_hex(value in hex40_invalid()) {
+            prop_assert!(!is_hex40(value.as_str()));
+        }
+
+        #[test]
+        fn proptest_hex40_invalid_broad_generator_yields_non_hex(value in hex40_invalid_broad()) {
+            prop_assert!(!is_hex40(value.as_str()));
+        }
+
+        #[test]
+        fn proptest_hex40_invalid_biased_generator_yields_non_hex(value in hex40_invalid_biased()) {
+            prop_assert!(!is_hex40(value.as_str()));
+        }
+
+        #[test]
+        fn proptest_rewrite_change_case_generator_produces_different_actions((current, target) in rewrite_change_case()) {
+            let target_action = target.as_str();
+            prop_assert!(target_action == "pick" || target_action == "edit" || target_action == "drop");
+            prop_assert_ne!(current, target_action);
+        }
+
+        #[test]
+        fn proptest_rewrite_same_case_generator_produces_matching_actions((current, target) in rewrite_same_case()) {
+            let target_action = target.as_str();
+            prop_assert!(
+                (target_action == "pick" && (current == "pick" || current == "p"))
+                    || (target_action == "edit" && (current == "edit" || current == "e"))
+                    || (target_action == "drop" && (current == "drop" || current == "d"))
+            );
+        }
+    }
+
+    #[test]
+    fn proptest_canonical_action_rejects_unknown_action() {
+        assert_eq!(canonical_action("zz"), None);
+    }
+
+    #[test]
+    fn proptest_canonical_action_marks_commit_actions_correctly() {
+        let commit_actions = [
+            "pick", "p", "reword", "r", "edit", "e", "squash", "s", "fixup", "f", "drop", "d",
+        ];
+        let non_commit_actions = [
+            "exec",
+            "x",
+            "break",
+            "b",
+            "label",
+            "l",
+            "reset",
+            "t",
+            "merge",
+            "m",
+            "noop",
+            "update-ref",
+            "u",
+        ];
+
+        for action in commit_actions {
+            assert!(
+                canonical_action(action).is_some(),
+                "action should be supported: {action}"
+            );
+            assert!(
+                is_commit_action(action),
+                "action should be commit action: {action}"
+            );
+        }
+        for action in non_commit_actions {
+            assert!(
+                canonical_action(action).is_some(),
+                "action should be supported: {action}"
+            );
+            assert!(
+                !is_commit_action(action),
+                "action should be non-commit action: {action}"
+            );
+        }
+    }
+}
