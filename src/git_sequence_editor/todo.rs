@@ -1,9 +1,17 @@
+use alloc::collections::BTreeMap;
+use alloc::collections::BTreeSet;
 use core::borrow::Borrow;
+use core::cell::Cell;
 use core::fmt;
 use core::str::FromStr;
+use std::process;
 use thiserror::Error;
 
 use crate::non_empty_string::NonEmptyString;
+#[cfg(test)]
+use crate::test_support::{OrAbort, ResultOrAbort};
+
+use super::cli::Cli;
 
 /// Exact length of a full hexadecimal SHA token.
 pub(in crate::git_sequence_editor) const FULL_HEX_SHA_LEN: usize = 40;
@@ -196,5 +204,52 @@ impl TryFrom<&str> for FullHexSha {
             });
         }
         Ok(Self(TodoSha(non_empty)))
+    }
+}
+
+/// Result of rewriting todo content.
+pub(in crate::git_sequence_editor) struct RewriteTodoResult {
+    /// Rewritten todo file contents.
+    output: String,
+    /// Warning messages emitted during rewrite.
+    warnings: Vec<String>,
+}
+
+/// Extra lines to insert after a targeted factor commit.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(in crate::git_sequence_editor) struct FactorInsertion {
+    /// Command that snapshots the green baseline into factor state.
+    begin_command: NonEmptyString,
+    /// Preflight command that must pass before beginning the split session.
+    preflight_command: NonEmptyString,
+}
+
+impl FactorInsertion {
+    /// Returns the begin command.
+    const fn begin_command(&self) -> &NonEmptyString {
+        &self.begin_command
+    }
+
+    /// Returns the preflight command.
+    const fn preflight_command(&self) -> &NonEmptyString {
+        &self.preflight_command
+    }
+}
+
+impl RewriteTodoResult {
+    /// Consumes and returns parts for tests and compatibility call sites.
+    #[cfg(test)]
+    pub(in crate::git_sequence_editor) fn into_parts(self) -> (String, Vec<String>) {
+        (self.output, self.warnings)
+    }
+
+    /// Returns rewritten todo content.
+    pub(in crate::git_sequence_editor) const fn output(&self) -> &str {
+        self.output.as_str()
+    }
+
+    /// Returns rewrite warnings.
+    pub(in crate::git_sequence_editor) const fn warnings(&self) -> &[String] {
+        self.warnings.as_slice()
     }
 }
