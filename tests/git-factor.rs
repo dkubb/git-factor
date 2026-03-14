@@ -157,4 +157,106 @@ EXAMPLES:
                 "--message can only be used with --continue or --finish\n".to_owned(),
             ));
     }
+
+    #[test]
+    fn rejects_finish_when_combined_with_exec_or_commit() {
+        let dir = init_repo();
+        let repo = dir.path();
+
+        Command::new(git_factor_bin())
+            .current_dir(repo)
+            .args(["--finish", "--exec", "true", "HEAD"])
+            .assert()
+            .code(EXIT_USAGE)
+            .stdout(predicate::str::is_empty())
+            .stderr(predicate::str::diff(
+                "--finish cannot be combined with --continue, --exec, or COMMIT\n".to_owned(),
+            ));
+    }
+
+    #[test]
+    fn rejects_finish_when_combined_with_continue() {
+        let dir = init_repo();
+        let repo = dir.path();
+
+        Command::new(git_factor_bin())
+            .current_dir(repo)
+            .args(["--finish", "--continue", "--message", "test: msg"])
+            .assert()
+            .code(EXIT_USAGE)
+            .stdout(predicate::str::is_empty())
+            .stderr(predicate::str::diff(
+                "--finish cannot be combined with --continue, --exec, or COMMIT\n".to_owned(),
+            ));
+    }
+
+    #[test]
+    fn rejects_finish_when_combined_with_commit() {
+        let dir = init_repo();
+        let repo = dir.path();
+
+        commit_file(repo, "file.txt", "one\n", "chore: base");
+
+        Command::new(git_factor_bin())
+            .current_dir(repo)
+            .args(["--finish", "HEAD"])
+            .assert()
+            .code(EXIT_USAGE)
+            .stdout(predicate::str::is_empty())
+            .stderr(predicate::str::diff(
+                "--finish cannot be combined with --continue, --exec, or COMMIT\n".to_owned(),
+            ));
+    }
+
+    #[test]
+    fn rejects_continue_when_combined_with_exec_or_commit() {
+        let dir = init_repo();
+        let repo = dir.path();
+
+        Command::new(git_factor_bin())
+            .current_dir(repo)
+            .args(["--continue", "--exec", "true", "--message", "test: msg"])
+            .assert()
+            .code(EXIT_USAGE)
+            .stdout(predicate::str::is_empty())
+            .stderr(predicate::str::diff(
+                "--continue cannot be combined with --exec or COMMIT\n".to_owned(),
+            ));
+    }
+
+    #[test]
+    fn rejects_continue_when_combined_with_commit() {
+        let dir = init_repo();
+        let repo = dir.path();
+
+        commit_file(repo, "file.txt", "one\n", "chore: base");
+
+        Command::new(git_factor_bin())
+            .current_dir(repo)
+            .args(["--continue", "--message", "test: msg", "HEAD"])
+            .assert()
+            .code(EXIT_USAGE)
+            .stdout(predicate::str::is_empty())
+            .stderr(predicate::str::diff(
+                "--continue cannot be combined with --exec or COMMIT\n".to_owned(),
+            ));
+    }
+
+    #[test]
+    fn rejects_start_when_message_is_provided() {
+        let dir = init_repo();
+        let repo = dir.path();
+
+        commit_file(repo, "file.txt", "one\n", "chore: base");
+
+        Command::new(git_factor_bin())
+            .current_dir(repo)
+            .args(["--exec", "true", "--message", "test: msg", "HEAD"])
+            .assert()
+            .code(EXIT_USAGE)
+            .stdout(predicate::str::is_empty())
+            .stderr(predicate::str::diff(
+                "--message can only be used with --continue or --finish\n".to_owned(),
+            ));
+    }
 }
