@@ -721,3 +721,184 @@ pub(in crate::git_sequence_editor) fn todo_shas_in(content: &str) -> BTreeSet<To
     }
     set
 }
+
+#[cfg(test)]
+mod coverage_extra_tests {
+    use alloc::collections::BTreeSet;
+    use std::path::Path;
+
+    use super::*;
+
+    fn todo_sha(value: &str) -> TodoSha {
+        TodoSha::new(value).or_abort("")
+    }
+
+    fn head_commit_sha() -> String {
+        let output = process::Command::new("git")
+            .args(["rev-parse", "--verify", "--quiet", "HEAD^{commit}"])
+            .output()
+            .or_abort("");
+        assert!(output.status.success(), "git rev-parse should succeed");
+        String::from_utf8_lossy(&output.stdout).trim().to_owned()
+    }
+
+    fn uppercase_variant(input: &str) -> String {
+        let mut changed = false;
+        let mapped = input
+            .chars()
+            .map(|ch| {
+                if !changed && ch.is_ascii_lowercase() {
+                    changed = true;
+                    ch.to_ascii_uppercase()
+                } else {
+                    ch
+                }
+            })
+            .collect::<String>();
+        assert!(
+            changed,
+            "expected at least one alphabetic hex character in commit SHA"
+        );
+        mapped
+    }
+
+    #[test]
+    fn action_as_str_supports_drop() {
+        assert_eq!(Action::Drop.as_str(), "drop");
+    }
+
+    #[test]
+    fn uppercase_variant_preserves_non_lowercase_tail_chars() {
+        assert_eq!(uppercase_variant("a1"), "A1");
+    }
+
+    #[test]
+    fn uppercase_variant_supports_non_lowercase_prefix() {
+        assert_eq!(uppercase_variant("1a"), "1A");
+    }
+
+    #[test]
+    fn is_hex40_accepts_lowercase_hex() {
+        let sha = "a".repeat(FULL_HEX_SHA_LEN);
+        assert!(is_hex40(sha.as_str()));
+    }
+
+    #[test]
+    fn resolve_requested_sha_returns_exact_short_sha_when_present() {
+        let requested = "abc1234";
+        let todo_shas = BTreeSet::from([TodoSha::new("abc1234").or_abort("")]);
+
+        let resolved = resolve_requested_sha(requested, &todo_shas).or_abort("");
+
+        assert_eq!(resolved.as_str(), "abc1234");
+    }
+
+    #[test]
+    fn rewrite_todo_rewrites_action_when_requested_action_differs() {
+        let todo = "  pick abc1234 first commit\n";
+        let requested = BTreeMap::from([(TodoSha::new("abc1234").or_abort(""), Action::Edit)]);
+
+        let (rewritten, warnings) = rewrite_todo(todo, &requested).into_parts();
+
+        assert_eq!(rewritten, "  edit abc1234 first commit\n");
+        assert!(warnings.is_empty(), "warnings were: {warnings:?}");
+    }
+
+    #[test]
+    fn resolve_requested_sha_accepts_uppercase_full_sha_when_todo_has_lowercase_full_sha() {
+        let full = head_commit_sha();
+        let requested = uppercase_variant(full.as_str());
+        let todo_shas = BTreeSet::from([TodoSha::new(full.as_str()).or_abort("")]);
+
+        let resolved = resolve_requested_sha(requested.as_str(), &todo_shas).or_abort("");
+
+        assert_eq!(resolved.as_str(), full);
+    }
+
+    #[test]
+    fn resolve_requested_sha_matches_unique_short_prefix_from_resolved_full_sha() {
+        let full = head_commit_sha();
+        let short = full.get(..12).or_abort("");
+        let requested = full.as_str();
+        let todo_shas = BTreeSet::from([TodoSha::new(short).or_abort("")]);
+
+        let resolved = resolve_requested_sha(requested, &todo_shas).or_abort("");
+
+        assert_eq!(resolved.as_str(), short);
+    }
+
+    #[test]
+    fn resolve_requested_sha_errors_when_no_todo_sha_prefix_matches_resolved_full_sha() {
+        let full = head_commit_sha();
+        let requested = full.as_str();
+        let first = full.chars().next().unwrap_or('0');
+        let replacement = char::from(b'0' + u8::from(first.eq_ignore_ascii_case(&'0')));
+        let other = format!("{replacement}0000000");
+        let todo_shas = BTreeSet::from([TodoSha::new(other.as_str()).or_abort("")]);
+
+        let err = resolve_requested_sha(requested, &todo_shas).err_or_abort("");
+
+        assert_eq!(err.to_string(), format!("sha not present in todo: {full}"));
+    }
+
+    #[test]
+    fn git_rev_parse_verify_full_reports_spawn_error_when_binary_is_missing() {
+        let requested = "a".repeat(FULL_HEX_SHA_LEN);
+        let todo_shas = BTreeSet::new();
+        TEST_GIT_BIN_OVERRIDE.with(|override_bin| override_bin.set(Some("git-does-not-exist")));
+        let err = resolve_requested_sha(requested.as_str(), &todo_shas).err_or_abort("");
+        TEST_GIT_BIN_OVERRIDE.with(|override_bin| override_bin.set(None));
+
+        assert!(err.to_string().starts_with("failed to run git rev-parse:"));
+    }
+
+    #[test]
+    fn resolve_requested_sha_errors_when_git_returns_non_sha_stdout() {
+        let requested = "a".repeat(FULL_HEX_SHA_LEN);
+        let todo_shas = BTreeSet::new();
+        TEST_GIT_BIN_OVERRIDE.with(|override_bin| override_bin.set(Some("true")));
+        let err = resolve_requested_sha(requested.as_str(), &todo_shas).err_or_abort("");
+        TEST_GIT_BIN_OVERRIDE.with(|override_bin| override_bin.set(None));
+
+        assert_eq!(err.to_string(), "sha not present in todo: ");
+    }
+
+    #[test]
+    fn resolve_requested_sha_errors_when_multiple_todo_prefixes_match_resolved_full_sha() {
+        let full = head_commit_sha();
+        let requested = full.as_str();
+        let short_a = full.get(..7).or_abort("");
+        let short_b = full.get(..8).or_abort("");
+        let todo_shas = BTreeSet::from([
+            TodoSha::new(short_a).or_abort(""),
+            TodoSha::new(short_b).or_abort(""),
+        ]);
+
+        let err = resolve_requested_sha(requested, &todo_shas).err_or_abort("");
+
+        assert_eq!(err.to_string(), format!("sha is ambiguous in todo: {full}"));
+    }
+
+    #[test]
+    fn build_requested_actions_supports_pick_edit_and_drop_without_conflicts() {
+        let content = "\
+pick aaaaaaa first\n\
+pick bbbbbbb second\n\
+pick ccccccc third\n\
+";
+        let todo_shas = todo_shas_in(content);
+        let cli = Cli::for_tests(
+            vec![todo_sha("ccccccc")],
+            vec![todo_sha("bbbbbbb")],
+            Path::new("todo").to_path_buf(),
+            vec![todo_sha("aaaaaaa")],
+        );
+
+        let requested = build_requested_actions(&cli, &todo_shas).or_abort("");
+
+        assert_eq!(requested.get("aaaaaaa"), Some(&Action::Pick));
+        assert_eq!(requested.get("bbbbbbb"), Some(&Action::Edit));
+        assert_eq!(requested.get("ccccccc"), Some(&Action::Drop));
+    }
+
+}
