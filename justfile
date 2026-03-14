@@ -1,4 +1,4 @@
-check:
-    cargo check --quiet
+test:
+    cargo test --quiet
 
-ci: check
+ci: test
