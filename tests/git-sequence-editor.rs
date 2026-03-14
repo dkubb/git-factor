@@ -807,4 +807,50 @@ edit abc1234 first
             &path,
         );
     }
+
+    #[test]
+    fn reports_error_when_todo_file_is_missing() {
+        let dir = TempDir::new().or_abort();
+        let path = dir.path().join("missing");
+
+        run_editor(
+            &["--drop", "abc1234"],
+            GitSequenceEditorExpectation {
+                code: EXIT_FAILURE,
+                stderr: "failed to read todo file: No such file or directory (os error 2)\n"
+                    .to_owned(),
+                todo_exists: false,
+                ..Default::default()
+            },
+            &path,
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn reports_error_when_todo_file_is_not_writable() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = TempDir::new().or_abort();
+        let path = dir.path().join("todo");
+        fs::write(&path, "pick abc1234 first\n").or_abort();
+
+        let mut perms = fs::metadata(dir.path()).or_abort().permissions();
+        perms.set_mode(0o555);
+        fs::set_permissions(dir.path(), perms).or_abort();
+
+        run_editor(
+            &["--drop", "abc1234"],
+            GitSequenceEditorExpectation {
+                code: EXIT_FAILURE,
+                stderr: format!(
+                    "failed to create temporary todo file for {}: Permission denied (os error 13)\n",
+                    path.display()
+                ),
+                todo_content: Some("pick abc1234 first\n".to_owned()),
+                ..Default::default()
+            },
+            &path,
+        );
+    }
 }
