@@ -1,7 +1,72 @@
 use core::fmt::Write as _;
+use core::str::FromStr;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::*;
+
+/// Parses the first actionable line from rebase todo text.
+macro_rules! first_rebase_todo_line_inline {
+    ($text:expr) => {
+        $text
+            .lines()
+            .map(str::trim)
+            .find(|line| !line.is_empty() && !line.starts_with('#'))
+            .map(str::to_owned)
+    };
+}
+
+/// Parses the last non-empty line from text.
+macro_rules! last_non_empty_line_inline {
+    ($text:expr) => {
+        $text
+            .lines()
+            .rev()
+            .map(str::trim)
+            .find(|line| !line.is_empty())
+            .map(str::to_owned)
+    };
+}
+
+/// Parses `git status --porcelain=v1` output into staged/unstaged/untracked sets.
+macro_rules! collect_status_paths_inline {
+    ($ctx:expr) => {{
+        let mut staged = Vec::new();
+        let mut unstaged = Vec::new();
+        let mut untracked = Vec::new();
+
+        if let Some((_code, status, _stderr)) =
+            maybe_git_output($ctx, &["status", "--porcelain=v1", "--untracked-files=all"])
+        {
+            for line in status.lines() {
+                let bytes = line.as_bytes();
+                let &[index_status, worktree_status, ..] = bytes else {
+                    continue;
+                };
+                let Some(path) = line.get(3..) else {
+                    continue;
+                };
+                let path_text = path.to_owned();
+                if index_status == b'?' && worktree_status == b'?' {
+                    if untracked.len() < TRACE_MAX_PATHS {
+                        untracked.push(path_text);
+                    }
+                    continue;
+                }
+                if index_status != b'?' && index_status != b' ' && staged.len() < TRACE_MAX_PATHS {
+                    staged.push(path_text.clone());
+                }
+                if worktree_status != b'?'
+                    && worktree_status != b' '
+                    && unstaged.len() < TRACE_MAX_PATHS
+                {
+                    unstaged.push(path_text);
+                }
+            }
+        }
+
+        (staged, unstaged, untracked)
+    }};
+}
 
 /// Environment variable enabling JSONL trace logging.
 pub(in crate::git_factor) const TRACE_LOG_ENV: &str = "GIT_FACTOR_TRACE_LOG";
@@ -202,4 +267,150 @@ pub(in crate::git_factor) fn push_json_array(buf: &mut String, key: &str, values
         let _wrote_value = write!(buf, "\"{}\"", json_escape(value)).is_ok();
     }
     buf.push(']');
+}
+
+/// Runs a git command and returns `(exit_code, stdout, stderr)` on success.
+pub(in crate::git_factor) fn maybe_git_output(
+    ctx: &Ctx<'_>,
+    args: &[&str],
+) -> Option<(i32, String, String)> {
+    let output = ctx.runner.output("git", args, &ctx.cwd).ok()?;
+    let code = status_code(output.status);
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+    Some((code, stdout, stderr))
+}
+
+/// Reads a file when present and returns its trimmed contents.
+pub(in crate::git_factor) fn read_trimmed_optional(ctx: &Ctx<'_>, path: &Path) -> Option<String> {
+    let content = ctx.fs.read_to_string(path).ok()?;
+    Some(content.trim().to_owned())
+}
+
+/// Reads a file when present, trims it, and parses to a typed value.
+pub(in crate::git_factor) fn read_trimmed_optional_parsed<T>(
+    ctx: &Ctx<'_>,
+    path: &Path,
+) -> Option<T>
+where
+    T: FromStr,
+{
+    read_trimmed_optional(ctx, path)?.parse().ok()
+}
+
+/// Reads an optional rebase counter from `path`.
+pub(in crate::git_factor) fn read_rebase_counter(
+    ctx: &Ctx<'_>,
+    path: &Path,
+) -> Option<RebaseCounter> {
+    read_trimmed_optional_parsed::<u32>(ctx, path).map(RebaseCounter)
+}
+
+/// Returns the first non-empty, non-comment line from a rebase todo file.
+#[cfg(test)]
+pub(in crate::git_factor) fn first_rebase_todo_line(text: &str) -> Option<String> {
+    first_rebase_todo_line_inline!(text)
+}
+
+/// Returns the last non-empty line in `text`.
+#[cfg(test)]
+pub(in crate::git_factor) fn last_non_empty_line(text: &str) -> Option<String> {
+    last_non_empty_line_inline!(text)
+}
+
+/// Collects staged, unstaged, and untracked paths from porcelain status output.
+#[cfg(test)]
+pub(in crate::git_factor) fn collect_status_paths(
+    ctx: &Ctx<'_>,
+) -> (Vec<String>, Vec<String>, Vec<String>) {
+    collect_status_paths_inline!(ctx)
+}
+
+/// Captures repository/factor/rebase state for process trace records.
+pub(in crate::git_factor) fn collect_repo_snapshot(ctx: &Ctx<'_>) -> RepoSnapshot {
+    let mut snapshot = RepoSnapshot::default();
+
+    if let Some((_code, head, _stderr)) = maybe_git_output(ctx, &["rev-parse", "--verify", "HEAD"])
+        && !head.is_empty()
+    {
+        snapshot.head = Some(head);
+    }
+
+    let head_tree_spec = format!("HEAD^{}tree{}", '{', '}');
+    if let Some((_code, tree, _stderr)) =
+        maybe_git_output(ctx, &["rev-parse", "--verify", head_tree_spec.as_str()])
+        && !tree.is_empty()
+    {
+        snapshot.head_tree = Some(tree);
+    }
+
+    let git_dir = git_dir_in(ctx).ok();
+    if let Some(dir) = git_dir.as_ref() {
+        snapshot.git_dir = Some(dir.to_string_lossy().into_owned());
+
+        if let Some((_code, toplevel, _stderr)) =
+            maybe_git_output(ctx, &["rev-parse", "--show-toplevel"])
+            && !toplevel.is_empty()
+        {
+            snapshot.toplevel = Some(toplevel);
+        }
+
+        let factor_dir = dir.join("factor");
+        snapshot.factor_current_index =
+            read_trimmed_optional_parsed::<usize>(ctx, &factor_dir.join("current_index"));
+        snapshot.factor_split_count =
+            read_trimmed_optional_parsed::<u32>(ctx, &factor_dir.join("split_count"));
+        snapshot.factor_requires_rebase =
+            read_trimmed_optional_parsed::<bool>(ctx, &factor_dir.join("requires_rebase"))
+                .map(StateBool::from_bool);
+        snapshot.factor_expected_tree =
+            read_trimmed_optional(ctx, &factor_dir.join("expected_tree"));
+
+        if let (Some(commits), Some(index)) = (
+            read_trimmed_optional(ctx, &factor_dir.join("commits")),
+            snapshot.factor_current_index,
+        ) {
+            let commit = commits
+                .lines()
+                .map(str::trim)
+                .filter(|line| !line.is_empty())
+                .nth(index)
+                .map(str::to_owned);
+            snapshot.factor_current_commit = commit;
+        }
+
+        let rebase_merge = dir.join(REBASE_MERGE_DIR);
+        let rebase_apply = dir.join(REBASE_APPLY_DIR);
+        if ctx.fs.is_dir(&rebase_merge) {
+            snapshot.rebase_state = Some(RebaseState::Merge);
+            snapshot.rebase_msgnum = read_rebase_counter(ctx, &rebase_merge.join("msgnum"));
+            snapshot.rebase_end = read_rebase_counter(ctx, &rebase_merge.join("end"));
+            snapshot.rebase_todo_head =
+                read_trimmed_optional(ctx, &rebase_merge.join("git-rebase-todo"))
+                    .as_deref()
+                    .and_then(|text| first_rebase_todo_line_inline!(text));
+            snapshot.rebase_done_tail = read_trimmed_optional(ctx, &rebase_merge.join("done"))
+                .as_deref()
+                .and_then(|text| last_non_empty_line_inline!(text));
+        } else if ctx.fs.is_dir(&rebase_apply) {
+            snapshot.rebase_state = Some(RebaseState::Apply);
+            snapshot.rebase_msgnum = read_rebase_counter(ctx, &rebase_apply.join("next"));
+            snapshot.rebase_end = read_rebase_counter(ctx, &rebase_apply.join("last"));
+            snapshot.rebase_todo_head =
+                read_trimmed_optional(ctx, &rebase_apply.join("patch")).map(|_| "patch".to_owned());
+            snapshot.rebase_done_tail = None;
+        } else {
+            snapshot.rebase_state = None;
+            snapshot.rebase_msgnum = None;
+            snapshot.rebase_end = None;
+            snapshot.rebase_todo_head = None;
+            snapshot.rebase_done_tail = None;
+        }
+    }
+
+    let (staged, unstaged, untracked) = collect_status_paths_inline!(ctx);
+    snapshot.staged_paths = staged;
+    snapshot.unstaged_paths = unstaged;
+    snapshot.untracked_paths = untracked;
+    snapshot
 }
