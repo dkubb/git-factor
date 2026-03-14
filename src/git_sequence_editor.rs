@@ -386,3 +386,160 @@ pub fn main_entry() -> i32 {
     let args = env::args_os().collect::<Vec<OsString>>();
     run_with_args_vec(args)
 }
+
+#[cfg(test)]
+mod tests {
+    use alloc::collections::{BTreeMap, BTreeSet};
+    use std::path::Path;
+
+    use super::todo::{
+        Action, TodoSha, is_hex40, parse_todo_action, parse_todo_sha, resolve_requested_sha,
+        rewrite_todo, validate_todo_format,
+    };
+    use super::*;
+
+    #[test]
+    fn rewrite_todo_rewrites_action_for_matching_sha_only() {
+        let requested = BTreeMap::from([(TodoSha::new("def5678").or_abort(""), Action::Edit)]);
+        let input = "\
+pick abc1234 first\n\
+pick def5678 second\n\
+exec echo hi\n\
+";
+
+        let (output, warnings) = rewrite_todo(input, &requested).into_parts();
+        assert_eq!(warnings, Vec::<String>::new());
+        assert_eq!(
+            output,
+            "\
+pick abc1234 first\n\
+edit def5678 second\n\
+exec echo hi\n\
+"
+        );
+    }
+
+    #[test]
+    fn rewrite_todo_warns_when_action_is_already_set() {
+        let requested = BTreeMap::from([(TodoSha::new("abc1234").or_abort(""), Action::Pick)]);
+        let input = "pick abc1234 first\n";
+        let (output, warnings) = rewrite_todo(input, &requested).into_parts();
+        assert_eq!(output, "pick abc1234 first\n");
+        assert_eq!(
+            warnings,
+            vec!["WARN: abc1234: requested 'pick', but todo already had 'pick'".to_owned()]
+        );
+    }
+
+    #[test]
+    fn resolve_requested_sha_requires_exact_match_for_short_sha() {
+        let todo_shas = BTreeSet::from([TodoSha::new("abc1234").or_abort("")]);
+        let err = resolve_requested_sha("abc", &todo_shas).err_or_abort("");
+        assert_eq!(err.to_string(), "sha not present in todo: abc");
+    }
+
+    #[test]
+    fn is_hex40_accepts_uppercase_hex() {
+        let sha = "A".repeat(todo::FULL_HEX_SHA_LEN);
+        assert!(is_hex40(sha.as_str()));
+    }
+
+    #[test]
+    fn validate_no_duplicates_rejects_duplicates() {
+        let shas = vec![
+            TodoSha::new("abc1234").or_abort(""),
+            TodoSha::new("abc1234").or_abort(""),
+        ];
+        let err = todo::build_requested_actions(
+            &Cli::for_tests(shas, vec![], Path::new("todo").to_path_buf(), vec![]),
+            &BTreeSet::from([TodoSha::new("abc1234").or_abort("")]),
+        )
+        .err_or_abort("");
+        assert_eq!(err.to_string(), "duplicate drop sha: abc1234");
+    }
+
+    #[test]
+    fn build_requested_actions_rejects_cross_action_duplicates() {
+        let content = "pick abc1234 first\n";
+        let todo_shas = todo_shas_in(content);
+        let cli = Cli::for_tests(
+            vec![TodoSha::new("abc1234").or_abort("")],
+            vec![],
+            Path::new("todo").to_path_buf(),
+            vec![TodoSha::new("abc1234").or_abort("")],
+        );
+        let err = build_requested_actions(&cli, &todo_shas).err_or_abort("");
+        assert_eq!(err.to_string(), "sha specified multiple times: abc1234");
+    }
+
+    #[test]
+    fn todo_sha_new_rejects_empty_token() {
+        let err = TodoSha::new("").err_or_abort("");
+        assert_eq!(
+            err.to_string(),
+            "internal error: todo sha was unexpectedly empty"
+        );
+    }
+
+    #[test]
+    fn parse_todo_action_ignores_blank_and_comment_lines() {
+        assert_eq!(parse_todo_action(""), None);
+        assert_eq!(parse_todo_action("   "), None);
+        assert_eq!(parse_todo_action("# comment"), None);
+        assert_eq!(parse_todo_action("   # comment"), None);
+    }
+
+    #[test]
+    fn validate_todo_format_accepts_supported_actions() {
+        let content = [
+            "pick abc1234 first",
+            "r abc1234 reword subject",
+            "e abc1234 edit subject",
+            "s abc1234 squash subject",
+            "f abc1234 fixup subject",
+            "d abc1234 drop subject",
+            "x echo hi",
+            "b",
+            "l topic",
+            "t topic",
+            "m -C deadbeef topic",
+            "noop",
+            "u refs/heads/main",
+            "# comment",
+            "   # indented comment",
+            "",
+        ]
+        .join("\n");
+
+        validate_todo_format(&content).or_abort("");
+    }
+
+    #[test]
+    fn validate_todo_format_rejects_unsupported_actions() {
+        let content = "unknown abc1234 subject\n";
+        let err = validate_todo_format(content).err_or_abort("");
+        assert_eq!(err.to_string(), "unsupported todo action: unknown");
+    }
+
+    #[test]
+    fn parse_todo_sha_ignores_blank_comment_and_non_commit_actions() {
+        assert_eq!(parse_todo_sha(""), None);
+        assert_eq!(parse_todo_sha("   "), None);
+        assert_eq!(parse_todo_sha("# comment"), None);
+        assert_eq!(parse_todo_sha("   # comment"), None);
+        assert_eq!(parse_todo_sha("exec echo hi"), None);
+        assert_eq!(parse_todo_sha("break"), None);
+        assert_eq!(parse_todo_sha("label topic"), None);
+        assert_eq!(parse_todo_sha("reset topic"), None);
+        assert_eq!(parse_todo_sha("merge -C deadbeef topic"), None);
+        assert_eq!(parse_todo_sha("noop"), None);
+        assert_eq!(parse_todo_sha("update-ref refs/heads/main"), None);
+    }
+
+    #[test]
+    fn parse_todo_sha_accepts_short_commit_actions() {
+        assert_eq!(parse_todo_sha("r abc1234 reword subject"), Some("abc1234"));
+        assert_eq!(parse_todo_sha("s abc1234 squash subject"), Some("abc1234"));
+        assert_eq!(parse_todo_sha("f abc1234 fixup subject"), Some("abc1234"));
+    }
+}
