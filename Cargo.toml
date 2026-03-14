@@ -1,0 +1,13 @@
+[package]
+name = "git-factor"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[[bin]]
+name = "git-factor"
+path = "src/bin/git-factor.rs"
+
+[[bin]]
+name = "git-sequence-editor"
+path = "src/bin/git-sequence-editor.rs"

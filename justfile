@@ -1,2 +1,4 @@
-ci:
-    true
+check:
+    cargo check --quiet
+
+ci: check
