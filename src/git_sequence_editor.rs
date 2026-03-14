@@ -33,7 +33,6 @@ use self::todo::{
 
 #[cfg(test)]
 use crate::test_support::{OrAbort as _, ResultOrAbort as _};
-use crate::exit_codes::EXIT_OK;
 
 /// Maximum attempts when creating a unique temporary todo file.
 const TEMP_FILE_ATTEMPTS_MAX: u32 = 1024;
@@ -311,9 +310,79 @@ fn write_file_atomic(path: &Path, content: &str) -> Result<(), AtomicWriteError>
     ))
 }
 
+/// Runs the editor logic.
+#[cfg_attr(
+    not(test),
+    expect(
+        clippy::single_call_fn,
+        reason = "preserves one orchestrator for parse-validate-rewrite flow"
+    )
+)]
+fn run_for(cli: &Cli) -> Result<(), SequenceEditorError> {
+    let content = match fs::read_to_string(cli.file()) {
+        Ok(content) => content,
+        Err(err) => return Err(SequenceEditorError::ReadTodo(err)),
+    };
+    if let Err(err) = validate_todo_format(&content) {
+        return Err(SequenceEditorError::Todo(err));
+    }
+    let todo_shas = todo_shas_in(&content);
+    let requested = match build_requested_actions(cli, &todo_shas) {
+        Ok(requested) => requested,
+        Err(err) => return Err(SequenceEditorError::Todo(err)),
+    };
+    let factor_insertions = match build_factor_insertions(cli, &todo_shas) {
+        Ok(factor_insertions) => factor_insertions,
+        Err(err) => return Err(SequenceEditorError::Todo(err)),
+    };
+
+    let rewrite = rewrite_todo_with_factor(&content, &requested, &factor_insertions);
+    if let Err(err) = write_file_atomic(cli.file(), rewrite.output()) {
+        return Err(SequenceEditorError::AtomicWrite(err));
+    }
+
+    for warning in rewrite.warnings() {
+        write_stderr_line(warning.as_str());
+    }
+
+    Ok(())
+}
+
+/// Runs `git-sequence-editor` from parsed CLI arguments and returns an exit code.
+#[cfg_attr(
+    not(test),
+    expect(
+        clippy::single_call_fn,
+        reason = "centralizes clap parse and exit-code behavior in one helper"
+    )
+)]
+fn run_with_args_vec(args: Vec<OsString>) -> i32 {
+    match Cli::try_parse_from(args) {
+        Ok(cli) => run_for(&cli).map_or_else(
+            |error| {
+                let message = error.to_string();
+                write_stderr_line(message.as_str());
+                EditorExitCode::RuntimeError.code()
+            },
+            |()| EditorExitCode::Ok.code(),
+        ),
+        Err(error) => {
+            let _ignored = error.print();
+            error.exit_code()
+        }
+    }
+}
+
+/// Runs `git-sequence-editor` from parsed CLI arguments and returns an exit code.
+#[cfg(test)]
+fn main_entry_with_args_vec(args: Vec<OsString>) -> i32 {
+    run_with_args_vec(args)
+}
+
 /// Runs `git-sequence-editor` from process arguments and returns an exit code.
 #[must_use]
 #[inline]
 pub fn main_entry() -> i32 {
-    EXIT_OK
+    let args = env::args_os().collect::<Vec<OsString>>();
+    run_with_args_vec(args)
 }
