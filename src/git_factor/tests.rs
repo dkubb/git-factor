@@ -2395,3 +2395,236 @@ fn editor_path_errors_when_executable_has_no_parent_dir() {
 
 #[cfg(unix)]
 #[test]
+fn editor_path_returns_non_utf8_path_when_fs_is_non_utf8() {
+    let dir = TempDir::new().or_abort("tempdir");
+    let env = TestEnv {
+        cwd: dir.path().to_path_buf(),
+    };
+    let io = TestIo::default();
+    let fs = NonUtf8Fs;
+    let ctx = ctx_from_parts(&env, &REAL_RUNNER, &io, &fs).or_abort("ctx ok");
+
+    let mkdir = dir.path().join("mkdir");
+    fs.create_dir_all(&mkdir).or_abort("mkdir ok");
+    assert!(mkdir.is_dir());
+
+    let rm_dir = dir.path().join("rm_dir");
+    fs.create_dir_all(&rm_dir).or_abort("rm_dir create");
+    fs.remove_dir_all(&rm_dir).or_abort("rm_dir remove");
+    assert!(!rm_dir.exists());
+
+    let rm_file = dir.path().join("rm_file");
+    fs::write(&rm_file, "x").or_abort("rm_file write");
+    fs.remove_file(&rm_file).or_abort("rm_file remove");
+    assert!(!rm_file.exists());
+
+    let read_file = dir.path().join("read_to_string");
+    fs::write(&read_file, "hello").or_abort("read_file write");
+    let content = fs.read_to_string(&read_file).or_abort("read_to_string ok");
+    assert_eq!(content, "hello");
+
+    let write_file = dir.path().join("write_string");
+    fs.write_string(&write_file, "world")
+        .or_abort("write_string ok");
+    let written = fs.read_to_string(&write_file).or_abort("read back ok");
+    assert_eq!(written, "world");
+
+    let is_dir = fs.is_dir(&mkdir);
+    assert!(is_dir);
+
+    let exists = fs.exists(&mkdir);
+    assert!(exists);
+
+    let path = editor_path(&ctx).or_abort("editor_path should return non-UTF-8 PathBuf");
+    assert!(
+        path.to_str().is_none(),
+        "path should not be valid UTF-8: {path:?}"
+    );
+}
+
+#[test]
+fn resolve_commit_refs_errors_on_invalid_rev_list_range() {
+    let dir = TempDir::new().or_abort("tempdir");
+    let repo = dir.path();
+    let runner = ScriptedRunner::default()
+        .with_output("git", &["rev-parse", "--git-dir"], repo, ".git\n")
+        .with_output("git", &["status", "--porcelain=v1"], repo, "");
+    let io = TestIo::default();
+    let env = TestEnv {
+        cwd: repo.to_path_buf(),
+    };
+    let ctx = Ctx {
+        runner: &runner,
+        cwd: repo.to_path_buf(),
+        io: &io,
+        env: &env,
+        fs: &REAL_FS,
+    };
+
+    let err = run_with_args_vec(
+        &ctx,
+        vec![
+            OsString::from("git-factor"),
+            OsString::from("--exec"),
+            OsString::from("true"),
+            OsString::from("bad..range"),
+        ],
+    )
+    .err_or_abort("expected invalid commit");
+    assert_eq!(err.to_string(), "invalid commit: bad..range");
+}
+
+#[test]
+fn resolve_commit_refs_ignores_invalid_rev_list_lines() {
+    let dir = TempDir::new().or_abort("tempdir");
+    let repo = dir.path();
+    let valid_sha = "a".repeat(SHA_LEN);
+    let runner = ScriptedRunner::default().with_output(
+        "git",
+        &["rev-list", "HEAD~1..HEAD"],
+        repo,
+        &format!("bad\n{valid_sha}\n"),
+    );
+    let io = TestIo::default();
+    let env = TestEnv {
+        cwd: repo.to_path_buf(),
+    };
+    let ctx = Ctx {
+        runner: &runner,
+        cwd: repo.to_path_buf(),
+        io: &io,
+        env: &env,
+        fs: &REAL_FS,
+    };
+
+    let refs = NonEmpty::new(
+        NonEmptyString::try_from("HEAD~1..HEAD".to_owned()).or_abort("range ref is non-empty"),
+    );
+    let commits = resolve_commit_refs(&ctx, &refs).or_abort("resolve_commit_refs should succeed");
+    let collected: Vec<&str> = commits.iter().map(CommitSha::as_str).collect();
+    assert_eq!(collected, vec![valid_sha.as_str()]);
+}
+
+#[test]
+fn cmd_start_errors_when_no_commits_remain_after_sorting() {
+    let dir = TempDir::new().or_abort("tempdir");
+    let repo = dir.path();
+    let sha_a = "a".repeat(SHA_LEN);
+    let sha_b = "b".repeat(SHA_LEN);
+    let runner = ScriptedRunner::default()
+        .with_output("git", &["rev-parse", "--git-dir"], repo, ".git\n")
+        .with_output("git", &["status", "--porcelain=v1"], repo, "")
+        .with_output(
+            "git",
+            &["rev-parse", "--verify", "HEAD"],
+            repo,
+            &format!("{sha_a}\n"),
+        )
+        .with_output(
+            "git",
+            &["rev-list", "--reverse", "--topo-order", &sha_a],
+            repo,
+            &format!("{sha_b}\n"),
+        )
+        .with_output(
+            "git",
+            &["rev-parse", "--verify", "HEAD"],
+            repo,
+            &format!("{sha_a}\n"),
+        );
+    let io = TestIo::default();
+    let env = TestEnv {
+        cwd: repo.to_path_buf(),
+    };
+    let ctx = Ctx {
+        runner: &runner,
+        cwd: repo.to_path_buf(),
+        io: &io,
+        env: &env,
+        fs: &REAL_FS,
+    };
+
+    let err = run_with_args_vec(
+        &ctx,
+        vec![
+            OsString::from("git-factor"),
+            OsString::from("--exec"),
+            OsString::from("true"),
+            OsString::from("HEAD"),
+        ],
+    )
+    .err_or_abort("expected sorting to error");
+    assert_eq!(
+        err.to_string(),
+        "git command failed: no commits after sorting"
+    );
+}
+
+#[test]
+fn print_session_started_single_commit_without_untracked_or_claude_hints() {
+    let dir = TempDir::new().or_abort("tempdir");
+    let repo = dir.path();
+    let runner = ScriptedRunner::default()
+        .with_output(
+            "git",
+            &["diff", "--stat"],
+            repo,
+            "a.txt | 1 +\n1 file changed, 1 insertion(+)\n",
+        )
+        .with_output(
+            "git",
+            &["ls-files", "--others", "--exclude-standard"],
+            repo,
+            "",
+        )
+        .with_output(
+            "git",
+            &["rev-parse", "--show-toplevel"],
+            repo,
+            &format!("{}\n", repo.display()),
+        );
+    let io = TestIo::default();
+    let env = TestEnv {
+        cwd: repo.to_path_buf(),
+    };
+    let ctx = Ctx {
+        runner: &runner,
+        cwd: repo.to_path_buf(),
+        io: &io,
+        env: &env,
+        fs: &REAL_FS,
+    };
+    print_session_started(
+        &ctx,
+        "FACTOR: Split session started for aaaaaaa.",
+        "subject",
+    )
+    .or_abort("print should succeed");
+
+    let expected = concat!(
+        "FACTOR: Split session started for aaaaaaa.\n",
+        "ORIGINAL MESSAGE: subject\n",
+        "UNSTAGED:\n",
+        "  a.txt | 1 +\n",
+        "  1 file changed, 1 insertion(+)\n",
+        "\n",
+        "NEXT: Stage changes for the first atomic commit, then run:\n",
+        "  git factor --continue --message \"type: description\"\n",
+        "\n",
+        "Run git factor --help for the full workflow guide.\n",
+        "\n",
+        "HINTS:\n",
+        "  - Find the ONE smallest addition nothing depends on\n",
+        "  - Target 15-30 lines (50 max)\n",
+        "  - Message: single concrete action, no \"and\"/\"or\"\n",
+        "  - Verify: git log --oneline | wc -l\n",
+        "  - NEVER use git commit. ONLY use git factor --continue.\n",
+        "  REMAINING: 1 file changed, 1 insertion(+)\n",
+        "  RECOVERY: git factor --abort\n"
+    );
+    assert_eq!(io.stdout(), expected);
+    assert!(io.stderr().is_empty());
+}
+
+#[test]
+fn print_session_started_multi_commit_with_untracked_and_claude_hints() {
