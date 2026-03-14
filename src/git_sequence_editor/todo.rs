@@ -1161,3 +1161,181 @@ pick {sha} duplicate
         validate_todo_format_accepts_indented_comment_lines();
     }
 }
+
+#[cfg(test)]
+mod proptests {
+    use alloc::collections::{BTreeMap, BTreeSet};
+
+    use proptest::collection::vec;
+    use proptest::prelude::*;
+    use proptest::string::string_regex;
+
+    use super::*;
+
+    fn supported_action_broad() -> impl Strategy<Value = String> {
+        prop_oneof![
+            Just("pick".to_owned()),
+            Just("p".to_owned()),
+            Just("reword".to_owned()),
+            Just("r".to_owned()),
+            Just("edit".to_owned()),
+            Just("e".to_owned()),
+            Just("squash".to_owned()),
+            Just("s".to_owned()),
+            Just("fixup".to_owned()),
+            Just("f".to_owned()),
+            Just("drop".to_owned()),
+            Just("d".to_owned()),
+            Just("exec".to_owned()),
+            Just("x".to_owned()),
+            Just("break".to_owned()),
+            Just("b".to_owned()),
+            Just("label".to_owned()),
+            Just("l".to_owned()),
+            Just("reset".to_owned()),
+            Just("t".to_owned()),
+            Just("merge".to_owned()),
+            Just("m".to_owned()),
+            Just("noop".to_owned()),
+            Just("update-ref".to_owned()),
+            Just("u".to_owned()),
+        ]
+    }
+
+    fn supported_action_biased() -> impl Strategy<Value = String> {
+        prop_oneof![
+            Just("pick".to_owned()),
+            Just("edit".to_owned()),
+            Just("drop".to_owned()),
+            Just("reword".to_owned()),
+        ]
+    }
+
+    fn supported_action() -> impl Strategy<Value = String> {
+        prop_oneof![1 => supported_action_broad(), 4 => supported_action_biased()]
+    }
+
+    fn commit_action() -> impl Strategy<Value = String> {
+        prop_oneof![
+            Just("pick".to_owned()),
+            Just("p".to_owned()),
+            Just("reword".to_owned()),
+            Just("r".to_owned()),
+            Just("edit".to_owned()),
+            Just("e".to_owned()),
+            Just("squash".to_owned()),
+            Just("s".to_owned()),
+            Just("fixup".to_owned()),
+            Just("f".to_owned()),
+            Just("drop".to_owned()),
+            Just("d".to_owned()),
+        ]
+    }
+
+    fn non_commit_action() -> impl Strategy<Value = String> {
+        prop_oneof![
+            Just("exec".to_owned()),
+            Just("x".to_owned()),
+            Just("break".to_owned()),
+            Just("b".to_owned()),
+            Just("label".to_owned()),
+            Just("l".to_owned()),
+            Just("reset".to_owned()),
+            Just("t".to_owned()),
+            Just("merge".to_owned()),
+            Just("m".to_owned()),
+            Just("noop".to_owned()),
+            Just("update-ref".to_owned()),
+            Just("u".to_owned()),
+        ]
+    }
+
+    fn non_whitespace_token() -> impl Strategy<Value = String> {
+        string_regex("[!-~]{1,24}").or_abort("")
+    }
+
+    fn action_token() -> impl Strategy<Value = String> {
+        string_regex("[A-Za-z][A-Za-z0-9._/-]{0,23}").or_abort("")
+    }
+
+    fn optional_tail() -> impl Strategy<Value = String> {
+        string_regex("[A-Za-z0-9._/-]{0,20}").or_abort("")
+    }
+
+    fn indent() -> impl Strategy<Value = String> {
+        string_regex("[ ]{0,4}").or_abort("")
+    }
+
+    fn hex40_valid_broad() -> impl Strategy<Value = String> {
+        let pattern = format!("[0-9A-Fa-f]{{{FULL_HEX_SHA_LEN}}}");
+        string_regex(pattern.as_str()).or_abort("")
+    }
+
+    fn hex40_valid_biased() -> impl Strategy<Value = String> {
+        prop_oneof![
+            Just("0".repeat(FULL_HEX_SHA_LEN)),
+            Just("f".repeat(FULL_HEX_SHA_LEN)),
+            Just("A".repeat(FULL_HEX_SHA_LEN)),
+        ]
+    }
+
+    fn hex40_valid() -> impl Strategy<Value = String> {
+        prop_oneof![1 => hex40_valid_broad(), 4 => hex40_valid_biased()]
+    }
+
+    fn hex40_invalid_broad() -> impl Strategy<Value = String> {
+        let short_pattern = format!("[0-9A-Fa-f]{{0,{}}}", FULL_HEX_SHA_LEN - 1);
+        let long_pattern = format!(
+            "[0-9A-Fa-f]{{{},{}}}",
+            FULL_HEX_SHA_LEN + 1,
+            FULL_HEX_SHA_LEN * 2
+        );
+        let wrong_length = prop_oneof![
+            string_regex(short_pattern.as_str()).or_abort(""),
+            string_regex(long_pattern.as_str()).or_abort(""),
+        ];
+        let non_hex_pattern = format!("[ -~]{{{FULL_HEX_SHA_LEN}}}");
+        let non_hex = string_regex(non_hex_pattern.as_str())
+            .or_abort("")
+            .prop_filter("must contain a non-hex byte", |candidate| {
+                candidate.bytes().any(|byte| !byte.is_ascii_hexdigit())
+            });
+
+        prop_oneof![wrong_length, non_hex]
+    }
+
+    fn hex40_invalid_biased() -> impl Strategy<Value = String> {
+        prop_oneof![
+            Just(String::new()),
+            Just("0".repeat(FULL_HEX_SHA_LEN - 1)),
+            Just("0".repeat(FULL_HEX_SHA_LEN + 1)),
+            Just(format!("{}g", "0".repeat(FULL_HEX_SHA_LEN - 1))),
+        ]
+    }
+
+    fn hex40_invalid() -> impl Strategy<Value = String> {
+        prop_oneof![1 => hex40_invalid_broad(), 4 => hex40_invalid_biased()]
+    }
+
+    fn rewrite_change_case() -> impl Strategy<Value = (&'static str, Action)> {
+        prop_oneof![
+            Just(("pick", Action::Edit)),
+            Just(("pick", Action::Drop)),
+            Just(("edit", Action::Pick)),
+            Just(("edit", Action::Drop)),
+            Just(("drop", Action::Pick)),
+            Just(("drop", Action::Edit)),
+        ]
+    }
+
+    fn rewrite_same_case() -> impl Strategy<Value = (&'static str, Action)> {
+        prop_oneof![
+            Just(("pick", Action::Pick)),
+            Just(("p", Action::Pick)),
+            Just(("edit", Action::Edit)),
+            Just(("e", Action::Edit)),
+            Just(("drop", Action::Drop)),
+            Just(("d", Action::Drop)),
+        ]
+    }
+
