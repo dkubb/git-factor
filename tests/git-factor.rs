@@ -1,0 +1,160 @@
+#![expect(
+    clippy::implicit_return,
+    reason = "integration tests favor concise tail expressions"
+)]
+//! Contract integration tests for `git-factor`.
+
+#![forbid(unsafe_code)]
+
+#[cfg(test)]
+#[path = "support/mod.rs"]
+mod support;
+
+#[cfg(test)]
+mod tests {
+    use std::process::Command;
+
+    use assert_cmd::assert::OutputAssertExt as _;
+    use predicates::prelude::*;
+
+    use super::support::*;
+
+    fn expected_help_stdout() -> &'static str {
+        "\
+Split a large git commit into smaller atomic commits
+
+Usage: git-factor [OPTIONS] [COMMIT]...
+
+Arguments:
+  [COMMIT]...
+          Commit(s) or ranges to split (e.g. SHA, A..B, main..HEAD).
+          
+          Accepts full or short SHAs, branch names, and revision ranges. Ranges are expanded via git rev-list in chronological order. Multiple refs can be specified and are deduplicated automatically.
+
+Options:
+  -h, --help
+          Print help (see a summary with '-h')
+
+Start Options:
+      --exec <COMMAND>
+          Shell command(s) to run as the deterministic validation gate.
+          
+          Multiple --exec flags are joined with &&. Git-factor runs the combined gate when a target commit becomes active and before each split commit. The command must have valid bash syntax and must leave the repository clean.
+
+Commit Options:
+  -m, --message <MSG>
+          Commit message for the split commit.
+          
+          Required with --continue. Optional with --finish (defaults to the original commit message). Multiple --message flags produce separate paragraphs, matching git commit behavior.
+
+Session Control:
+      --continue
+          Continue by committing the currently staged changes.
+          
+          Staged changes must contain the next atomic split and the exec gate must pass. After committing, remaining changes are restored as unstaged changes from the green baseline commit.
+
+      --finish
+          Commit all remaining changes and finish the current commit.
+          
+          Cherry-picks the original commit to restore all remaining changes, verifies the tree hash matches the recorded green baseline, and commits the final split. When no --message is given, reuses the original commit message.
+
+      --abort
+          Abort the current factor session and restore the repository
+
+      --status
+          Show status for the current factor session.
+          
+          Prints session details when active, otherwise reports no active session.
+
+WORKFLOW:
+  1. Start a session:    git factor --exec 'make test' HEAD
+  2. If start gate fails: fix, stage, amend, then run git rebase --continue
+  3. When paused at the factor break: git factor --continue
+  4. Stage changes:      git add --patch -- <path>
+  5. Commit a slice:     git factor --continue --message 'type: description'
+  6. Repeat steps 4-5 for each atomic commit.
+  7. Finish remaining:   git factor --finish
+
+  The start gate must pass on a clean repository state.
+  Each split commit must pass the exec gate independently.
+  Use --finish without --message to reuse the original commit message.
+
+EXAMPLES:
+  Split the latest commit, first proving the full commit is green:
+    git factor --exec 'cargo test' HEAD
+
+  Split three commits in a range, pausing before each factor session:
+    git factor --exec 'make check' HEAD~3..HEAD
+
+  Split two specific commits:
+    git factor --exec 'npm test' abc1234 def5678
+
+  Continue with a multi-paragraph commit message:
+    git factor --continue --message 'feat: add login' --message 'Implements OAuth2 flow.'
+
+  Finish with the original commit message:
+    git factor --finish
+
+  Abort and restore the repository:
+    git factor --abort
+
+  Show active-session status or whether a start is pending:
+    git factor --status
+"
+    }
+
+    #[test]
+    fn cli_no_args_prints_help() {
+        Command::new(git_factor_bin())
+            .assert()
+            .code(EXIT_OK)
+            .stdout(predicate::str::diff(expected_help_stdout().to_owned()))
+            .stderr(predicate::str::is_empty());
+    }
+
+    #[test]
+    fn cli_help_flag_prints_help_to_stdout_and_exits_ok() {
+        Command::new(git_factor_bin())
+            .arg("--help")
+            .assert()
+            .code(EXIT_OK)
+            .stdout(predicate::str::diff(expected_help_stdout().to_owned()))
+            .stderr(predicate::str::is_empty());
+    }
+
+    #[test]
+    fn start_requires_exec_command() {
+        let dir = init_repo();
+        let repo = dir.path();
+
+        commit_file(repo, "file.txt", "one\n", "chore: base");
+
+        Command::new(git_factor_bin())
+            .current_dir(repo)
+            .arg("HEAD")
+            .assert()
+            .code(EXIT_USAGE)
+            .stdout(predicate::str::is_empty())
+            .stderr(predicate::str::diff(
+                "--exec <COMMAND> is required when starting a factor session\n".to_owned(),
+            ));
+    }
+
+    #[test]
+    fn start_requires_exec_command_when_only_message_is_provided() {
+        let dir = init_repo();
+        let repo = dir.path();
+
+        commit_file(repo, "file.txt", "one\n", "chore: base");
+
+        Command::new(git_factor_bin())
+            .current_dir(repo)
+            .args(["--message", "test: msg"])
+            .assert()
+            .code(EXIT_USAGE)
+            .stdout(predicate::str::is_empty())
+            .stderr(predicate::str::diff(
+                "--message can only be used with --continue or --finish\n".to_owned(),
+            ));
+    }
+}
