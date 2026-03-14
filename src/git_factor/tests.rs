@@ -500,3 +500,178 @@ impl Runner for BashStatusFailureRunner {
         self.inner.status(bin, args, envs, quiet, cwd)
     }
 }
+
+struct TestEnv {
+    cwd: PathBuf,
+}
+
+impl Env for TestEnv {
+    fn current_dir(&self) -> io::Result<PathBuf> {
+        Ok(self.cwd.clone())
+    }
+
+    fn current_exe(&self) -> io::Result<PathBuf> {
+        Ok(self.cwd.join("git-factor"))
+    }
+
+    fn var_os(&self, _key: &str) -> Option<OsString> {
+        None
+    }
+}
+
+struct ClaudeCodeEnv {
+    cwd: PathBuf,
+}
+
+impl Env for ClaudeCodeEnv {
+    fn current_dir(&self) -> io::Result<PathBuf> {
+        Ok(self.cwd.clone())
+    }
+
+    fn current_exe(&self) -> io::Result<PathBuf> {
+        Ok(self.cwd.join("git-factor"))
+    }
+
+    fn var_os(&self, key: &str) -> Option<OsString> {
+        (key == "CLAUDECODE").then(|| OsString::from("1"))
+    }
+}
+
+#[derive(Default)]
+struct TestIo {
+    stderr: Mutex<String>,
+    stdout: Mutex<String>,
+}
+
+impl TestIo {
+    fn stderr(&self) -> String {
+        self.stderr.lock().or_abort("stderr lock").clone()
+    }
+
+    fn stdout(&self) -> String {
+        self.stdout.lock().or_abort("stdout lock").clone()
+    }
+}
+
+impl Io for TestIo {
+    fn err(&self, text: &str) -> io::Result<()> {
+        self.stderr
+            .lock()
+            .map_err(|_err| io::Error::other("stderr lock poisoned"))?
+            .push_str(text);
+        Ok(())
+    }
+
+    fn errln(&self, line: &str) -> io::Result<()> {
+        self.err(line)?;
+        self.err("\n")
+    }
+
+    fn out(&self, text: &str) -> io::Result<()> {
+        self.stdout
+            .lock()
+            .map_err(|_err| io::Error::other("stdout lock poisoned"))?
+            .push_str(text);
+        Ok(())
+    }
+
+    fn outln(&self, line: &str) -> io::Result<()> {
+        self.out(line)?;
+        self.out("\n")
+    }
+}
+
+struct FailingIo;
+
+impl Io for FailingIo {
+    fn err(&self, _text: &str) -> io::Result<()> {
+        Err(io::Error::other("io fail"))
+    }
+
+    fn errln(&self, _line: &str) -> io::Result<()> {
+        Err(io::Error::other("io fail"))
+    }
+
+    fn out(&self, _text: &str) -> io::Result<()> {
+        Err(io::Error::other("io fail"))
+    }
+
+    fn outln(&self, _line: &str) -> io::Result<()> {
+        Err(io::Error::other("io fail"))
+    }
+}
+
+struct NthIoFailure {
+    calls: Mutex<usize>,
+    fail_at: usize,
+}
+
+impl NthIoFailure {
+    fn maybe_fail(&self) -> io::Result<()> {
+        let mut calls = self
+            .calls
+            .lock()
+            .map_err(|error| io::Error::other(format!("io calls lock: {error}")))?;
+        *calls = calls.checked_add(1).or_abort("counter should not overflow");
+        if *calls == self.fail_at {
+            Err(io::Error::other("io fail"))
+        } else {
+            Ok(())
+        }
+    }
+
+    fn new(fail_at: usize) -> Self {
+        Self {
+            calls: Mutex::new(0),
+            fail_at,
+        }
+    }
+}
+
+impl Io for NthIoFailure {
+    fn err(&self, _text: &str) -> io::Result<()> {
+        self.maybe_fail()
+    }
+
+    fn errln(&self, line: &str) -> io::Result<()> {
+        self.err(line)?;
+        self.err("\n")
+    }
+
+    fn out(&self, _text: &str) -> io::Result<()> {
+        self.maybe_fail()
+    }
+
+    fn outln(&self, line: &str) -> io::Result<()> {
+        self.out(line)?;
+        self.out("\n")
+    }
+}
+
+struct MatchingOutlnFailureIo<'line> {
+    fail_on: &'line str,
+}
+
+impl Io for MatchingOutlnFailureIo<'_> {
+    fn err(&self, _text: &str) -> io::Result<()> {
+        Ok(())
+    }
+
+    fn errln(&self, line: &str) -> io::Result<()> {
+        self.err(line)?;
+        self.err("\n")
+    }
+
+    fn out(&self, text: &str) -> io::Result<()> {
+        if text == self.fail_on {
+            Err(io::Error::other("io fail"))
+        } else {
+            Ok(())
+        }
+    }
+
+    fn outln(&self, line: &str) -> io::Result<()> {
+        self.out(line)?;
+        self.out("\n")
+    }
+}
