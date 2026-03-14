@@ -2892,3 +2892,232 @@ fn cmd_start_propagates_status_error_when_start_sequence_fails() {
 }
 
 #[test]
+fn cmd_start_propagates_rebase_status_error_in_multi_commit_session() {
+    let dir = TempDir::new().or_abort("tempdir");
+    let repo = dir.path();
+    fs::write(repo.join("git-factor"), "").or_abort("write fake exe");
+
+    let sha_a = "a".repeat(SHA_LEN);
+    let sha_b = "b".repeat(SHA_LEN);
+    let runner = start_multi_commit_runner_base(repo, &sha_a, &sha_b)
+        .with_output("git", &["rev-parse", "--short", &sha_a], repo, "aaaaaaa\n")
+        .with_output("git", &["rev-parse", "--short", &sha_b], repo, "bbbbbbb\n");
+    let io = TestIo::default();
+    let env = TestEnv {
+        cwd: repo.to_path_buf(),
+    };
+    let ctx = Ctx {
+        runner: &runner,
+        cwd: repo.to_path_buf(),
+        io: &io,
+        env: &env,
+        fs: &REAL_FS,
+    };
+
+    let err = run_with_args_vec(
+        &ctx,
+        vec![
+            OsString::from("git-factor"),
+            OsString::from("--exec"),
+            OsString::from("true"),
+            OsString::from(sha_a.as_str()),
+            OsString::from(sha_b.as_str()),
+        ],
+    )
+    .err_or_abort("expected rebase status call to fail");
+
+    assert!(
+        matches!(&err, FactorError::GitCommand(msg) if msg.contains("git rebase:") && msg.contains("unexpected status call")),
+        "err was: {err:?}"
+    );
+}
+
+fn assert_fs_adapter_basics<F: Fs>(repo: &Path, fs: &F) {
+    let mkdir = repo.join("mkdir");
+    fs.create_dir_all(&mkdir).or_abort("mkdir");
+    assert!(fs.is_dir(&mkdir));
+    assert!(fs.exists(&mkdir));
+    let write_read = repo.join("write-read.txt");
+    fs.write_string(&write_read, "hello")
+        .or_abort("write hello");
+    let content = fs.read_to_string(&write_read).or_abort("read hello");
+    assert_eq!(content, "hello");
+    let canonical = fs.canonicalize(&mkdir).or_abort("canonicalize mkdir");
+    assert!(canonical.exists());
+    let rm_file = repo.join("rm-file.txt");
+    fs.write_string(&rm_file, "x").or_abort("write rm file");
+    fs.remove_file(&rm_file).or_abort("remove rm file");
+    assert!(!fs.exists(&rm_file));
+    let rm_dir = repo.join("rm-dir");
+    fs.create_dir_all(&rm_dir).or_abort("create rm dir");
+    fs.remove_dir_all(&rm_dir).or_abort("remove rm dir");
+    assert!(!fs.exists(&rm_dir));
+}
+
+#[test]
+fn fs_adapter_basics_work_with_real_fs() {
+    let dir = TempDir::new().or_abort("tempdir");
+    assert_fs_adapter_basics(dir.path(), &REAL_FS);
+}
+
+fn assert_cmd_start_state_write_failure<F: Fs>(repo: &Path, fs: &F, expected_error: &str) {
+    assert_fs_adapter_basics(repo, fs);
+    let sha = "a".repeat(SHA_LEN);
+    let runner = with_start_gate_result(
+        start_single_head_validation_runner(repo, &sha)
+            .with_output("git", &["rev-parse", "--short", &sha], repo, "aaaaaaa\n")
+            .with_output(
+                "git",
+                &["show", "--format=%B", "--no-patch", &sha],
+                repo,
+                "msg\n",
+            ),
+        repo,
+        "true",
+        0,
+        "",
+        "",
+    )
+    .with_status(
+        "git",
+        &["rev-parse", "--quiet", "--verify", &format!("{sha}^")],
+        &[],
+        true,
+        repo,
+        0,
+    );
+    let io = TestIo::default();
+    let env = TestEnv {
+        cwd: repo.to_path_buf(),
+    };
+    let ctx = Ctx {
+        runner: &runner,
+        cwd: repo.to_path_buf(),
+        io: &io,
+        env: &env,
+        fs,
+    };
+
+    let err = run_with_args_vec(
+        &ctx,
+        vec![
+            OsString::from("git-factor"),
+            OsString::from("--exec"),
+            OsString::from("true"),
+            OsString::from("HEAD"),
+        ],
+    )
+    .err_or_abort("expected state write failure");
+
+    assert_eq!(err.to_string(), expected_error);
+}
+
+#[test]
+fn cmd_start_propagates_requires_rebase_state_write_failure() {
+    let dir = TempDir::new().or_abort("tempdir");
+    let repo = dir.path();
+    let fs = FailingRequiresRebaseWriteFs;
+
+    assert_cmd_start_state_write_failure(
+        repo,
+        &fs,
+        "failed to write state: requires_rebase write failed",
+    );
+}
+
+#[test]
+fn cmd_start_propagates_is_root_state_write_failure() {
+    let dir = TempDir::new().or_abort("tempdir");
+    let repo = dir.path();
+    let fs = FailingIsRootWriteFs;
+
+    assert_cmd_start_state_write_failure(repo, &fs, "failed to write state: is_root write failed");
+}
+
+#[test]
+fn cmd_start_range_ref_inserts_shas_and_propagates_io_error_on_multi_commit_banner() {
+    let dir = TempDir::new().or_abort("tempdir");
+    let repo = dir.path();
+    fs::write(repo.join("git-factor"), "").or_abort("write fake exe");
+
+    let sha_a = "a".repeat(SHA_LEN);
+    let sha_b = "b".repeat(SHA_LEN);
+    let runner = RebaseStartPausesRunner::new(
+        start_range_ref_runner(repo, &sha_a, &sha_b),
+        repo.join(".git").join("rebase-merge"),
+    );
+    let io = FailingIo;
+    let env = TestEnv {
+        cwd: repo.to_path_buf(),
+    };
+    let ctx = Ctx {
+        runner: &runner,
+        cwd: repo.to_path_buf(),
+        io: &io,
+        env: &env,
+        fs: &REAL_FS,
+    };
+
+    let err = run_with_args_vec(
+        &ctx,
+        vec![
+            OsString::from("git-factor"),
+            OsString::from("--exec"),
+            OsString::from("true"),
+            OsString::from("a..b"),
+        ],
+    )
+    .err_or_abort("expected io failure");
+
+    assert!(
+        matches!(&err, FactorError::Io(inner) if inner.to_string().contains("io fail")),
+        "err was: {err:?}"
+    );
+}
+
+#[test]
+fn cmd_start_range_ref_inserts_shas_and_starts_multi_commit_session() {
+    let dir = TempDir::new().or_abort("tempdir");
+    let repo = dir.path();
+    fs::write(repo.join("git-factor"), "").or_abort("write fake exe");
+
+    let sha_a = "a".repeat(SHA_LEN);
+    let sha_b = "b".repeat(SHA_LEN);
+    let runner = RebaseStartPausesRunner::new(
+        start_range_ref_runner(repo, &sha_a, &sha_b),
+        repo.join(".git").join("rebase-merge"),
+    );
+    let io = TestIo::default();
+    let env = TestEnv {
+        cwd: repo.to_path_buf(),
+    };
+    let ctx = Ctx {
+        runner: &runner,
+        cwd: repo.to_path_buf(),
+        io: &io,
+        env: &env,
+        fs: &REAL_FS,
+    };
+
+    let code = run_with_args_vec(
+        &ctx,
+        vec![
+            OsString::from("git-factor"),
+            OsString::from("--exec"),
+            OsString::from("true"),
+            OsString::from("a..b"),
+        ],
+    )
+    .or_abort("expected multi-commit start to succeed");
+
+    assert_eq!(code, EXIT_OK);
+    assert!(
+        io.stdout()
+            .contains("FACTOR: Split session started for 2 commits (first: aaaaaaa)."),
+        "stdout was: {}",
+        io.stdout()
+    );
+    assert!(io.stderr().is_empty(), "stderr should be empty");
+}
+
+#[test]
