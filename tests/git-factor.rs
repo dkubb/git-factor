@@ -1316,8 +1316,6 @@ fi
         let dir = init_repo();
         let repo = dir.path();
 
-        commit_file(repo, "file.txt", "one\n", "chore: base");
-
         run_git_factor(
             repo,
             &["--status", "--finish"],
