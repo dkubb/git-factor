@@ -2149,3 +2149,249 @@ fn validate_not_merge_treats_nonzero_status_as_non_merge() {
 }
 
 #[test]
+fn validate_not_merge_errors_for_merge_commit() {
+    let dir = TempDir::new().or_abort("tempdir");
+    let repo = dir.path();
+    let sha = CommitSha::new("a".repeat(SHA_LEN)).or_abort("valid sha");
+    let runner = ScriptedRunner::default().with_status(
+        "git",
+        &["rev-parse", "--quiet", "--verify", &format!("{sha}^2")],
+        &[],
+        true,
+        repo,
+        0,
+    );
+    let io = TestIo::default();
+    let env = TestEnv {
+        cwd: repo.to_path_buf(),
+    };
+    let ctx = Ctx {
+        runner: &runner,
+        cwd: repo.to_path_buf(),
+        io: &io,
+        env: &env,
+        fs: &REAL_FS,
+    };
+
+    let err = validate_not_merge(&ctx, &sha).err_or_abort("merge commit should be rejected");
+    assert!(
+        matches!(&err, FactorError::MergeCommit(found) if *found == sha),
+        "err was: {err:?}"
+    );
+}
+
+#[test]
+fn default_errln_error_path_is_reachable_for_coverage() {
+    let io = DefaultErrlnFailingIo;
+    let err = io.errln("io fail").err_or_abort("expected io failure");
+    assert!(err.to_string().contains("io fail"), "err was: {err:?}");
+    io.out("").or_abort("out ok");
+}
+
+#[test]
+fn default_errln_success_path_is_reachable_for_coverage() {
+    let io = DefaultErrlnFailingIo;
+    io.errln("ok").or_abort("expected io success");
+}
+
+#[test]
+fn io_default_outln_and_errln_append_newlines() {
+    let io = DefaultLineIo::default();
+
+    io.outln("hello").or_abort("outln ok");
+    io.errln("world").or_abort("errln ok");
+
+    assert_eq!(io.stdout(), "hello\n");
+    assert_eq!(io.stderr(), "world\n");
+}
+
+#[test]
+fn real_io_outln_and_errln_succeed() {
+    REAL_IO.outln("").or_abort("real outln should succeed");
+    REAL_IO.errln("").or_abort("real errln should succeed");
+}
+
+#[test]
+fn io_default_out_errors_when_stdout_lock_is_poisoned() {
+    let io = DefaultLineIo::default();
+    thread::scope(|scope| {
+        let handle = scope.spawn(|| {
+            let _guard = io.stdout.lock().or_abort("stdout lock");
+            resume_unwind(Box::new(String::from("poison stdout lock")));
+        });
+        drop(handle.join());
+    });
+
+    let err = io
+        .out("hello")
+        .err_or_abort("expected out to fail on poisoned lock");
+    assert_eq!(err.to_string(), "stdout lock poisoned");
+}
+
+#[test]
+fn io_default_err_errors_when_stderr_lock_is_poisoned() {
+    let io = DefaultLineIo::default();
+    thread::scope(|scope| {
+        let handle = scope.spawn(|| {
+            let _guard = io.stderr.lock().or_abort("stderr lock");
+            resume_unwind(Box::new(String::from("poison stderr lock")));
+        });
+        drop(handle.join());
+    });
+
+    let err = io
+        .err("hello")
+        .err_or_abort("expected err to fail on poisoned lock");
+    assert_eq!(err.to_string(), "stderr lock poisoned");
+}
+
+#[test]
+fn io_default_outln_errors_when_stdout_lock_is_poisoned() {
+    let io = DefaultLineIo::default();
+    thread::scope(|scope| {
+        let handle = scope.spawn(|| {
+            let _guard = io.stdout.lock().or_abort("stdout lock");
+            resume_unwind(Box::new(String::from("poison stdout lock")));
+        });
+        drop(handle.join());
+    });
+
+    let err = io
+        .outln("hello")
+        .err_or_abort("expected outln to fail on poisoned lock");
+    assert_eq!(err.to_string(), "stdout lock poisoned");
+}
+
+#[test]
+fn io_default_errln_errors_when_stderr_lock_is_poisoned() {
+    let io = DefaultLineIo::default();
+    thread::scope(|scope| {
+        let handle = scope.spawn(|| {
+            let _guard = io.stderr.lock().or_abort("stderr lock");
+            resume_unwind(Box::new(String::from("poison stderr lock")));
+        });
+        drop(handle.join());
+    });
+
+    let err = io
+        .errln("hello")
+        .err_or_abort("expected errln to fail on poisoned lock");
+    assert_eq!(err.to_string(), "stderr lock poisoned");
+}
+
+#[test]
+fn io_out_errors_when_stdout_lock_is_poisoned() {
+    let io = TestIo::default();
+    thread::scope(|scope| {
+        let handle = scope.spawn(|| {
+            let _guard = io.stdout.lock().or_abort("stdout lock");
+            resume_unwind(Box::new(String::from("poison stdout lock")));
+        });
+        drop(handle.join());
+    });
+
+    let err = io
+        .out("hello")
+        .err_or_abort("expected out to fail on poisoned lock");
+    assert_eq!(err.to_string(), "stdout lock poisoned");
+}
+
+#[test]
+fn io_outln_and_errln_append_newlines() {
+    let io = TestIo::default();
+
+    io.outln("hello").or_abort("outln ok");
+    io.errln("world").or_abort("errln ok");
+
+    assert_eq!(io.stdout(), "hello\n");
+    assert_eq!(io.stderr(), "world\n");
+}
+
+#[test]
+fn io_err_errors_when_stderr_lock_is_poisoned() {
+    let io = TestIo::default();
+    thread::scope(|scope| {
+        let handle = scope.spawn(|| {
+            let _guard = io.stderr.lock().or_abort("stderr lock");
+            resume_unwind(Box::new(String::from("poison stderr lock")));
+        });
+        drop(handle.join());
+    });
+
+    let err = io
+        .err("hello")
+        .err_or_abort("expected err to fail on poisoned lock");
+    assert_eq!(err.to_string(), "stderr lock poisoned");
+}
+
+#[test]
+fn failing_env_returns_errors_and_no_vars() {
+    let env = FailingEnv { message: "nope" };
+
+    assert_eq!(
+        env.current_dir().err_or_abort("cwd err").to_string(),
+        "nope"
+    );
+    assert_eq!(
+        env.current_exe().err_or_abort("exe err").to_string(),
+        "nope"
+    );
+    assert_eq!(env.var_os("ANY"), None);
+}
+
+#[test]
+fn editor_path_errors_when_current_exe_fails() {
+    let dir = TempDir::new().or_abort("tempdir");
+    let env = ExeFailingEnv {
+        cwd: dir.path().to_path_buf(),
+    };
+    let io = TestIo::default();
+    let ctx = ctx_from_parts(&env, &REAL_RUNNER, &io, &REAL_FS).or_abort("ctx ok");
+
+    let err = editor_path(&ctx).err_or_abort("expected editor_path to error");
+
+    assert_eq!(env.var_os("ANY"), None);
+    assert_eq!(
+        err.to_string(),
+        "git command failed: cannot resolve current exe: no exe"
+    );
+}
+
+#[test]
+fn editor_path_errors_when_exe_cannot_be_canonicalized() {
+    let dir = TempDir::new().or_abort("tempdir");
+    let env = TestEnv {
+        cwd: dir.path().to_path_buf(),
+    };
+    let io = TestIo::default();
+    let ctx = ctx_from_parts(&env, &REAL_RUNNER, &io, &REAL_FS).or_abort("ctx ok");
+
+    let err = editor_path(&ctx).err_or_abort("expected editor_path to error");
+
+    assert!(
+        err.to_string()
+            .starts_with("git command failed: cannot canonicalize exe: "),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn editor_path_errors_when_executable_has_no_parent_dir() {
+    let dir = TempDir::new().or_abort("tempdir");
+    let env = RootExeEnv {
+        cwd: dir.path().to_path_buf(),
+    };
+    let io = TestIo::default();
+    let ctx = ctx_from_parts(&env, &REAL_RUNNER, &io, &REAL_FS).or_abort("ctx ok");
+
+    let err = editor_path(&ctx).err_or_abort("expected editor_path to error");
+
+    assert_eq!(env.var_os("ANY"), None);
+    assert_eq!(
+        err.to_string(),
+        "git command failed: executable has no parent directory"
+    );
+}
+
+#[cfg(unix)]
+#[test]
