@@ -975,3 +975,137 @@ fn setup_factor_state(
     }
     state_dir
 }
+
+fn continue_runner_with_commit(repo: &Path, original: &str, deleted_paths: &str) -> ScriptedRunner {
+    with_git_dir_outputs(ScriptedRunner::default(), repo, 6)
+        .with_status(
+            "git",
+            &["merge-base", "--is-ancestor", original, "HEAD"],
+            &[],
+            true,
+            repo,
+            0,
+        )
+        .with_status(
+            "git",
+            &["rev-parse", "--quiet", "--verify", &format!("{original}^2")],
+            &[],
+            true,
+            repo,
+            1,
+        )
+        .with_status("git", &["diff", "--quiet", "--staged"], &[], false, repo, 1)
+        .with_status(
+            "git",
+            &["checkout", "--quiet", "--", "."],
+            &[],
+            false,
+            repo,
+            0,
+        )
+        .with_status(
+            "git",
+            &["clean", "--force", "--quiet", "-d"],
+            &[],
+            false,
+            repo,
+            0,
+        )
+        .with_status(
+            "git",
+            &["checkout-index", "--all", "--force", "--quiet"],
+            &[],
+            false,
+            repo,
+            0,
+        )
+        .with_output(
+            "git",
+            &["diff", "--diff-filter=D", "--name-only", "--staged"],
+            repo,
+            deleted_paths,
+        )
+        .with_output("git", &["status", "--porcelain=v1"], repo, "M  file.txt\n")
+        .with_status("bash", &["-c", "true"], &[], false, repo, 0)
+        .with_output("git", &["status", "--porcelain=v1"], repo, "M  file.txt\n")
+        .with_output(
+            "git",
+            &[
+                "show",
+                "--format=%an%x00%ae%x00%aI%x00%cn%x00%ce%x00%cI",
+                "--no-patch",
+                original,
+            ],
+            repo,
+            TEST_COMMIT_META,
+        )
+        .with_status(
+            "git",
+            &["commit", "--quiet", "--message", "test: message"],
+            &TEST_COMMIT_ENVS,
+            false,
+            repo,
+            0,
+        )
+        .with_output("git", &["status", "--porcelain=v1"], repo, "")
+}
+
+fn continue_runner_with_remaining_output(
+    repo: &Path,
+    original: &str,
+    diff_stat: &str,
+    untracked: &str,
+) -> ScriptedRunner {
+    let repo_top = repo.to_string_lossy().into_owned();
+    continue_runner_with_commit(repo, original, "")
+        .with_output(
+            "git",
+            &["rev-parse", "HEAD^{tree}"],
+            repo,
+            &format!("{}\n", "c".repeat(SHA_LEN)),
+        )
+        .with_status(
+            "git",
+            &[
+                "restore",
+                "--source",
+                original,
+                "--staged",
+                "--worktree",
+                "--",
+                ".",
+            ],
+            &[],
+            false,
+            repo,
+            0,
+        )
+        .with_output("git", &["write-tree"], repo, TREE_EXPECTED_NL)
+        .with_status("git", &["reset", "--quiet"], &[], false, repo, 0)
+        .with_output("git", &["diff", "--stat"], repo, diff_stat)
+        .with_output(
+            "git",
+            &["ls-files", "--others", "--exclude-standard"],
+            repo,
+            untracked,
+        )
+        .with_output("git", &["rev-parse", "--show-toplevel"], repo, &repo_top)
+        .with_output("git", &["write-tree"], repo, TREE_REHYDRATE_NL)
+        .with_status(
+            "git",
+            &[
+                "cherry-pick",
+                "--no-commit",
+                "--strategy-option",
+                "theirs",
+                original,
+            ],
+            &[],
+            false,
+            repo,
+            0,
+        )
+        .with_status("git", &["cherry-pick", "--quit"], &[], false, repo, 0)
+        .with_status("git", &["read-tree", TREE_EXPECTED], &[], false, repo, 0)
+        .with_status("git", &["read-tree", TREE_REHYDRATE], &[], false, repo, 0)
+}
