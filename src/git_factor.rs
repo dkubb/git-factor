@@ -54,8 +54,14 @@ use self::cli::Cli;
 )]
 use self::ctx::*;
 use self::error::{FactorError, non_empty_msg};
-use self::state::read_state_parsed;
+use self::state::{read_state, read_state_bool_or_default, read_state_parsed};
 use self::types::StateDir;
+
+/// Backend directory name for apply-based rebases.
+const REBASE_APPLY_DIR: &str = "rebase-apply";
+
+/// Backend directory name for merge-based rebases.
+const REBASE_MERGE_DIR: &str = "rebase-merge";
 
 /// Canonical state-file keys used in `.git/factor`.
 #[derive(Clone, Copy)]
@@ -148,6 +154,13 @@ impl SessionPhase {
     }
 
     /// Parses the persisted phase value.
+    #[cfg_attr(
+        not(test),
+        expect(
+            clippy::single_call_fn,
+            reason = "phase parsing is isolated so later session flows can reuse it"
+        )
+    )]
     fn parse(raw: &str) -> Result<Self, FactorError> {
         match raw {
             "pending_start" => Ok(Self::PendingStart),
@@ -326,6 +339,161 @@ impl TryFrom<String> for ShortSha {
         };
         Ok(Self(non_empty))
     }
+}
+
+/// Minimal accessor for the active factor session state.
+struct Session<'ctx> {
+    /// Execution context for filesystem and git access.
+    ctx: &'ctx Ctx<'ctx>,
+    /// Path to the `.git/factor` state directory.
+    state_dir: PathBuf,
+}
+
+impl<'ctx> Session<'ctx> {
+    /// Returns the current commit SHA from the persisted commit list.
+    fn current_commit(&self) -> Result<String, FactorError> {
+        let current_index = self.current_index()?;
+        let commits_raw = read_state(self.ctx, &self.state_dir, StateFileKey::Commits.as_str())?;
+        let Some(current_commit) = commits_raw.as_str().lines().nth(current_index) else {
+            return Err(FactorError::GitCommand(non_empty_msg(format!(
+                "commit index {current_index} out of range"
+            ))));
+        };
+        Ok(current_commit.to_owned())
+    }
+
+    /// Reads the current commit index from state.
+    fn current_index(&self) -> Result<usize, FactorError> {
+        read_state_parsed::<usize>(
+            self.ctx,
+            &self.state_dir,
+            StateFileKey::CurrentIndex.as_str(),
+        )
+    }
+
+    /// Creates a session accessor from the active factor state directory.
+    #[expect(
+        clippy::single_call_fn,
+        reason = "active-session loading is kept isolated for later workflow commands"
+    )]
+    fn from_active(ctx: &'ctx Ctx<'ctx>) -> Result<Self, FactorError> {
+        Ok(Self {
+            ctx,
+            state_dir: factor_dir_in(ctx)?,
+        })
+    }
+
+    /// Reads the `is_root` flag from state.
+    fn is_root(&self) -> Result<bool, FactorError> {
+        read_state_bool_or_default(
+            self.ctx,
+            &self.state_dir,
+            StateFileKey::IsRoot.as_str(),
+            false,
+        )
+    }
+
+    /// Reads the persisted session phase.
+    fn phase(&self) -> Result<SessionPhase, FactorError> {
+        match read_state(self.ctx, &self.state_dir, StateFileKey::Phase.as_str()) {
+            Ok(phase) => SessionPhase::parse(phase.as_str()),
+            Err(FactorError::StateRead(err)) if err.kind() == io::ErrorKind::NotFound => {
+                Ok(SessionPhase::Splitting)
+            }
+            Err(err) => Err(err),
+        }
+    }
+
+    /// Reads the `requires_rebase` flag from state.
+    fn requires_rebase(&self) -> Result<bool, FactorError> {
+        read_state_bool_or_default(
+            self.ctx,
+            &self.state_dir,
+            StateFileKey::RequiresRebase.as_str(),
+            false,
+        )
+    }
+
+    /// Reads the number of split commits created for the current target.
+    fn split_count(&self) -> Result<u8, FactorError> {
+        read_state_parsed::<u8>(self.ctx, &self.state_dir, StateFileKey::SplitCount.as_str())
+    }
+}
+
+/// Returns the path to the factor state directory.
+fn factor_dir_in(ctx: &Ctx<'_>) -> Result<PathBuf, FactorError> {
+    Ok(git_dir_in(ctx)?.join("factor"))
+}
+
+/// Returns the absolute path to the git directory.
+fn git_dir_in(ctx: &Ctx<'_>) -> Result<PathBuf, FactorError> {
+    let output = ctx
+        .runner
+        .output("git", &["rev-parse", "--git-dir"], &ctx.cwd)
+        .map_err(|error| FactorError::GitDir(non_empty_msg(error.to_string())))?;
+
+    if !output.status.success() {
+        return Err(FactorError::NotGitRepo);
+    }
+
+    let path = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    let git_dir_path = PathBuf::from(path);
+    if git_dir_path.is_relative() {
+        return Ok(ctx.cwd.join(git_dir_path));
+    }
+    Ok(git_dir_path)
+}
+
+/// Returns true when the factor state directory exists.
+#[expect(
+    clippy::single_call_fn,
+    reason = "active-session detection stays isolated for status and later workflow commands"
+)]
+fn is_factor_active_in(ctx: &Ctx<'_>) -> bool {
+    factor_dir_in(ctx).is_ok_and(|dir| ctx.fs.is_dir(&dir))
+}
+
+/// Returns true when either rebase backend directory exists.
+#[expect(
+    clippy::single_call_fn,
+    reason = "rebase detection stays isolated for status and later workflow commands"
+)]
+fn is_mid_rebase_in(ctx: &Ctx<'_>) -> bool {
+    git_dir_in(ctx).is_ok_and(|dir| {
+        ctx.fs.is_dir(&dir.join(REBASE_MERGE_DIR)) || ctx.fs.is_dir(&dir.join(REBASE_APPLY_DIR))
+    })
+}
+
+/// Shows status for the current factor session.
+#[expect(
+    clippy::single_call_fn,
+    reason = "status output stays isolated until later workflow commands land"
+)]
+fn cmd_status_in(ctx: &Ctx<'_>) -> Result<i32, FactorError> {
+    if !is_factor_active_in(ctx) {
+        ctx.outln("FACTOR: No active session.")?;
+        return Ok(EXIT_OK);
+    }
+
+    let session = Session::from_active(ctx)?;
+    let current_commit = session.current_commit()?;
+    let current_index = session.current_index()?;
+    let split_count = session.split_count()?;
+    let phase = session.phase()?;
+    let requires_rebase = session.requires_rebase()?;
+    let is_root = session.is_root()?;
+    let rebase_in_progress = is_mid_rebase_in(ctx);
+
+    ctx.outln("FACTOR: Active session.")?;
+    ctx.outln(&format!("CURRENT_COMMIT: {current_commit}"))?;
+    ctx.outln(&format!("CURRENT_INDEX: {current_index}"))?;
+    ctx.outln(&format!("SPLIT_COUNT: {split_count}"))?;
+    ctx.outln(&format!("PHASE: {}", phase.as_str()))?;
+    ctx.outln(&format!("REQUIRES_REBASE: {requires_rebase}"))?;
+    ctx.outln(&format!("REBASE_IN_PROGRESS: {rebase_in_progress}"))?;
+    ctx.outln(&format!("IS_ROOT: {is_root}"))?;
+
+    Ok(EXIT_OK)
 }
 
 /// Maps a `FactorError` to an `(exit_code, message)` tuple.
@@ -521,9 +689,7 @@ fn run_with_args_vec(ctx: &Ctx<'_>, args: Vec<OsString>) -> Result<i32, FactorEr
     }
 
     if cli.status() {
-        return Err(FactorError::Usage(non_empty_msg(
-            "status workflow lands in later commits".to_owned(),
-        )));
+        return cmd_status_in(ctx);
     }
 
     if cli.finish() {

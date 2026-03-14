@@ -36,13 +36,6 @@ pub(in crate::git_factor) fn read_state_parsed<T: FromStr>(
 }
 
 /// Reads a `true`/`false` state value, with a default when the file is missing.
-#[cfg_attr(
-    test,
-    expect(
-        clippy::single_call_fn,
-        reason = "bool state reads remain isolated until more session state flows through this helper"
-    )
-)]
 pub(in crate::git_factor) fn read_state_bool_or_default(
     ctx: &Ctx<'_>,
     state_dir: &Path,

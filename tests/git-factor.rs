@@ -12,12 +12,26 @@ mod support;
 
 #[cfg(test)]
 mod tests {
-    use std::process::Command;
+    use std::fs;
+    use std::path::Path;
+    use std::process::{self, Command};
 
     use assert_cmd::assert::OutputAssertExt as _;
     use predicates::prelude::*;
 
     use super::support::*;
+
+    fn must_ok<T, E>(result: Result<T, E>) -> T {
+        result.unwrap_or_else(|_| process::abort())
+    }
+
+    fn write_factor_state(repo: &Path, entries: &[(&str, &str)]) {
+        let factor_dir = git_dir(repo).join("factor");
+        must_ok(fs::create_dir_all(&factor_dir));
+        for &(name, content) in entries {
+            must_ok(fs::write(factor_dir.join(name), format!("{content}\n")));
+        }
+    }
 
     fn expected_help_stdout() -> &'static str {
         "\
@@ -341,7 +355,7 @@ EXAMPLES:
     }
 
     #[test]
-    fn status_placeholder_reports_later_workflow() {
+    fn status_reports_no_active_session() {
         let dir = init_repo();
         let repo = dir.path();
 
@@ -349,11 +363,73 @@ EXAMPLES:
             .current_dir(repo)
             .arg("--status")
             .assert()
-            .code(EXIT_USAGE)
-            .stdout(predicate::str::is_empty())
-            .stderr(predicate::str::diff(
-                "status workflow lands in later commits\n".to_owned(),
-            ));
+            .code(EXIT_OK)
+            .stdout(predicate::str::diff(
+                "FACTOR: No active session.\n".to_owned(),
+            ))
+            .stderr(predicate::str::is_empty());
+    }
+
+    #[test]
+    fn status_reports_active_session_details() {
+        let dir = init_repo();
+        let repo = dir.path();
+        commit_file(repo, "file.txt", "one\n", "chore: base");
+        let current_commit = git(repo, &["rev-parse", "HEAD"]);
+
+        write_factor_state(
+            repo,
+            &[
+                ("commits", current_commit.as_str()),
+                ("current_index", "0"),
+                ("split_count", "2"),
+                ("phase", "splitting"),
+                ("requires_rebase", "false"),
+                ("is_root", "false"),
+            ],
+        );
+
+        Command::new(git_factor_bin())
+            .current_dir(repo)
+            .arg("--status")
+            .assert()
+            .code(EXIT_OK)
+            .stdout(predicate::str::diff(format!(
+                "FACTOR: Active session.\nCURRENT_COMMIT: {current_commit}\nCURRENT_INDEX: 0\nSPLIT_COUNT: 2\nPHASE: splitting\nREQUIRES_REBASE: false\nREBASE_IN_PROGRESS: false\nIS_ROOT: false\n"
+            )))
+            .stderr(predicate::str::is_empty());
+    }
+
+    #[test]
+    fn status_reports_pending_start_during_rebase() {
+        let dir = init_repo();
+        let repo = dir.path();
+        commit_file(repo, "file.txt", "one\n", "chore: base");
+        let current_commit = git(repo, &["rev-parse", "HEAD"]);
+        let git_dir = git_dir(repo);
+        must_ok(fs::create_dir_all(git_dir.join("rebase-merge")));
+
+        write_factor_state(
+            repo,
+            &[
+                ("commits", current_commit.as_str()),
+                ("current_index", "0"),
+                ("split_count", "0"),
+                ("phase", "pending_start"),
+                ("requires_rebase", "true"),
+                ("is_root", "true"),
+            ],
+        );
+
+        Command::new(git_factor_bin())
+            .current_dir(repo)
+            .arg("--status")
+            .assert()
+            .code(EXIT_OK)
+            .stdout(predicate::str::diff(format!(
+                "FACTOR: Active session.\nCURRENT_COMMIT: {current_commit}\nCURRENT_INDEX: 0\nSPLIT_COUNT: 0\nPHASE: pending_start\nREQUIRES_REBASE: true\nREBASE_IN_PROGRESS: true\nIS_ROOT: true\n"
+            )))
+            .stderr(predicate::str::is_empty());
     }
 
     #[test]
