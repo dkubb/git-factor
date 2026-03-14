@@ -261,6 +261,36 @@ EXAMPLES:
     }
 
     #[test]
+    fn rejects_continue_without_message() {
+        let dir = init_repo();
+        let repo = dir.path();
+
+        commit_file(repo, "file.txt", "one\n", "chore: base");
+
+        Command::new(git_factor_bin())
+            .current_dir(repo)
+            .arg("--continue")
+            .assert()
+            .code(EXIT_USAGE)
+            .stdout(predicate::str::is_empty())
+            .stderr(predicate::str::diff(
+                "--continue requires --message <MSG>\n".to_owned(),
+            ));
+    }
+
+    #[test]
+    fn cli_invalid_flag_triggers_clap_error_path() {
+        Command::new(git_factor_bin())
+            .arg("--definitely-not-a-real-flag")
+            .assert()
+            .code(EXIT_USAGE)
+            .stdout(predicate::str::is_empty())
+            .stderr(predicate::str::contains(
+                "unexpected argument '--definitely-not-a-real-flag'",
+            ));
+    }
+
+    #[test]
     fn start_placeholder_reports_later_workflow() {
         let dir = init_repo();
         let repo = dir.path();
