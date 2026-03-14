@@ -1,0 +1,5 @@
+error: expected `message = "..."`
+ --> tests/ui/expect-fail-non-string.rs:3:25
+  |
+3 | #[expect_fail(message = 123)]
+  |                         ^^^

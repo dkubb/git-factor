@@ -1,0 +1,5 @@
+error: expected `message = "..."`
+ --> tests/ui/expect-fail-non-literal.rs:7:15
+  |
+7 | #[expect_fail(message = msg())]
+  |               ^^^^^^^^^^^^^^^

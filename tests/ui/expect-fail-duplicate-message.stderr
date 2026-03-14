@@ -1,0 +1,5 @@
+error: duplicate message argument
+ --> tests/ui/expect-fail-duplicate-message.rs:3:30
+  |
+3 | #[expect_fail(message = "a", message = "b")]
+  |                              ^^^^^^^

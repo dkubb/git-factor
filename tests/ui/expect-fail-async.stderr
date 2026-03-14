@@ -1,0 +1,5 @@
+error: expect_fail does not support async tests
+ --> tests/ui/expect-fail-async.rs:4:7
+  |
+4 | async fn sample() {}
+  |       ^^
