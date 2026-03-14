@@ -25,6 +25,11 @@ workspace = true
 [workspace]
 members = [".", "expect-fail-macro"]
 
+[workspace.package]
+edition = "2024"
+publish = false
+license = "LicenseRef-Private"
+
 [dependencies]
 clap = { version = "4.5.56", features = ["derive"] }
 thiserror = "2.0.18"
