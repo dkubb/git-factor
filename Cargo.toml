@@ -13,5 +13,5 @@ name = "git-sequence-editor"
 path = "src/bin/git-sequence-editor.rs"
 
 [dependencies]
-clap = "4.5.56"
+clap = { version = "4.5.56", features = ["derive"] }
 thiserror = "2.0.18"
