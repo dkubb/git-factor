@@ -17,6 +17,8 @@ pub(in crate::git_factor) static REAL_FS: RealFs = RealFs;
 pub(in crate::git_factor) static REAL_RUNNER: RealRunner = RealRunner;
 
 /// Handles all user-facing IO (stdout/stderr) for the CLI.
+///
+/// Tests can inject a capturing implementation to assert on exact messages.
 pub(in crate::git_factor) trait Io {
     /// Writes raw text to stderr.
     fn err(&self, text: &str) -> io::Result<()>;
@@ -152,11 +154,16 @@ impl Fs for RealFs {
 }
 
 /// Runs external processes (git, bash, etc.).
+///
+/// Production uses [`RealRunner`]. Tests can inject a fake runner to force
+/// specific internal behaviors without relying on environment variables.
 pub(in crate::git_factor) trait Runner {
     /// Runs a process and returns its captured output.
     fn output(&self, bin: &str, args: &[&str], cwd: &Path) -> io::Result<Output>;
 
     /// Runs a process and returns its exit status.
+    ///
+    /// `quiet=true` discards stdout/stderr to avoid noisy subprocess output.
     fn status(
         &self,
         bin: &str,
@@ -201,17 +208,17 @@ impl Runner for RealRunner {
     clippy::field_scoped_visibility_modifiers,
     reason = "fields must be visible to sibling modules within git_factor"
 )]
-pub(in crate::git_factor) struct Ctx<'ctx> {
+pub(in crate::git_factor) struct Ctx<'runner> {
     /// Working directory for command execution.
     pub(in crate::git_factor) cwd: PathBuf,
     /// Environment access.
-    pub(in crate::git_factor) env: &'ctx dyn Env,
+    pub(in crate::git_factor) env: &'runner dyn Env,
     /// Filesystem access.
-    pub(in crate::git_factor) fs: &'ctx dyn Fs,
+    pub(in crate::git_factor) fs: &'runner dyn Fs,
     /// User-facing IO (stdout/stderr).
-    pub(in crate::git_factor) io: &'ctx dyn Io,
-    /// Command runner implementation.
-    pub(in crate::git_factor) runner: &'ctx dyn Runner,
+    pub(in crate::git_factor) io: &'runner dyn Io,
+    /// Command runner implementation (real or test double).
+    pub(in crate::git_factor) runner: &'runner dyn Runner,
 }
 
 impl Ctx<'_> {
