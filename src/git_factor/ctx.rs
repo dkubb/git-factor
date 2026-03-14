@@ -3,6 +3,7 @@ use std::ffi::OsString;
 pub(in crate::git_factor) use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+pub(in crate::git_factor) use std::process::{Command, ExitStatus, Output, Stdio};
 
 use super::error::FactorError;
 
@@ -12,6 +13,8 @@ pub(in crate::git_factor) static REAL_IO: RealIo = RealIo;
 pub(in crate::git_factor) static REAL_ENV: RealEnv = RealEnv;
 /// Shared `Fs` for the real CLI.
 pub(in crate::git_factor) static REAL_FS: RealFs = RealFs;
+/// Shared `Runner` for the real CLI.
+pub(in crate::git_factor) static REAL_RUNNER: RealRunner = RealRunner;
 
 /// Handles all user-facing IO (stdout/stderr) for the CLI.
 pub(in crate::git_factor) trait Io {
@@ -148,6 +151,50 @@ impl Fs for RealFs {
     }
 }
 
+/// Runs external processes (git, bash, etc.).
+pub(in crate::git_factor) trait Runner {
+    /// Runs a process and returns its captured output.
+    fn output(&self, bin: &str, args: &[&str], cwd: &Path) -> io::Result<Output>;
+
+    /// Runs a process and returns its exit status.
+    fn status(
+        &self,
+        bin: &str,
+        args: &[&str],
+        envs: &[(&str, &str)],
+        quiet: bool,
+        cwd: &Path,
+    ) -> io::Result<ExitStatus>;
+}
+
+/// Production [`Runner`] implementation.
+pub(in crate::git_factor) struct RealRunner;
+
+impl Runner for RealRunner {
+    fn output(&self, bin: &str, args: &[&str], cwd: &Path) -> io::Result<Output> {
+        Command::new(bin).args(args).current_dir(cwd).output()
+    }
+
+    fn status(
+        &self,
+        bin: &str,
+        args: &[&str],
+        envs: &[(&str, &str)],
+        quiet: bool,
+        cwd: &Path,
+    ) -> io::Result<ExitStatus> {
+        let mut command = Command::new(bin);
+        command.args(args).current_dir(cwd);
+        for &(key, value) in envs {
+            command.env(key, value);
+        }
+        if quiet {
+            command.stdout(Stdio::null()).stderr(Stdio::null());
+        }
+        command.status()
+    }
+}
+
 /// Execution context for git-factor operations.
 #[derive(Clone)]
 #[expect(
@@ -163,6 +210,8 @@ pub(in crate::git_factor) struct Ctx<'ctx> {
     pub(in crate::git_factor) fs: &'ctx dyn Fs,
     /// User-facing IO (stdout/stderr).
     pub(in crate::git_factor) io: &'ctx dyn Io,
+    /// Command runner implementation.
+    pub(in crate::git_factor) runner: &'ctx dyn Runner,
 }
 
 impl Ctx<'_> {
@@ -189,7 +238,9 @@ impl Ctx<'_> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Ctx, Env as _, Fs as _, Io as _, REAL_ENV, REAL_FS, REAL_IO};
+    use super::{
+        Ctx, Env as _, Fs as _, Io as _, REAL_ENV, REAL_FS, REAL_IO, REAL_RUNNER, Runner as _,
+    };
     use crate::test_support::OrAbort as _;
     use core::cell::RefCell;
     use std::env;
@@ -291,6 +342,33 @@ mod tests {
         assert!(!REAL_FS.exists(&nested));
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn real_runner_executes_commands_with_expected_behavior() {
+        let dir = TempDir::new().or_abort("tempdir");
+
+        let output = REAL_RUNNER
+            .output("sh", &["-c", "printf runner"], dir.path())
+            .or_abort("runner output should succeed");
+        assert!(output.status.success());
+        assert_eq!(
+            String::from_utf8(output.stdout).or_abort("stdout utf8"),
+            "runner"
+        );
+        assert_eq!(String::from_utf8(output.stderr).or_abort("stderr utf8"), "");
+
+        let status = REAL_RUNNER
+            .status(
+                "sh",
+                &["-c", "test \"$CTX_RUNNER_TEST\" = expected"],
+                &[("CTX_RUNNER_TEST", "expected")],
+                true,
+                dir.path(),
+            )
+            .or_abort("runner status should succeed");
+        assert!(status.success());
+    }
+
     #[test]
     fn ctx_carries_runtime_dependencies() {
         let dir = TempDir::new().or_abort("tempdir");
@@ -299,6 +377,7 @@ mod tests {
             env: &REAL_ENV,
             fs: &REAL_FS,
             io: &REAL_IO,
+            runner: &REAL_RUNNER,
         };
 
         assert_eq!(ctx.cwd, PathBuf::from(dir.path()));
@@ -308,6 +387,7 @@ mod tests {
         );
         assert!(ctx.fs.exists(dir.path()));
         let _: &dyn super::Io = ctx.io;
+        let _: &dyn super::Runner = ctx.runner;
     }
 
     #[test]
@@ -319,6 +399,7 @@ mod tests {
             env: &REAL_ENV,
             fs: &REAL_FS,
             io: &io,
+            runner: &REAL_RUNNER,
         };
 
         ctx.out("out").or_abort("stdout write should succeed");

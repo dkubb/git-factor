@@ -82,7 +82,7 @@ pub(in crate::git_factor) fn write_state(
 
 #[cfg(test)]
 mod tests {
-    use super::super::ctx::{REAL_ENV, REAL_FS, REAL_IO};
+    use super::super::ctx::{REAL_ENV, REAL_FS, REAL_IO, REAL_RUNNER};
     use super::*;
     use std::fs;
     use std::path::PathBuf;
@@ -96,6 +96,7 @@ mod tests {
             env: &REAL_ENV,
             fs: &REAL_FS,
             io: &REAL_IO,
+            runner: &REAL_RUNNER,
         }
     }
 
