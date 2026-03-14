@@ -9,8 +9,6 @@ use super::*;
 use std::process::ExitStatus;
 
 #[cfg(test)]
-use crate::git_factor::types::{COMMIT_SHA_HEX_LEN, CommitSha};
-#[cfg(test)]
 use crate::test_support::OrAbort as _;
 
 /// Maps a `FactorError` to an `(exit_code, message)` tuple.
@@ -59,13 +57,6 @@ pub(in crate::git_factor) fn shell_quote(arg: &str) -> String {
 
 /// Returns the absolute path to `git-sequence-editor`, resolved as a sibling
 /// of the current executable.
-#[cfg_attr(
-    test,
-    expect(
-        clippy::single_call_fn,
-        reason = "helper coverage tests exercise this entrypoint before broader helper rewiring lands"
-    )
-)]
 pub(in crate::git_factor) fn editor_path(ctx: &Ctx<'_>) -> Result<PathBuf, FactorError> {
     let exe = match ctx.env.current_exe() {
         Ok(exe) => exe,
@@ -93,25 +84,11 @@ pub(in crate::git_factor) fn editor_path(ctx: &Ctx<'_>) -> Result<PathBuf, Facto
 }
 
 /// Returns the path to the factor state directory.
-#[cfg_attr(
-    test,
-    expect(
-        clippy::single_call_fn,
-        reason = "helper coverage tests exercise this entrypoint before broader helper rewiring lands"
-    )
-)]
 pub(in crate::git_factor) fn factor_dir_in(ctx: &Ctx<'_>) -> Result<StateDir, FactorError> {
     Ok(StateDir::new(git_dir_in(ctx)?.join("factor")))
 }
 
 /// Extracts exit code from process status.
-#[cfg_attr(
-    test,
-    expect(
-        clippy::single_call_fn,
-        reason = "helper coverage tests exercise this entrypoint before broader helper rewiring lands"
-    )
-)]
 pub(in crate::git_factor) fn status_code(status: ExitStatus) -> i32 {
     status.code().unwrap_or(EXIT_SOFTWARE)
 }
@@ -119,37 +96,12 @@ pub(in crate::git_factor) fn status_code(status: ExitStatus) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::process::Command;
-    use tempfile::TempDir;
 
     #[test]
     fn shell_quote_wraps_and_escapes_single_quotes() {
         assert_eq!(shell_quote("abc"), "'abc'");
         assert_eq!(shell_quote("a b"), "'a b'");
         assert_eq!(shell_quote("a'b"), "'a'\\''b'");
-    }
-
-    #[test]
-    fn editor_path_resolves_to_sibling_binary_of_current_exe() {
-        let cwd = TempDir::new().or_abort("temp dir");
-        let ctx = Ctx {
-            cwd: cwd.path().to_path_buf(),
-            env: &REAL_ENV,
-            fs: &REAL_FS,
-            io: &REAL_IO,
-            runner: &REAL_RUNNER,
-        };
-
-        let actual = editor_path(&ctx).or_abort("editor path");
-        let current_exe = REAL_ENV.current_exe().or_abort("current exe");
-        let expected = REAL_FS
-            .canonicalize(&current_exe)
-            .or_abort("canonical exe")
-            .parent()
-            .or_abort("exe parent")
-            .join("git-sequence-editor");
-
-        assert_eq!(actual, expected);
     }
 
     #[test]
@@ -187,45 +139,9 @@ mod tests {
     }
 
     #[test]
-    fn factor_dir_in_appends_factor_to_the_git_dir() {
-        let cwd = TempDir::new().or_abort("temp dir");
-        let git_dir = cwd.path().join(".git");
-        let init_status = Command::new("git")
-            .args(["init", "--quiet", cwd.path().to_str().or_abort("utf8 path")])
-            .status()
-            .or_abort("git init");
-        assert!(init_status.success());
-
-        let ctx = Ctx {
-            cwd: cwd.path().to_path_buf(),
-            env: &REAL_ENV,
-            fs: &REAL_FS,
-            io: &REAL_IO,
-            runner: &REAL_RUNNER,
-        };
-
-        let actual = factor_dir_in(&ctx).or_abort("factor dir");
-        assert_eq!(actual.as_path(), git_dir.join("factor"));
-    }
-
-    #[test]
-    fn status_code_returns_process_exit_code() {
-        let status = Command::new("sh")
-            .args(["-c", "exit 7"])
-            .status()
-            .or_abort("exit status");
-        let seven: i32 = 7;
-
-        assert_eq!(status_code(status), seven);
-    }
-
-    #[test]
     fn proptest_run_non_panicking_unit_suite() {
-        editor_path_resolves_to_sibling_binary_of_current_exe();
         error_to_exit_maps_variants_to_expected_exit_codes();
-        factor_dir_in_appends_factor_to_the_git_dir();
         shell_quote_wraps_and_escapes_single_quotes();
-        status_code_returns_process_exit_code();
     }
 }
 

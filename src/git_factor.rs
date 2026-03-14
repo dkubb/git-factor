@@ -5,49 +5,60 @@
 //! `git factor ...` (git will resolve this to the `git-factor` binary).
 
 #![forbid(unsafe_code)]
-#![expect(
-    clippy::implicit_return,
-    reason = "conflicts with `clippy::needless_return` from `clippy::all`"
+#![cfg_attr(
+    test,
+    expect(
+        clippy::self_named_module_files,
+        reason = "test-target clippy enables this module-file style lint for the crate entry module"
+    )
 )]
 #![expect(
     clippy::question_mark_used,
-    reason = "state helpers use `?` for simple error propagation"
+    reason = "fallible orchestration code is intentionally expressed with `?` for readability"
 )]
 #![expect(
-    dead_code,
-    reason = "support modules land before the full factor engine is wired into them"
+    clippy::implicit_return,
+    reason = "orchestration and helpers use expression tails for readability"
 )]
-
 /// CLI argument model for `git-factor`.
 #[path = "git_factor/cli.rs"]
 mod cli;
-/// Execution context and filesystem access.
+/// Execution context, IO traits, and real implementations.
 #[path = "git_factor/ctx.rs"]
 mod ctx;
 /// Error model for `git-factor`.
 #[path = "git_factor/error.rs"]
 mod error;
+/// Git command execution and process management.
+#[path = "git_factor/git.rs"]
+mod git;
 /// Shared utility helpers for `git-factor`.
 #[path = "git_factor/helpers.rs"]
 mod helpers;
 /// State file read/write operations for `git-factor`.
 #[path = "git_factor/state.rs"]
 mod state;
+/// Trace logging infrastructure for process and note events.
+#[path = "git_factor/trace.rs"]
+mod trace;
 /// Core domain types for `git-factor`.
 #[path = "git_factor/types.rs"]
 mod types;
+/// User-facing output and status queries.
+#[path = "git_factor/ui.rs"]
+mod ui;
+/// Validation, resolution, and sorting of commits.
+#[path = "git_factor/validation.rs"]
+mod validation;
 
 use core::num::NonZeroU8;
 use std::ffi::OsString;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use clap::{CommandFactory as _, Parser as _};
-
 use crate::exit_codes::{EXIT_DATAERR, EXIT_OK, EXIT_SOFTWARE, EXIT_TEMPFAIL, EXIT_USAGE};
 use crate::non_empty_string::NonEmptyString;
 
-use self::cli::Cli;
 #[cfg_attr(
     not(test),
     expect(
@@ -56,16 +67,40 @@ use self::cli::Cli;
     )
 )]
 use self::ctx::*;
+#[cfg_attr(
+    not(test),
+    expect(
+        clippy::wildcard_imports,
+        reason = "re-exports trace items for sibling module access via `use super::*`"
+    )
+)]
+use self::trace::*;
+use clap::{CommandFactory as _, Parser as _};
+use nonempty::NonEmpty;
+
+use self::cli::Cli;
 use self::error::{FactorError, non_empty_msg};
-use self::helpers::error_to_exit;
-use self::state::{read_state, read_state_bool_or_default, read_state_parsed};
-use self::types::StateDir;
+use self::git::{
+    REBASE_APPLY_DIR, REBASE_MERGE_DIR, command_output_with, command_status_with, git_dir_in,
+    git_output, git_raw_output, git_status, run_git, run_git_non_interactive,
+};
+use self::helpers::{editor_path, error_to_exit, factor_dir_in, shell_quote, status_code};
+use self::state::{read_state, read_state_bool_or_default, read_state_parsed, write_state};
+#[cfg(test)]
+use self::types::COMMIT_SHA_HEX_LEN;
+use self::types::{CommitSha, Commits, StateDir, TreeHash};
+use self::ui::{
+    is_factor_active_in, is_mid_rebase_in, print_hints_with_remaining_in, print_session_started,
+};
+use self::validation::{
+    remove_empty_root_in, resolve_commit, resolve_commit_refs, sort_topologically,
+    validate_exec_syntax,
+};
+#[cfg(test)]
+use self::validation::{resolve_head_commit, validate_ancestor};
 
-/// Backend directory name for apply-based rebases.
-const REBASE_APPLY_DIR: &str = "rebase-apply";
-
-/// Backend directory name for merge-based rebases.
-const REBASE_MERGE_DIR: &str = "rebase-merge";
+#[cfg(test)]
+use crate::test_support::{OrAbort as _, ResultOrAbort as _};
 
 /// Canonical state-file keys used in `.git/factor`.
 #[derive(Clone, Copy)]
@@ -158,12 +193,9 @@ impl SessionPhase {
     }
 
     /// Parses the persisted phase value.
-    #[cfg_attr(
-        not(test),
-        expect(
-            clippy::single_call_fn,
-            reason = "phase parsing is isolated so later session flows can reuse it"
-        )
+    #[expect(
+        clippy::single_call_fn,
+        reason = "phase parsing is intentionally centralized for state-file validation"
     )]
     fn parse(raw: &str) -> Result<Self, FactorError> {
         match raw {
@@ -197,13 +229,6 @@ impl CurrentIndex {
     }
 
     /// Reads `current_index` from persisted state.
-    #[cfg_attr(
-        test,
-        expect(
-            clippy::single_call_fn,
-            reason = "called in later workflow commits; kept on CurrentIndex for type cohesion"
-        )
-    )]
     fn read(ctx: &Ctx<'_>, state_dir: &StateDir) -> Result<Self, FactorError> {
         read_state_parsed::<usize>(
             ctx,
@@ -240,12 +265,9 @@ impl SplitCount {
     }
 
     /// Reads `split_count` from persisted state.
-    #[cfg_attr(
-        test,
-        expect(
-            clippy::single_call_fn,
-            reason = "called via Session::split_count; kept on SplitCount for type cohesion"
-        )
+    #[expect(
+        clippy::single_call_fn,
+        reason = "called via Session::split_count; kept on SplitCount for type cohesion"
     )]
     fn read(ctx: &Ctx<'_>, state_dir: &StateDir) -> Result<Self, FactorError> {
         read_state_parsed::<u8>(ctx, state_dir.as_path(), StateFileKey::SplitCount.as_str())
@@ -258,7 +280,7 @@ impl SplitCount {
     }
 }
 
-/// Full commit message (1-65,536 bytes).
+/// Full commit message (1–65,536 bytes).
 #[derive(Debug)]
 struct CommitMessage(NonEmptyString);
 
@@ -303,7 +325,7 @@ impl TryFrom<String> for CommitMessage {
     }
 }
 
-/// Abbreviated commit SHA from `rev-parse --short` (1-40 lowercase hex chars).
+/// Abbreviated commit SHA from `rev-parse --short` (1–40 lowercase hex chars).
 #[derive(Debug)]
 struct ShortSha(NonEmptyString);
 
@@ -345,98 +367,287 @@ impl TryFrom<String> for ShortSha {
     }
 }
 
-/// Minimal accessor for the active factor session state.
+/// Result of advancing past a fully-split commit.
+#[derive(Debug)]
+enum AdvanceOutcome {
+    /// Another commit is ready to split.
+    Advanced {
+        /// Full commit message of the next commit to split.
+        next_message: CommitMessage,
+        /// Abbreviated SHA of the next commit to split.
+        next_short_sha: ShortSha,
+        /// Number of split commits produced for the previous commit.
+        previous_split_count: NonZeroU8,
+    },
+    /// Session is complete — no more commits to split.
+    Completed {
+        /// Number of split commits produced for the final commit.
+        final_split_count: NonZeroU8,
+    },
+}
+
+/// Result of starting the rebase wrapper for multi-commit factor sessions.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum StartRebaseOutcome {
+    /// Rebase paused at the inserted `break` and the split session can open now.
+    PausedAtBreak,
+    /// Rebase is paused for user recovery before the split session can begin.
+    WaitingForRecovery,
+}
+
+/// Factor session state accessor.
+///
+/// Eagerly loads the immutable commit list on construction; all other reads
+/// are lazy. Write operations (increment, advance, cleanup) go through this
+/// struct so callers never touch `state_dir` directly.
 struct Session<'ctx> {
-    /// Execution context for filesystem and git access.
+    /// Parsed commit SHAs for the session (immutable after start).
+    commits: Vec<CommitSha>,
+    /// Execution context for IO and git operations.
     ctx: &'ctx Ctx<'ctx>,
     /// Path to the `.git/factor` state directory.
-    state_dir: PathBuf,
+    state_dir: StateDir,
 }
 
 impl<'ctx> Session<'ctx> {
-    /// Returns the current commit SHA from the persisted commit list.
-    fn current_commit(&self) -> Result<String, FactorError> {
-        let current_index = self.current_index()?;
-        let commits_raw = read_state(self.ctx, &self.state_dir, StateFileKey::Commits.as_str())?;
-        let Some(current_commit) = commits_raw.as_str().lines().nth(current_index) else {
-            return Err(FactorError::GitCommand(non_empty_msg(format!(
-                "commit index {current_index} out of range"
-            ))));
+    /// Advances to the next commit in a multi-commit factor session.
+    ///
+    /// Called after completing all splits for the current commit. Continues the
+    /// rebase and checks if another edit stop was reached (next commit to split)
+    /// or if the rebase finished completely.
+    ///
+    /// Returns the outcome with data the caller needs to format output.
+    fn advance_to_next_commit(&self) -> Result<AdvanceOutcome, FactorError> {
+        let split_count = self.split_count()?;
+        let requires_rebase = self.requires_rebase(StateBool::True)?;
+
+        if requires_rebase.as_bool() {
+            let previous_split_count = match split_count.as_non_zero() {
+                Some(previous_split_count) => previous_split_count,
+                None => {
+                    return Err(FactorError::GitCommand(non_empty_msg(
+                        "split_count is zero at advance".to_owned(),
+                    )));
+                }
+            };
+            if !is_mid_rebase_in(self.ctx) {
+                return Err(FactorError::GitCommand(non_empty_msg(
+                    "no rebase in progress".to_owned(),
+                )));
+            }
+
+            let current_index = self.current_index()?;
+            if current_index.as_usize() >= self.commits.len() {
+                return Err(FactorError::GitCommand(non_empty_msg(format!(
+                    "commit index {} out of range (have {} commits)",
+                    current_index.as_usize(),
+                    self.commits.len()
+                ))));
+            }
+            let next_index = if self.commits.len() <= 1 {
+                None
+            } else {
+                let advanced_index = current_index.increment()?;
+                (advanced_index.as_usize() < self.commits.len()).then_some(advanced_index)
+            };
+            if let Some(advanced_index) = next_index {
+                let next_index_text = advanced_index.as_usize().to_string();
+                let next_split_count_text = SplitCount::zero().as_u8().to_string();
+                write_state_pairs(
+                    self.ctx,
+                    &self.state_dir,
+                    &[
+                        (StateFileKey::CurrentIndex, next_index_text.as_str()),
+                        (StateFileKey::Phase, SessionPhase::PendingStart.as_str()),
+                        (StateFileKey::SplitCount, next_split_count_text.as_str()),
+                    ],
+                )?;
+            }
+
+            if let Err(err) = run_git_non_interactive(self.ctx, &["rebase", "--continue"]) {
+                let recovery = if next_index.is_some() {
+                    "If the start gate failed, fix the current commit, stage the intended changes, amend the commit, run 'git rebase --continue', then run 'git factor --continue'."
+                } else {
+                    "Resolve the rebase issue, then rerun 'git rebase --continue'."
+                };
+                return Err(FactorError::GitCommand(non_empty_msg(format!(
+                    "{err}\n\n{recovery}\nTo abandon the factor session, run 'git factor --abort'"
+                ))));
+            }
+
+            if is_mid_rebase_in(self.ctx) {
+                if next_index.is_none() {
+                    return Err(FactorError::GitCommand(non_empty_msg(
+                        "rebase remained active after the final target without another factor stop"
+                            .to_owned(),
+                    )));
+                }
+                let (next_short_sha_raw, next_message_raw) =
+                    enter_pending_split_session(self.ctx, self)?;
+                let next_message = CommitMessage::try_from(next_message_raw)?;
+                let next_short_sha = ShortSha::try_from(next_short_sha_raw)?;
+
+                return Ok(AdvanceOutcome::Advanced {
+                    next_message,
+                    next_short_sha,
+                    previous_split_count,
+                });
+            }
+        }
+
+        // Session finished (either rebase is done, or single-commit no-rebase mode).
+        let is_root = read_state_key(self.ctx, &self.state_dir, StateFileKey::IsRoot)
+            .is_ok_and(|value| value.as_str() == "true");
+        self.remove_state_strict()?;
+
+        if is_root {
+            remove_empty_root_in(self.ctx)?;
+        }
+
+        let final_split_count = match split_count.as_non_zero() {
+            Some(final_split_count) => final_split_count,
+            None => {
+                return Err(FactorError::GitCommand(non_empty_msg(
+                    "split_count is zero at completion".to_owned(),
+                )));
+            }
         };
-        Ok(current_commit.to_owned())
+
+        Ok(AdvanceOutcome::Completed { final_split_count })
     }
 
-    /// Reads the current commit index from state.
-    fn current_index(&self) -> Result<usize, FactorError> {
-        read_state_parsed::<usize>(
-            self.ctx,
-            &self.state_dir,
-            StateFileKey::CurrentIndex.as_str(),
-        )
+    /// Returns the current commit SHA by indexing the cached commit list.
+    fn current_commit(&self) -> Result<CommitSha, FactorError> {
+        let current_index = CurrentIndex::read(self.ctx, &self.state_dir)?;
+        let out_of_range = FactorError::GitCommand(non_empty_msg(format!(
+            "commit index {} out of range (have {} commits)",
+            current_index.as_usize(),
+            self.commits.len()
+        )));
+        self.commits
+            .get(current_index.as_usize())
+            .cloned()
+            .ok_or(out_of_range)
     }
 
-    /// Creates a session accessor from the active factor state directory.
+    /// Reads the current commit index from persisted state.
+    fn current_index(&self) -> Result<CurrentIndex, FactorError> {
+        CurrentIndex::read(self.ctx, &self.state_dir)
+    }
+
+    /// Returns whether the active target commit is the root commit.
+    fn current_target_is_root(&self) -> Result<bool, FactorError> {
+        Ok(self.current_index()?.as_usize() == 0 && self.is_root(StateBool::False)?.as_bool())
+    }
+
+    /// Reads the exec command from persisted state.
+    fn exec(&self) -> Result<NonEmptyString, FactorError> {
+        read_state_key(self.ctx, &self.state_dir, StateFileKey::Exec)
+    }
+
+    /// Returns the expected converged tree for the current split step.
+    fn expected_tree(&self) -> Result<TreeHash, FactorError> {
+        let original_commit = self.current_commit()?;
+        expected_tree_for_current_step(self.ctx, &self.state_dir, &original_commit)
+    }
+
+    /// Creates a session from the active factor state directory.
     fn from_active(ctx: &'ctx Ctx<'ctx>) -> Result<Self, FactorError> {
+        let state_dir = factor_dir_in(ctx)?;
+        let commits_raw = read_state_key(ctx, &state_dir, StateFileKey::Commits)?;
+        let commits = commits_raw
+            .as_str()
+            .lines()
+            .map(|line| CommitSha::new(line.to_owned()))
+            .collect::<Result<Vec<CommitSha>, _>>()?;
         Ok(Self {
+            commits,
             ctx,
-            state_dir: factor_dir_in(ctx)?,
+            state_dir,
         })
     }
 
-    /// Reads the `is_root` flag from state.
-    fn is_root(&self) -> Result<bool, FactorError> {
-        read_state_bool_or_default(
+    /// Increments `split_count` in persisted state and returns the new value.
+    fn increment_split_count(&self) -> Result<u8, FactorError> {
+        let split_count = self.split_count()?.increment()?;
+        let split_count_text = split_count.as_u8().to_string();
+        write_state(
             self.ctx,
-            &self.state_dir,
-            StateFileKey::IsRoot.as_str(),
-            false,
-        )
+            self.state_dir.as_path(),
+            StateFileKey::SplitCount.as_str(),
+            split_count_text.as_str(),
+        )?;
+        Ok(split_count.as_u8())
     }
 
-    /// Reads the persisted session phase.
-    fn phase(&self) -> Result<SessionPhase, FactorError> {
-        match read_state(self.ctx, &self.state_dir, StateFileKey::Phase.as_str()) {
-            Ok(phase) => SessionPhase::parse(phase.as_str()),
+    /// Reads the `is_root` flag with the given default.
+    fn is_root(&self, default: StateBool) -> Result<StateBool, FactorError> {
+        read_state_bool_key_or_default(self.ctx, &self.state_dir, StateFileKey::IsRoot, default)
+    }
+
+    /// Reads the persisted session phase, defaulting for legacy sessions.
+    fn phase(&self, default: SessionPhase) -> Result<SessionPhase, FactorError> {
+        match read_state_key(self.ctx, &self.state_dir, StateFileKey::Phase) {
+            Ok(value) => SessionPhase::parse(value.as_str()),
             Err(FactorError::StateRead(err)) if err.kind() == io::ErrorKind::NotFound => {
-                Ok(SessionPhase::Splitting)
+                Ok(default)
             }
             Err(err) => Err(err),
         }
     }
 
-    /// Reads the `requires_rebase` flag from state.
-    fn requires_rebase(&self) -> Result<bool, FactorError> {
-        read_state_bool_or_default(
+    /// Removes the factor state path and fails if cleanup does not succeed.
+    fn remove_state_strict(&self) -> Result<(), FactorError> {
+        remove_state_path_required(self.ctx, &self.state_dir)
+    }
+
+    /// Reads the `requires_rebase` flag with the given default.
+    fn requires_rebase(&self, default: StateBool) -> Result<StateBool, FactorError> {
+        read_state_bool_key_or_default(
             self.ctx,
             &self.state_dir,
-            StateFileKey::RequiresRebase.as_str(),
-            false,
-        )
-    }
-
-    /// Reads the number of split commits created for the current target.
-    fn split_count(&self) -> Result<u8, FactorError> {
-        read_state_parsed::<u8>(self.ctx, &self.state_dir, StateFileKey::SplitCount.as_str())
-    }
-
-    /// Reads the `start_head` state value.
-    fn start_head(&self) -> Result<NonEmptyString, FactorError> {
-        read_state(self.ctx, &self.state_dir, StateFileKey::StartHead.as_str())
-    }
-
-    /// Reads the `started_rebase` flag from state, defaulting to the provided value.
-    fn started_rebase(&self, default: bool) -> Result<bool, FactorError> {
-        read_state_bool_or_default(
-            self.ctx,
-            &self.state_dir,
-            StateFileKey::StartedRebase.as_str(),
+            StateFileKey::RequiresRebase,
             default,
         )
+    }
+
+    /// Reads the split count from persisted state.
+    fn split_count(&self) -> Result<SplitCount, FactorError> {
+        SplitCount::read(self.ctx, &self.state_dir)
+    }
+
+    /// Reads the `start_head` state key.
+    fn start_head(&self) -> Result<NonEmptyString, FactorError> {
+        read_state_key(self.ctx, &self.state_dir, StateFileKey::StartHead)
+    }
+
+    /// Reads the `started_rebase` flag with the given default.
+    fn started_rebase(&self, default: StateBool) -> Result<StateBool, FactorError> {
+        read_state_bool_key_or_default(
+            self.ctx,
+            &self.state_dir,
+            StateFileKey::StartedRebase,
+            default,
+        )
+    }
+
+    /// Creates a session with an explicit state directory and commit list.
+    #[cfg(test)]
+    const fn with_state(
+        ctx: &'ctx Ctx<'ctx>,
+        state_dir: StateDir,
+        commits: Vec<CommitSha>,
+    ) -> Self {
+        Self {
+            commits,
+            ctx,
+            state_dir,
+        }
     }
 }
 
 /// Allowed repository states at gate boundaries.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy)]
 enum RepoStatePolicy {
     /// No staged, unstaged, or untracked changes are allowed.
     FullyClean,
@@ -444,40 +655,69 @@ enum RepoStatePolicy {
     StagedOnly,
 }
 
-/// Returns the path to the factor state directory.
-fn factor_dir_in(ctx: &Ctx<'_>) -> Result<PathBuf, FactorError> {
-    Ok(git_dir_in(ctx)?.join("factor"))
+/// Reads a typed factor-state boolean with a typed default.
+fn read_state_bool_key_or_default(
+    ctx: &Ctx<'_>,
+    state_dir: &StateDir,
+    key: StateFileKey,
+    default: StateBool,
+) -> Result<StateBool, FactorError> {
+    read_state_bool_or_default(ctx, state_dir.as_path(), key.as_str(), default.as_bool())
+        .map(StateBool::from_bool)
 }
 
-/// Returns the absolute path to the git directory.
-fn git_dir_in(ctx: &Ctx<'_>) -> Result<PathBuf, FactorError> {
-    let output = ctx
-        .runner
-        .output("git", &["rev-parse", "--git-dir"], &ctx.cwd)
-        .map_err(|error| FactorError::GitDir(non_empty_msg(error.to_string())))?;
+/// Reads a typed factor-state value.
+fn read_state_key(
+    ctx: &Ctx<'_>,
+    state_dir: &StateDir,
+    key: StateFileKey,
+) -> Result<NonEmptyString, FactorError> {
+    read_state(ctx, state_dir.as_path(), key.as_str())
+}
 
-    if !output.status.success() {
-        return Err(FactorError::NotGitRepo);
+/// Returns the joined exec pipeline used by factor gates.
+#[expect(
+    clippy::single_call_fn,
+    reason = "exec commands are joined in one place so start and rebase preflight stay identical"
+)]
+fn joined_exec_command(exec: &NonEmpty<NonEmptyString>) -> NonEmptyString {
+    let mut exec_command = exec.first().clone();
+    for command in exec.iter().skip(1) {
+        exec_command.push_str(" && ");
+        exec_command.push_str(command.as_str());
     }
+    exec_command
+}
 
-    let path = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-    let git_dir_path = PathBuf::from(path);
-    if git_dir_path.is_relative() {
-        return Ok(ctx.cwd.join(git_dir_path));
+/// Formats captured stdout/stderr sections for diagnostics.
+#[expect(
+    clippy::single_call_fn,
+    reason = "captured output formatting is centralized for consistent diagnostics"
+)]
+fn format_captured_output(stdout: &str, stderr: &str) -> String {
+    let mut out = String::new();
+    if !stdout.is_empty() {
+        out.push_str("STDOUT:\n");
+        out.push_str(stdout);
+        if !stdout.ends_with('\n') {
+            out.push('\n');
+        }
     }
-    Ok(git_dir_path)
+    if !stderr.is_empty() {
+        out.push_str("STDERR:\n");
+        out.push_str(stderr);
+        if !stderr.ends_with('\n') {
+            out.push('\n');
+        }
+    }
+    out
 }
 
-/// Returns true when the factor state directory exists.
-fn is_factor_active_in(ctx: &Ctx<'_>) -> bool {
-    factor_dir_in(ctx).is_ok_and(|dir| ctx.fs.is_dir(&dir))
-}
-
-/// Returns true when either rebase backend directory exists.
-fn is_mid_rebase_in(ctx: &Ctx<'_>) -> bool {
-    git_dir_in(ctx).is_ok_and(|dir| {
-        ctx.fs.is_dir(&dir.join(REBASE_MERGE_DIR)) || ctx.fs.is_dir(&dir.join(REBASE_APPLY_DIR))
-    })
+/// Returns exact stdout/stderr text for a captured command result.
+fn output_text(output: &Output) -> (String, String) {
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    (stdout, stderr)
 }
 
 /// Returns the exact porcelain status output, asserting success and empty stderr.
@@ -486,40 +726,25 @@ fn is_mid_rebase_in(ctx: &Ctx<'_>) -> bool {
     reason = "status normalization is centralized for repo cleanliness checks"
 )]
 fn repo_status_stdout(ctx: &Ctx<'_>) -> Result<String, FactorError> {
-    let output = ctx
-        .runner
-        .output("git", &["status", "--porcelain=v1"], &ctx.cwd)
-        .map_err(|err| {
-            FactorError::GitCommand(non_empty_msg(format!("git status --porcelain=v1: {err}")))
-        })?;
-
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-
-    if !output.status.success() {
-        return Err(FactorError::GitCommand(non_empty_msg(format!(
-            "git status --porcelain=v1 failed (exit {})",
-            output.status.code().unwrap_or(EXIT_SOFTWARE)
-        ))));
+    let output = git_raw_output(ctx, &["status", "--porcelain=v1"])?;
+    let (stdout, stderr) = output_text(&output);
+    if !output.status.success() || !stderr.is_empty() {
+        let mut message = format!(
+            "git status --porcelain=v1 produced unexpected output (exit {})\n",
+            status_code(output.status)
+        );
+        message.push_str(format_captured_output(stdout.as_str(), stderr.as_str()).as_str());
+        return Err(FactorError::GitCommand(non_empty_msg(
+            message.trim_end().to_owned(),
+        )));
     }
-
-    if !stderr.is_empty() {
-        return Err(FactorError::GitCommand(non_empty_msg(format!(
-            "git status --porcelain=v1 produced unexpected stderr: {}",
-            stderr.trim_end()
-        ))));
-    }
-
     Ok(stdout)
 }
 
 /// Returns whether the porcelain output matches the required gate-boundary policy.
-#[cfg_attr(
-    not(test),
-    expect(
-        clippy::single_call_fn,
-        reason = "repo-state policy evaluation is intentionally centralized"
-    )
+#[expect(
+    clippy::single_call_fn,
+    reason = "repo-state policy evaluation is intentionally centralized"
 )]
 fn repo_status_matches_policy(stdout: &str, policy: RepoStatePolicy) -> bool {
     for line in stdout.lines() {
@@ -537,18 +762,10 @@ fn repo_status_matches_policy(stdout: &str, policy: RepoStatePolicy) -> bool {
             return false;
         }
     }
-
     true
 }
 
 /// Enforces the expected repository cleanliness invariant.
-#[cfg_attr(
-    not(test),
-    expect(
-        clippy::single_call_fn,
-        reason = "repo-state checks stay centralized so start and continue use the same contract"
-    )
-)]
 fn ensure_repo_state(
     ctx: &Ctx<'_>,
     policy: RepoStatePolicy,
@@ -558,104 +775,113 @@ fn ensure_repo_state(
     if repo_status_matches_policy(stdout.as_str(), policy) {
         return Ok(());
     }
-
     let trimmed = stdout.trim_end();
     let mut full = message.to_owned();
     if !trimmed.is_empty() {
         full.push_str("\nSTATUS:\n");
         full.push_str(trimmed);
     }
-
     Err(FactorError::GitCommand(non_empty_msg(full)))
 }
 
-/// Runs a git command with optional environment overrides.
-fn run_git_with_env(
-    ctx: &Ctx<'_>,
-    args: &[&str],
-    envs: &[(&str, &str)],
-) -> Result<(), FactorError> {
-    let status = ctx
-        .runner
-        .status("git", args, envs, false, &ctx.cwd)
-        .map_err(|err| {
-            FactorError::GitCommand(non_empty_msg(format!(
-                "git {}: {err}",
-                args.first().copied().unwrap_or_default()
-            )))
-        })?;
-
-    if status.success() {
-        return Ok(());
-    }
-
-    Err(FactorError::GitCommand(non_empty_msg(format!(
-        "git {} failed (exit {})",
-        args.first().copied().unwrap_or_default(),
-        status.code().unwrap_or(EXIT_SOFTWARE)
-    ))))
-}
-
-/// Removes the factor state path whether it is a directory or stray file.
+/// Rewrites the stored commit list entry at `index` with the current `HEAD` SHA.
 #[expect(
     clippy::single_call_fn,
-    reason = "cleanup is centralized to keep abort and finish state removal consistent"
+    reason = "state commit rewriting is intentionally centralized"
 )]
-fn remove_factor_state_path(ctx: &Ctx<'_>, state_path: &Path) -> Result<(), FactorError> {
-    if !ctx.fs.exists(state_path) {
-        return Ok(());
-    }
-
-    if ctx.fs.is_dir(state_path) {
-        ctx.fs
-            .remove_dir_all(state_path)
-            .map_err(FactorError::StateWrite)?;
-    } else {
-        ctx.fs
-            .remove_file(state_path)
-            .map_err(FactorError::StateWrite)?;
-    }
-
-    Ok(())
+fn update_current_commit_in_state(
+    ctx: &Ctx<'_>,
+    state_dir: &StateDir,
+    index: CurrentIndex,
+) -> Result<(), FactorError> {
+    let commits_raw = read_state_key(ctx, state_dir, StateFileKey::Commits)?;
+    let mut commits = commits_raw
+        .as_str()
+        .lines()
+        .map(ToOwned::to_owned)
+        .collect::<Vec<String>>();
+    let Some(entry) = commits.get_mut(index.as_usize()) else {
+        return Err(FactorError::GitCommand(non_empty_msg(format!(
+            "commit index {} out of range (have {} commits)",
+            index.as_usize(),
+            commits.len()
+        ))));
+    };
+    *entry = git_output(ctx, &["rev-parse", "HEAD^{commit}"])?;
+    write_state(
+        ctx,
+        state_dir.as_path(),
+        StateFileKey::Commits.as_str(),
+        commits.join("\n").as_str(),
+    )
 }
 
-/// Aborts the current factor session and restores the repository.
+/// Returns an absolute executable command prefix for hidden rebase helpers.
 #[expect(
     clippy::single_call_fn,
-    reason = "abort workflow stays isolated until later session-control commands land"
+    reason = "current executable quoting is reused only by rebase-exec command building"
+)]
+fn current_exe_command_prefix(ctx: &Ctx<'_>) -> Result<String, FactorError> {
+    let current_exe = ctx.env.current_exe().map_err(|err| {
+        FactorError::GitCommand(non_empty_msg(format!(
+            "cannot resolve current executable: {err}"
+        )))
+    })?;
+    let current_exe_str = current_exe.to_str().ok_or_else(|| {
+        FactorError::GitCommand(non_empty_msg(
+            "current executable path is not valid UTF-8".to_owned(),
+        ))
+    })?;
+    Ok(shell_quote(current_exe_str))
+}
+
+/// Builds a shell-safe hidden helper command for rebase `exec` lines.
+fn rebase_exec_command(
+    ctx: &Ctx<'_>,
+    subcommand: &str,
+    current_index: CurrentIndex,
+) -> Result<String, FactorError> {
+    let prefix = current_exe_command_prefix(ctx)?;
+    let current_index_text = current_index.as_usize().to_string();
+
+    Ok(format!(
+        "{prefix} {} {}",
+        shell_quote(subcommand),
+        shell_quote(current_index_text.as_str())
+    ))
+}
+
+/// Aborts the current factor session.
+#[cfg_attr(
+    not(test),
+    expect(
+        clippy::single_call_fn,
+        reason = "keeps abort workflow isolated for deterministic state cleanup"
+    )
 )]
 fn cmd_abort_in(ctx: &Ctx<'_>) -> Result<i32, FactorError> {
+    trace_note(ctx, "factor_cmd_abort", &[]);
+
     if !is_factor_active_in(ctx) {
         return Err(FactorError::NoActiveSession);
     }
 
     let session = Session::from_active(ctx)?;
-    let requires_rebase = session.requires_rebase()?;
-    let started_rebase = session.started_rebase(requires_rebase)?;
-
-    if started_rebase && is_mid_rebase_in(ctx) {
-        run_git_with_env(
-            ctx,
-            &["rebase", "--abort"],
-            &[("GIT_EDITOR", "false"), ("GIT_SEQUENCE_EDITOR", "false")],
-        )?;
+    let fallback_requires_rebase = session.requires_rebase(StateBool::False)?;
+    let started_rebase = session.started_rebase(fallback_requires_rebase)?;
+    if started_rebase.as_bool() && is_mid_rebase_in(ctx) {
+        run_git_non_interactive(ctx, &["rebase", "--abort"])?;
     }
-
     let reset_target = match session.start_head() {
         Ok(start_head) => start_head.to_string(),
         Err(FactorError::StateRead(err)) if err.kind() == io::ErrorKind::NotFound => {
-            session.current_commit()?
+            session.current_commit()?.to_string()
         }
         Err(err) => return Err(err),
     };
-
-    run_git_with_env(
-        ctx,
-        &["reset", "--hard", "--quiet", reset_target.as_str()],
-        &[],
-    )?;
-    run_git_with_env(ctx, &["clean", "--force", "--quiet", "-d"], &[])?;
-    remove_factor_state_path(ctx, &session.state_dir)?;
+    run_git(ctx, &["reset", "--hard", "--quiet", reset_target.as_str()])?;
+    run_git(ctx, &["clean", "--force", "--quiet", "-d"])?;
+    session_remove_state_dir_warning(ctx, &session.state_dir)?;
 
     ctx.outln("FACTOR: Session aborted for current commit step.")?;
     if is_mid_rebase_in(ctx) {
@@ -666,11 +892,16 @@ fn cmd_abort_in(ctx: &Ctx<'_>) -> Result<i32, FactorError> {
 }
 
 /// Shows status for the current factor session.
-#[expect(
-    clippy::single_call_fn,
-    reason = "status output stays isolated until later workflow commands land"
+#[cfg_attr(
+    not(test),
+    expect(
+        clippy::single_call_fn,
+        reason = "dedicated status formatter keeps command dispatch readable"
+    )
 )]
 fn cmd_status_in(ctx: &Ctx<'_>) -> Result<i32, FactorError> {
+    trace_note(ctx, "factor_cmd_status", &[]);
+
     if !is_factor_active_in(ctx) {
         ctx.outln("FACTOR: No active session.")?;
         return Ok(EXIT_OK);
@@ -680,29 +911,1066 @@ fn cmd_status_in(ctx: &Ctx<'_>) -> Result<i32, FactorError> {
     let current_commit = session.current_commit()?;
     let current_index = session.current_index()?;
     let split_count = session.split_count()?;
-    let phase = session.phase()?;
-    let requires_rebase = session.requires_rebase()?;
-    let is_root = session.is_root()?;
+    let requires_rebase = session.requires_rebase(StateBool::True)?;
+    let is_root = session.is_root(StateBool::False)?;
+    let phase = session.phase(SessionPhase::Splitting)?;
     let rebase_in_progress = is_mid_rebase_in(ctx);
 
     ctx.outln("FACTOR: Active session.")?;
     ctx.outln(&format!("CURRENT_COMMIT: {current_commit}"))?;
-    ctx.outln(&format!("CURRENT_INDEX: {current_index}"))?;
-    ctx.outln(&format!("SPLIT_COUNT: {split_count}"))?;
+    ctx.outln(&format!("CURRENT_INDEX: {}", current_index.as_usize()))?;
+    ctx.outln(&format!("SPLIT_COUNT: {}", split_count.as_u8()))?;
     ctx.outln(&format!("PHASE: {}", phase.as_str()))?;
-    ctx.outln(&format!("REQUIRES_REBASE: {requires_rebase}"))?;
+    ctx.outln(&format!("REQUIRES_REBASE: {}", requires_rebase.as_bool()))?;
     ctx.outln(&format!("REBASE_IN_PROGRESS: {rebase_in_progress}"))?;
-    ctx.outln(&format!("IS_ROOT: {is_root}"))?;
+    ctx.outln(&format!("IS_ROOT: {}", is_root.as_bool()))?;
 
     Ok(EXIT_OK)
 }
 
-/// Runs the `git-factor` CLI entrypoint.
+/// Writes multiple state key/value pairs to the factor state directory.
+fn write_state_pairs(
+    ctx: &Ctx<'_>,
+    state_dir: &StateDir,
+    pairs: &[(StateFileKey, &str)],
+) -> Result<(), FactorError> {
+    for &(key, value) in pairs {
+        write_state(ctx, state_dir.as_path(), key.as_str(), value)?;
+    }
+    Ok(())
+}
+
+/// Removes the factor state path, supporting either a directory or a stray file.
+fn remove_state_path(ctx: &Ctx<'_>, state_dir: &StateDir) -> io::Result<()> {
+    let path = state_dir.as_path();
+    if !ctx.fs.exists(path) {
+        return Ok(());
+    }
+    if ctx.fs.is_dir(path) {
+        return ctx.fs.remove_dir_all(path);
+    }
+    ctx.fs.remove_file(path)
+}
+
+/// Removes a state path and fails if cleanup does not succeed.
+#[expect(
+    clippy::single_call_fn,
+    reason = "strict completion cleanup stays isolated from warning-only cleanup paths"
+)]
+fn remove_state_path_required(ctx: &Ctx<'_>, state_dir: &StateDir) -> Result<(), FactorError> {
+    let path = state_dir.as_path();
+    remove_state_path(ctx, state_dir).map_err(|err| {
+        FactorError::GitCommand(non_empty_msg(format!(
+            "failed to remove factor state path '{}': {err}",
+            path.display()
+        )))
+    })?;
+    if ctx.fs.exists(path) {
+        return Err(FactorError::GitCommand(non_empty_msg(format!(
+            "factor state path '{}' still exists after cleanup",
+            path.display()
+        ))));
+    }
+    Ok(())
+}
+
+/// Removes a state path, warning instead of failing on cleanup problems.
+fn session_remove_state_dir_warning(
+    ctx: &Ctx<'_>,
+    state_dir: &StateDir,
+) -> Result<(), FactorError> {
+    let path = state_dir.as_path();
+    match remove_state_path(ctx, state_dir) {
+        Err(err) => {
+            ctx.errln(&format!(
+                "WARN: failed to remove factor state path '{}': {err}",
+                path.display()
+            ))?;
+        }
+        Ok(()) => {
+            if ctx.fs.exists(path) {
+                ctx.errln(&format!(
+                    "WARN: factor state path '{}' still exists after cleanup",
+                    path.display()
+                ))?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Captures the current `HEAD` tree hash into factor state as `expected_tree`.
+fn capture_expected_tree_in_state(ctx: &Ctx<'_>, state_dir: &StateDir) -> Result<(), FactorError> {
+    let expected_tree = TreeHash::new(&git_output(ctx, &["rev-parse", "HEAD^{tree}"])?)?;
+    write_state(
+        ctx,
+        state_dir.as_path(),
+        StateFileKey::ExpectedTree.as_str(),
+        expected_tree.as_str(),
+    )?;
+    Ok(())
+}
+
+/// Writes the current session phase to factor state.
+fn write_session_phase(
+    ctx: &Ctx<'_>,
+    state_dir: &StateDir,
+    phase: SessionPhase,
+) -> Result<(), FactorError> {
+    write_state(
+        ctx,
+        state_dir.as_path(),
+        StateFileKey::Phase.as_str(),
+        phase.as_str(),
+    )
+}
+
+/// Opens a pending-start baseline into an active split session.
+fn enter_pending_split_session(
+    ctx: &Ctx<'_>,
+    session: &Session<'_>,
+) -> Result<(String, String), FactorError> {
+    let phase = session.phase(SessionPhase::Splitting)?;
+    if phase != SessionPhase::PendingStart {
+        return Err(FactorError::GitCommand(non_empty_msg(
+            "factor session is not waiting to begin splitting".to_owned(),
+        )));
+    }
+
+    ensure_repo_state(
+        ctx,
+        RepoStatePolicy::FullyClean,
+        "baseline commit must be fully clean before opening the split session",
+    )?;
+    let reset_target = if session.current_target_is_root()? {
+        git_output(
+            ctx,
+            &[
+                "commit-tree",
+                "4b825dc642cb6eb9a060e54bf8d69288fbee4904",
+                "-m",
+                "empty",
+            ],
+        )?
+    } else {
+        "HEAD~1".to_owned()
+    };
+    run_git(ctx, &["reset", "--quiet", reset_target.as_str()])?;
+    write_session_phase(ctx, &session.state_dir, SessionPhase::Splitting)?;
+
+    let current_commit = session.current_commit()?;
+    let message = commit_message(ctx, &current_commit)?;
+    let short_sha = git_output(ctx, &["rev-parse", "--short", current_commit.as_str()])?;
+
+    Ok((short_sha, message))
+}
+
+/// Runs the start gate against the current baseline commit.
+#[expect(
+    clippy::single_call_fn,
+    reason = "hidden rebase exec preflight stays isolated from CLI dispatch"
+)]
+fn cmd_rebase_exec_preflight_in(
+    ctx: &Ctx<'_>,
+    current_index: CurrentIndex,
+) -> Result<i32, FactorError> {
+    let current_index_text = current_index.as_usize().to_string();
+    trace_note(
+        ctx,
+        "factor_rebase_exec_preflight",
+        &[("current_index", current_index_text.as_str())],
+    );
+    let session = Session::from_active(ctx)?;
+    let expected_index = session.current_index()?;
+    if expected_index != current_index {
+        return Err(FactorError::GitCommand(non_empty_msg(format!(
+            "unexpected current_index: expected {}, got {}",
+            expected_index.as_usize(),
+            current_index.as_usize()
+        ))));
+    }
+    ensure_repo_state(
+        ctx,
+        RepoStatePolicy::FullyClean,
+        "cannot run the start gate because the repository is not clean",
+    )?;
+
+    let exec_command = session.exec()?;
+    let output = command_output_with(ctx, "bash", &["-c", exec_command.as_str()])?;
+    let (stdout, stderr) = output_text(&output);
+    if !stdout.is_empty() {
+        ctx.out(stdout.as_str())?;
+    }
+    if !stderr.is_empty() {
+        ctx.err(stderr.as_str())?;
+    }
+    if !output.status.success() {
+        let code = status_code(output.status);
+        ctx.outln("FACTOR: Start gate failed.")?;
+        ctx.outln(&format!("EXEC: {exec_command}"))?;
+        ctx.outln(&format!("CODE: {code}"))?;
+        ctx.outln("")?;
+        ctx.outln("NEXT: Fix the problems in the current commit, then run:")?;
+        ctx.outln("  git add <paths>")?;
+        ctx.outln("  git commit --amend --no-edit")?;
+        ctx.outln("  git rebase --continue")?;
+        ctx.outln("")?;
+        ctx.outln("When rebase pauses again, run:")?;
+        ctx.outln("  git factor --continue")?;
+        return Err(FactorError::ExecFailed {
+            code,
+            command: exec_command,
+        });
+    }
+
+    ensure_repo_state(
+        ctx,
+        RepoStatePolicy::FullyClean,
+        "start gate must not leave tracked, unstaged, or untracked changes behind",
+    )?;
+    Ok(EXIT_OK)
+}
+
+/// Captures the green baseline for the active target and marks the session pending.
+#[expect(
+    clippy::single_call_fn,
+    reason = "hidden rebase exec begin stays isolated from CLI dispatch"
+)]
+fn cmd_rebase_exec_begin_in(
+    ctx: &Ctx<'_>,
+    current_index: CurrentIndex,
+) -> Result<i32, FactorError> {
+    let current_index_text = current_index.as_usize().to_string();
+    trace_note(
+        ctx,
+        "factor_rebase_exec_begin",
+        &[("current_index", current_index_text.as_str())],
+    );
+    let session = Session::from_active(ctx)?;
+    let expected_index = session.current_index()?;
+    if expected_index != current_index {
+        return Err(FactorError::GitCommand(non_empty_msg(format!(
+            "unexpected current_index: expected {}, got {}",
+            expected_index.as_usize(),
+            current_index.as_usize()
+        ))));
+    }
+    ensure_repo_state(
+        ctx,
+        RepoStatePolicy::FullyClean,
+        "cannot begin the factor session because the repository is not clean",
+    )?;
+    let split_count_text = SplitCount::zero().as_u8().to_string();
+    write_state_pairs(
+        ctx,
+        &session.state_dir,
+        &[
+            (StateFileKey::CurrentIndex, current_index_text.as_str()),
+            (StateFileKey::SplitCount, split_count_text.as_str()),
+        ],
+    )?;
+    update_current_commit_in_state(ctx, &session.state_dir, current_index)?;
+    capture_expected_tree_in_state(ctx, &session.state_dir)?;
+    write_session_phase(ctx, &session.state_dir, SessionPhase::PendingStart)?;
+    Ok(EXIT_OK)
+}
+
+/// Restores index and worktree from the provided commit.
+fn restore_staged_and_worktree_from_commit(
+    ctx: &Ctx<'_>,
+    original_commit: &CommitSha,
+) -> Result<(), FactorError> {
+    run_git(
+        ctx,
+        &[
+            "restore",
+            "--source",
+            original_commit.as_str(),
+            "--staged",
+            "--worktree",
+            "--",
+            ".",
+        ],
+    )
+}
+
+/// Continues an in-progress factor session.
+#[cfg_attr(
+    not(test),
+    expect(
+        clippy::single_call_fn,
+        reason = "continue path is intentionally extracted from CLI dispatch"
+    )
+)]
+#[expect(clippy::too_many_lines, reason = "non_empty_msg wrapping added lines")]
+fn cmd_continue_in(ctx: &Ctx<'_>, messages: &NonEmpty<NonEmptyString>) -> Result<i32, FactorError> {
+    trace_note(ctx, "factor_cmd_continue", &[]);
+    if !is_factor_active_in(ctx) {
+        return Err(FactorError::NoActiveSession);
+    }
+    let session = Session::from_active(ctx)?;
+    if session.phase(SessionPhase::Splitting)? != SessionPhase::Splitting {
+        return Err(FactorError::Usage(non_empty_msg(
+            "run 'git factor --continue' with no --message to begin splitting this commit"
+                .to_owned(),
+        )));
+    }
+    let requires_rebase = session.requires_rebase(StateBool::True)?;
+    if requires_rebase.as_bool() && !is_mid_rebase_in(ctx) {
+        return Err(FactorError::GitCommand(non_empty_msg(
+            "no rebase in progress".to_owned(),
+        )));
+    }
+    let original_commit = session.current_commit()?;
+    let exec_command = session.exec()?;
+    if git_status(ctx, &["diff", "--quiet", "--staged"])?.success() {
+        return Err(FactorError::NoStagedChanges);
+    }
+    run_git(ctx, &["checkout", "--quiet", "--", "."])?;
+    run_git(ctx, &["clean", "--force", "--quiet", "-d"])?;
+    run_git(ctx, &["checkout-index", "--all", "--force", "--quiet"])?;
+    let deleted = git_output(ctx, &["diff", "--diff-filter=D", "--name-only", "--staged"])?;
+    for raw_path in deleted.lines() {
+        let path = raw_path.trim();
+        drop(ctx.fs.remove_file(Path::new(path)));
+    }
+    ensure_repo_state(
+        ctx,
+        RepoStatePolicy::StagedOnly,
+        "continue gate requires staged changes only; remove unstaged or untracked changes first",
+    )?;
+    let exec_status =
+        match command_status_with(ctx, "bash", &["-c", exec_command.as_str()], &[], false) {
+            Ok(exec_status) => exec_status,
+            Err(err) => {
+                rehydrate_pool_preserving_index(ctx, &original_commit)?;
+                return Err(err);
+            }
+        };
+    if let Err(err) = ensure_repo_state(
+        ctx,
+        RepoStatePolicy::StagedOnly,
+        "exec gate must not leave unstaged or untracked changes behind",
+    ) {
+        rehydrate_pool_preserving_index(ctx, &original_commit)?;
+        return Err(err);
+    }
+    if !exec_status.success() {
+        rehydrate_pool_preserving_index(ctx, &original_commit)?;
+        let code = status_code(exec_status);
+        ctx.outln("FACTOR: Exec gate failed. No commit created.")?;
+        ctx.outln(&format!("EXEC: {exec_command}"))?;
+        ctx.outln(&format!("CODE: {code}"))?;
+        ctx.out("\n")?;
+        print_continue_command(
+            ctx,
+            "NEXT: Adjust staged changes so the exec gate passes, then retry:",
+        )?;
+        return Err(FactorError::ExecFailed {
+            code,
+            command: exec_command,
+        });
+    }
+    git_commit_preserving_metadata(ctx, &original_commit, messages, false)?;
+    let split_count = session.increment_split_count()?;
+    let head_tree = TreeHash::new(&git_output(ctx, &["rev-parse", "HEAD^{tree}"])?)?;
+    let expected_tree = session.expected_tree()?;
+    if trace_tree_convergence(ctx, "tree_compare_continue", &head_tree, &expected_tree) {
+        return match session.advance_to_next_commit()? {
+            AdvanceOutcome::Advanced {
+                next_message,
+                next_short_sha,
+                previous_split_count,
+            } => {
+                ctx.outln(&format!(
+                    "FACTOR: Previous commit split into {} commits.",
+                    previous_split_count.get()
+                ))?;
+                let started = split_started_line(next_short_sha.as_str(), None);
+                print_session_started(ctx, &started, next_message.as_str()).map(|()| EXIT_OK)
+            }
+            AdvanceOutcome::Completed {
+                final_split_count, ..
+            } => ctx
+                .outln(&format!(
+                    "FACTOR: Complete. Final commit split into {} commits.",
+                    final_split_count.get()
+                ))
+                .map(|()| EXIT_OK),
+        };
+    }
+
+    restore_staged_and_worktree_from_commit(ctx, &original_commit)?;
+    let restored_tree = TreeHash::new(&git_output(ctx, &["write-tree"])?)?;
+    if restored_tree != expected_tree {
+        return Err(FactorError::TreeHashMismatch {
+            actual: restored_tree,
+            expected: expected_tree,
+        });
+    }
+    run_git(ctx, &["reset", "--quiet"])?;
+    let stat_output = git_output(ctx, &["diff", "--stat"])?;
+    let untracked_output = git_output(ctx, &["ls-files", "--others", "--exclude-standard"])?;
+    let remaining = stat_output.lines().last().unwrap_or_default().to_owned();
+    ctx.outln(&format!("FACTOR: Split {split_count} committed."))?;
+    ctx.outln("STATE: Remaining changes are unstaged.")?;
+    ctx.outln("UNSTAGED:")?;
+    for line in stat_output.lines() {
+        ctx.outln(&format!("  {line}"))?;
+    }
+    if !untracked_output.is_empty() {
+        ctx.outln("UNTRACKED:")?;
+        for line in untracked_output.lines() {
+            ctx.outln(&format!("  {line}"))?;
+        }
+    }
+    ctx.out("\n")?;
+    print_continue_command(ctx, "NEXT: Stage changes for the next commit, then run:")?;
+    ctx.out("\n")?;
+    print_hints_with_remaining_in(ctx, remaining.as_str())?;
+    Ok(EXIT_OK)
+}
+
+/// Prints the standard `git factor --continue` command banner.
+fn print_continue_command(ctx: &Ctx<'_>, heading: &str) -> Result<(), FactorError> {
+    ctx.outln(heading)?;
+    ctx.outln("  git factor --continue --message \"type: description\"")
+}
+
+/// Opens a pending-start factor session after rebase preflight/begin succeeded.
+#[expect(
+    clippy::single_call_fn,
+    reason = "pending-start transition stays isolated from normal continue flow"
+)]
+fn cmd_continue_pending_start_in(ctx: &Ctx<'_>) -> Result<i32, FactorError> {
+    if !is_factor_active_in(ctx) {
+        return Err(FactorError::NoActiveSession);
+    }
+    let session = Session::from_active(ctx)?;
+    let (short_sha, message) = enter_pending_split_session(ctx, &session)?;
+    let started = split_started_line(short_sha.as_str(), None);
+    print_session_started(ctx, started.as_str(), message.as_str())?;
+    Ok(EXIT_OK)
+}
+
+/// Traces tree hash comparison and returns whether the trees converged.
+fn trace_tree_convergence(
+    ctx: &Ctx<'_>,
+    trace_event: &str,
+    actual_tree: &TreeHash,
+    expected_tree: &TreeHash,
+) -> bool {
+    let converged = actual_tree == expected_tree;
+    let converged_flag = if converged { "true" } else { "false" };
+    trace_note(
+        ctx,
+        trace_event,
+        &[
+            ("expected_tree", expected_tree.as_str()),
+            ("actual_tree", actual_tree.as_str()),
+            ("converged", converged_flag),
+        ],
+    );
+    converged
+}
+
+/// Rehydrates the full original commit into the working tree while restoring
+/// the index back to its prior state. This is used on exec-gate failure so the
+/// user can adjust the staged slice without losing the remaining pool.
+fn rehydrate_pool_preserving_index(
+    ctx: &Ctx<'_>,
+    original_commit: &CommitSha,
+) -> Result<(), FactorError> {
+    let idx_tree = TreeHash::new(&git_output(ctx, &["write-tree"])?)?;
+
+    let status = git_status(
+        ctx,
+        &[
+            "cherry-pick",
+            "--no-commit",
+            "--strategy-option",
+            "theirs",
+            original_commit.as_str(),
+        ],
+    )?;
+
+    if !status.success() {
+        let unmerged = git_output(ctx, &["diff", "--name-only", "--diff-filter=U"])?;
+        drop(git_status(ctx, &["cherry-pick", "--abort"]));
+        if unmerged.is_empty() {
+            drop(git_status(ctx, &["cherry-pick", "--quit"]));
+            return Err(FactorError::GitCommand(non_empty_msg(format!(
+                "cherry-pick failed (exit {}) with no merge conflicts for {original_commit}",
+                status_code(status)
+            ))));
+        }
+        drop(git_status(ctx, &["cherry-pick", "--quit"]));
+        return Err(FactorError::GitCommand(non_empty_msg(format!(
+            "rehydrate cherry-pick left conflicts:\n{unmerged}"
+        ))));
+    }
+
+    let quit_status = git_status(ctx, &["cherry-pick", "--quit"])?;
+    if !quit_status.success() {
+        drop(git_status(ctx, &["cherry-pick", "--abort"]));
+        return Err(FactorError::GitCommand(non_empty_msg(format!(
+            "git cherry-pick --quit failed (exit {})",
+            status_code(quit_status)
+        ))));
+    }
+
+    let read_tree_status = git_status(ctx, &["read-tree", idx_tree.as_str()])?;
+    if !read_tree_status.success() {
+        return Err(FactorError::GitCommand(non_empty_msg(format!(
+            "git read-tree failed (exit {})",
+            status_code(read_tree_status)
+        ))));
+    }
+
+    Ok(())
+}
+
+/// Finishes the factor session by committing all remaining staged changes.
+#[cfg_attr(
+    not(test),
+    expect(
+        clippy::single_call_fn,
+        reason = "finish path remains a dedicated command implementation"
+    )
+)]
+fn cmd_finish_in(ctx: &Ctx<'_>, messages: &[NonEmptyString]) -> Result<i32, FactorError> {
+    trace_note(ctx, "factor_cmd_finish", &[]);
+
+    if !is_factor_active_in(ctx) {
+        return Err(FactorError::NoActiveSession);
+    }
+    let session = Session::from_active(ctx)?;
+    if session.phase(SessionPhase::Splitting)? != SessionPhase::Splitting {
+        return Err(FactorError::Usage(non_empty_msg(
+            "run 'git factor --continue' with no --message to begin splitting this commit"
+                .to_owned(),
+        )));
+    }
+    let requires_rebase = session.requires_rebase(StateBool::True)?;
+    if requires_rebase.as_bool() && !is_mid_rebase_in(ctx) {
+        return Err(FactorError::GitCommand(non_empty_msg(
+            "no rebase in progress".to_owned(),
+        )));
+    }
+    let original_commit = session.current_commit()?;
+    let expected_tree = session.expected_tree()?;
+
+    // Clean unstaged/untracked changes.
+    run_git(ctx, &["checkout", "--quiet", "--", "."])?;
+    run_git(ctx, &["clean", "--force", "--quiet", "-d"])?;
+
+    // Restore the original commit tree directly into index/worktree.
+    // This avoids merge/cherry-pick conflict mechanics during finish.
+    restore_staged_and_worktree_from_commit(ctx, &original_commit)?;
+
+    // Resolve effective messages: use original commit message when none provided.
+    let effective_messages: NonEmpty<NonEmptyString> =
+        if let Some((first, rest)) = messages.split_first() {
+            let mut out = NonEmpty::new(first.clone());
+            for msg in rest {
+                out.push(msg.clone());
+            }
+            out
+        } else {
+            let original_msg = commit_message(ctx, &original_commit)?;
+            NonEmpty::new(
+                NonEmptyString::try_from(original_msg.trim_end().to_owned()).map_err(|_err| {
+                    FactorError::GitCommand(non_empty_msg(
+                        "original commit has empty message".to_owned(),
+                    ))
+                })?,
+            )
+        };
+    // Verify tree hash matches the original commit before committing.
+    let actual_tree = TreeHash::new(&git_output(ctx, &["write-tree"])?)?;
+    if !trace_tree_convergence(ctx, "tree_compare_finish", &actual_tree, &expected_tree) {
+        return Err(FactorError::TreeHashMismatch {
+            actual: actual_tree,
+            expected: expected_tree,
+        });
+    }
+
+    // Handle the empty-commit case (or "finish called when nothing remains"):
+    // if there are no staged changes, create an empty commit so the rebase edit
+    // stop can be satisfied without silently dropping the original commit.
+    let has_staged = git_status(ctx, &["diff", "--quiet", "--staged"])?;
+
+    // Create the commit after proving the reconstructed tree matches baseline.
+    git_commit_preserving_metadata(
+        ctx,
+        &original_commit,
+        &effective_messages,
+        has_staged.success(),
+    )?;
+
+    // Update split count and advance to next commit or finish.
+    session.increment_split_count()?;
+    match session.advance_to_next_commit()? {
+        AdvanceOutcome::Advanced {
+            next_message,
+            next_short_sha,
+            previous_split_count,
+        } => {
+            ctx.outln(&format!(
+                "FACTOR: Previous commit split into {} commits.",
+                previous_split_count.get()
+            ))?;
+            let started = split_started_line(next_short_sha.as_str(), None);
+            print_session_started(ctx, &started, next_message.as_str())?;
+        }
+        AdvanceOutcome::Completed {
+            final_split_count, ..
+        } => {
+            ctx.outln(&format!(
+                "FACTOR: Complete. Final commit split into {} commits.",
+                final_split_count.get()
+            ))?;
+        }
+    }
+
+    Ok(EXIT_OK)
+}
+
+/// Formats the banner shown when a split session starts or advances.
+fn split_started_line(short_sha: &str, total_commits: Option<usize>) -> String {
+    match total_commits {
+        Some(total) if total > 1 => {
+            format!("FACTOR: Split session started for {total} commits (first: {short_sha}).")
+        }
+        Some(_) => format!("FACTOR: Split session started for {short_sha}."),
+        None => format!("FACTOR: Now splitting {short_sha}."),
+    }
+}
+
+/// Starts a new factor session.
+fn cmd_start_prep_in(ctx: &Ctx<'_>) -> Result<StateDir, FactorError> {
+    let state_dir = factor_dir_in(ctx)?;
+    if ctx.fs.is_dir(state_dir.as_path()) {
+        return Err(FactorError::ActiveSession);
+    }
+    if is_mid_rebase_in(ctx) {
+        return Err(FactorError::ActiveRebase);
+    }
+    ensure_repo_state(
+        ctx,
+        RepoStatePolicy::FullyClean,
+        "working tree must be clean before starting; stash, commit, or remove local changes",
+    )?;
+    Ok(state_dir)
+}
+
+/// Starts a new factor session from resolved commit SHAs.
+#[expect(
+    clippy::too_many_lines,
+    reason = "start orchestration keeps single-head and rebase-backed setup in one place"
+)]
+fn cmd_start_with_resolved_in(
+    ctx: &Ctx<'_>,
+    exec: &NonEmpty<NonEmptyString>,
+    state_dir: &StateDir,
+    resolved_commits: &NonEmpty<CommitSha>,
+) -> Result<i32, FactorError> {
+    let head_commit = resolve_commit(ctx, "HEAD")?;
+    let single_head_session = match resolved_commits.len() {
+        1 => resolved_commits.first() == &head_commit,
+        _ => false,
+    };
+    for sha in resolved_commits {
+        validate_split_target_in(ctx, sha)?;
+    }
+    let base_sha = resolved_commits.first();
+    let short_sha = NonEmptyString::try_from(git_output(
+        ctx,
+        &["rev-parse", "--short", base_sha.as_str()],
+    )?)
+    .map_err(|_err| FactorError::GitCommand(non_empty_msg("empty short SHA".to_owned())))?;
+    let message = commit_message(ctx, base_sha)?;
+    let exec_command = joined_exec_command(exec);
+    validate_exec_syntax(ctx, exec_command.as_str())?;
+    ctx.fs
+        .create_dir_all(state_dir.as_path())
+        .map_err(FactorError::StateWrite)?;
+    let parent_status = command_status_with(
+        ctx,
+        "git",
+        &["rev-parse", "--quiet", "--verify", &format!("{base_sha}^")],
+        &[],
+        true,
+    )?;
+    let is_root = !parent_status.success();
+    let requires_rebase = StateBool::from_bool(!single_head_session);
+    let is_root_state = StateBool::from_bool(is_root);
+    let phase = if single_head_session {
+        SessionPhase::Splitting
+    } else {
+        SessionPhase::PendingStart
+    };
+    let current_index = CurrentIndex(0);
+    let current_index_text = current_index.as_usize().to_string();
+    let split_count = SplitCount::zero();
+    let split_count_text = split_count.as_u8().to_string();
+    let session_state_pairs = [
+        (StateFileKey::CurrentIndex, current_index_text.as_str()),
+        (StateFileKey::Exec, exec_command.as_str()),
+        (StateFileKey::Phase, phase.as_str()),
+        (StateFileKey::SplitCount, split_count_text.as_str()),
+        (StateFileKey::RequiresRebase, requires_rebase.as_str()),
+        (StateFileKey::StartedRebase, requires_rebase.as_str()),
+        (StateFileKey::StartHead, head_commit.as_str()),
+        (StateFileKey::IsRoot, is_root_state.as_str()),
+    ];
+    let commits_content: Vec<&str> = resolved_commits.iter().map(CommitSha::as_str).collect();
+    write_state(
+        ctx,
+        state_dir.as_path(),
+        StateFileKey::Commits.as_str(),
+        &commits_content.join("\n"),
+    )?;
+    write_state_pairs(ctx, state_dir, &session_state_pairs)?;
+    if single_head_session {
+        let output = command_output_with(ctx, "bash", &["-c", exec_command.as_str()])?;
+        let (stdout, stderr) = output_text(&output);
+        if !stdout.is_empty() {
+            ctx.out(stdout.as_str())?;
+        }
+        if !stderr.is_empty() {
+            ctx.err(stderr.as_str())?;
+        }
+        if !output.status.success() {
+            ctx.outln("FACTOR: Start gate failed.")?;
+            ctx.outln(&format!("EXEC: {exec_command}"))?;
+            ctx.outln(&format!("CODE: {}", status_code(output.status)))?;
+            ctx.outln("")?;
+            ctx.outln("NEXT: Fix the current commit, amend it, then rerun git factor.")?;
+            session_remove_state_dir_warning(ctx, state_dir)?;
+            return Err(FactorError::ExecFailed {
+                code: status_code(output.status),
+                command: exec_command,
+            });
+        }
+        ensure_repo_state(
+            ctx,
+            RepoStatePolicy::FullyClean,
+            "start gate must not leave tracked, unstaged, or untracked changes behind",
+        )?;
+        capture_expected_tree_in_state(ctx, state_dir)?;
+        let reset_target = if is_root {
+            git_output(
+                ctx,
+                &[
+                    "commit-tree",
+                    "4b825dc642cb6eb9a060e54bf8d69288fbee4904",
+                    "-m",
+                    "empty",
+                ],
+            )?
+        } else {
+            "HEAD~1".to_owned()
+        };
+        run_git(ctx, &["reset", "--quiet", reset_target.as_str()])?;
+
+        let started = split_started_line(short_sha.as_str(), Some(resolved_commits.len()));
+        print_session_started(ctx, started.as_str(), &message)?;
+        return Ok(EXIT_OK);
+    }
+
+    match run_start_rebase_in(ctx, resolved_commits, base_sha, is_root, state_dir)? {
+        StartRebaseOutcome::PausedAtBreak => {
+            let session = Session::from_active(ctx)?;
+            let (next_short_sha, next_message) = enter_pending_split_session(ctx, &session)?;
+            let started = split_started_line(next_short_sha.as_str(), Some(resolved_commits.len()));
+            print_session_started(ctx, started.as_str(), next_message.as_str())?;
+            Ok(EXIT_OK)
+        }
+        StartRebaseOutcome::WaitingForRecovery => Ok(EXIT_TEMPFAIL),
+    }
+}
+
+#[cfg(test)]
+fn cmd_start_in(
+    ctx: &Ctx<'_>,
+    exec: &NonEmpty<NonEmptyString>,
+    commit_refs: &NonEmpty<NonEmptyString>,
+) -> Result<i32, FactorError> {
+    trace_note(ctx, "factor_cmd_start", &[]);
+    let state_dir = cmd_start_prep_in(ctx)?;
+    let commits = resolve_commit_refs(ctx, commit_refs)?;
+    let resolved_commits = sort_topologically(ctx, &commits)?;
+    cmd_start_with_resolved_in(ctx, exec, &state_dir, &resolved_commits)
+}
+
+/// Validates that a split target commit is reachable from `HEAD` and non-merge.
+#[cfg_attr(
+    not(test),
+    expect(
+        clippy::single_call_fn,
+        reason = "validation remains extracted for readability and targeted tests"
+    )
+)]
+fn validate_split_target_in(ctx: &Ctx<'_>, sha: &CommitSha) -> Result<(), FactorError> {
+    let ancestor_status = match command_status_with(
+        ctx,
+        "git",
+        &["merge-base", "--is-ancestor", sha.as_str(), "HEAD"],
+        &[],
+        true,
+    ) {
+        Ok(status) => status,
+        Err(err) => return Err(FactorError::GitCommand(non_empty_msg(err.to_string()))),
+    };
+    if !ancestor_status.success() {
+        return Err(FactorError::NotAncestor(sha.clone()));
+    }
+
+    let has_second_parent = command_status_with(
+        ctx,
+        "git",
+        &["rev-parse", "--quiet", "--verify", &format!("{sha}^2")],
+        &[],
+        true,
+    )
+    .is_ok_and(|status| status.success());
+
+    if has_second_parent {
+        Err(FactorError::MergeCommit(sha.clone()))
+    } else {
+        Ok(())
+    }
+}
+
+/// Starts interactive rebase and stops at each selected commit for splitting.
+#[cfg_attr(
+    not(test),
+    expect(
+        clippy::single_call_fn,
+        reason = "rebase execution extracted to keep start orchestration focused"
+    )
+)]
+fn run_start_rebase_in(
+    ctx: &Ctx<'_>,
+    resolved_commits: &NonEmpty<CommitSha>,
+    base_sha: &CommitSha,
+    is_root: bool,
+    state_dir: &StateDir,
+) -> Result<StartRebaseOutcome, FactorError> {
+    let editor = editor_path(ctx)?;
+    let editor_str = match editor.to_str() {
+        Some(editor_str) => editor_str,
+        None => {
+            return Err(FactorError::GitCommand(non_empty_msg(
+                "editor path is not valid UTF-8".to_owned(),
+            )));
+        }
+    };
+    let mut seq_parts: Vec<String> = vec![editor_str.to_owned()];
+    for (index, sha) in resolved_commits.iter().enumerate() {
+        let short = git_output(ctx, &["rev-parse", "--short", sha.as_str()])?;
+        let current_index = CurrentIndex(index);
+        let preflight = rebase_exec_command(ctx, "rebase-exec-preflight", current_index)?;
+        let begin = rebase_exec_command(ctx, "rebase-exec-begin", current_index)?;
+        seq_parts.push("--factor-target".to_owned());
+        seq_parts.push(short);
+        seq_parts.push("--factor-preflight".to_owned());
+        seq_parts.push(preflight);
+        seq_parts.push("--factor-begin".to_owned());
+        seq_parts.push(begin);
+    }
+    let seq_editor = seq_parts
+        .iter()
+        .map(String::as_str)
+        .map(shell_quote)
+        .collect::<Vec<String>>()
+        .join(" ");
+
+    let parent = format!("{base_sha}^");
+    let mut rebase_args = vec![
+        "rebase",
+        "--empty",
+        "drop",
+        "--interactive",
+        "--no-autosquash",
+        "--no-autostash",
+        "--no-rebase-merges",
+        "--no-stat",
+        "--quiet",
+        "--reschedule-failed-exec",
+    ];
+    if is_root {
+        rebase_args.push("--root");
+    } else {
+        rebase_args.push(parent.as_str());
+    }
+    let status = command_status_with(
+        ctx,
+        "git",
+        &rebase_args,
+        &[
+            ("GIT_EDITOR", "false"),
+            ("GIT_SEQUENCE_EDITOR", &seq_editor),
+        ],
+        false,
+    )?;
+
+    if status.success() {
+        if is_mid_rebase_in(ctx) {
+            return Ok(StartRebaseOutcome::PausedAtBreak);
+        }
+        session_remove_state_dir_warning(ctx, state_dir)?;
+        return Err(FactorError::GitCommand(non_empty_msg(
+            "git rebase finished without pausing at the factor session break".to_owned(),
+        )));
+    }
+    if is_mid_rebase_in(ctx) {
+        return Ok(StartRebaseOutcome::WaitingForRecovery);
+    }
+    session_remove_state_dir_warning(ctx, state_dir)?;
+    Err(FactorError::GitCommand(non_empty_msg(format!(
+        "git rebase failed (exit {})",
+        status_code(status)
+    ))))
+}
+
+#[cfg(test)]
+fn build_rebase_args(parent: &str, is_root: bool) -> Vec<&str> {
+    let mut rebase_args = vec![
+        "rebase",
+        "--empty",
+        "drop",
+        "--interactive",
+        "--no-autosquash",
+        "--no-autostash",
+        "--no-rebase-merges",
+        "--no-stat",
+        "--quiet",
+        "--reschedule-failed-exec",
+    ];
+    if is_root {
+        rebase_args.push("--root");
+    } else {
+        rebase_args.push(parent);
+    }
+    rebase_args
+}
+
+/// Returns the full commit message for a given commit SHA.
+fn commit_message(ctx: &Ctx<'_>, sha: &CommitSha) -> Result<String, FactorError> {
+    git_output(ctx, &["show", "--format=%B", "--no-patch", sha.as_str()])
+}
+
+/// Returns the expected converged tree for the current split step.
+///
+/// New sessions persist this as `expected_tree`, derived from the live edit-stop
+/// commit (`HEAD^{tree}`), which stays correct after rebase rewrites. For older
+/// sessions created before this state key existed, fall back to deriving the
+/// tree from the original commit SHA recorded in `commits`.
+#[cfg_attr(
+    not(test),
+    expect(
+        clippy::single_call_fn,
+        reason = "keeps legacy expected-tree fallback isolated from session reads"
+    )
+)]
+fn expected_tree_for_current_step(
+    ctx: &Ctx<'_>,
+    state_dir: &StateDir,
+    original_commit: &CommitSha,
+) -> Result<TreeHash, FactorError> {
+    if let Ok(tree_str) = read_state_key(ctx, state_dir, StateFileKey::ExpectedTree) {
+        trace_note(
+            ctx,
+            "expected_tree_source",
+            &[("source", "state"), ("expected_tree", tree_str.as_str())],
+        );
+        return TreeHash::new(&tree_str);
+    }
+
+    let raw = git_output(ctx, &["rev-parse", &format!("{original_commit}^{{tree}}")])?;
+    trace_note(
+        ctx,
+        "expected_tree_source",
+        &[
+            ("source", "original_commit"),
+            ("original_commit", original_commit.as_str()),
+            ("expected_tree", raw.as_str()),
+        ],
+    );
+    TreeHash::new(&raw)
+}
+
+/// Creates a git commit preserving the original author and committer metadata.
+fn git_commit_preserving_metadata(
+    ctx: &Ctx<'_>,
+    original_commit: &CommitSha,
+    messages: &NonEmpty<NonEmptyString>,
+    allow_empty: bool,
+) -> Result<(), FactorError> {
+    // Derive author/committer metadata from the original commit.
+    let raw = git_output(
+        ctx,
+        &[
+            "show",
+            "--format=%an%x00%ae%x00%aI%x00%cn%x00%ce%x00%cI",
+            "--no-patch",
+            original_commit.as_str(),
+        ],
+    )?;
+    let parts: Vec<&str> = raw.splitn(6, '\0').collect();
+    let &[
+        author_name,
+        author_email,
+        author_date,
+        committer_name,
+        committer_email,
+        committer_date,
+    ] = parts.as_slice()
+    else {
+        return Err(FactorError::GitCommand(non_empty_msg(format!(
+            "truncated commit metadata: expected 6 fields, got {} for {original_commit}",
+            parts.len()
+        ))));
+    };
+
+    let mut commit_args: Vec<&str> = vec!["commit", "--quiet"];
+    if allow_empty {
+        commit_args.push("--allow-empty");
+    }
+    for msg in messages {
+        commit_args.push("--message");
+        commit_args.push(msg.as_str());
+    }
+
+    let envs = [
+        ("GIT_AUTHOR_NAME", author_name),
+        ("GIT_AUTHOR_EMAIL", author_email),
+        ("GIT_AUTHOR_DATE", author_date),
+        ("GIT_COMMITTER_NAME", committer_name),
+        ("GIT_COMMITTER_EMAIL", committer_email),
+        ("GIT_COMMITTER_DATE", committer_date),
+    ];
+    let status = command_status_with(ctx, "git", &commit_args, &envs, false)?;
+
+    if status.success() {
+        Ok(())
+    } else {
+        Err(FactorError::GitCommand(non_empty_msg(format!(
+            "git commit failed (exit {})",
+            status_code(status)
+        ))))
+    }
+}
+
+/// Entrypoint for the `git-factor` binary.
+///
+/// Returns an exit code suitable for `std::process::exit`.
 #[inline]
 #[must_use]
 pub fn main_entry() -> i32 {
     use std::env;
-
     let args = env::args_os().collect::<Vec<OsString>>();
     main_entry_with_vec(&REAL_IO, build_ctx_from_cwd(REAL_ENV.current_dir()), args)
 }
@@ -754,6 +2022,9 @@ fn main_entry_with_vec(
 }
 
 /// Runs `git-factor` with the given arguments and prints any errors to stderr.
+///
+/// This is the shared implementation for both the real CLI entrypoint and
+/// unit tests that assert on exact output.
 #[cfg_attr(
     not(test),
     expect(
@@ -772,7 +2043,30 @@ fn run_and_report_with_args_vec(ctx: &Ctx<'_>, args: Vec<OsString>) -> i32 {
     }
 }
 
-/// Parses CLI args and handles the initial help and validation paths.
+/// Parses the hidden internal current-index argument from CLI argv.
+fn parse_internal_current_index_arg(
+    args: &[OsString],
+    subcommand: &str,
+) -> Result<CurrentIndex, FactorError> {
+    if args.len() != 3 {
+        return Err(FactorError::Usage(non_empty_msg(format!(
+            "{subcommand} requires exactly one current-index argument"
+        ))));
+    }
+    let raw = args.get(2).and_then(|arg| arg.to_str()).ok_or_else(|| {
+        FactorError::Usage(non_empty_msg(format!(
+            "{subcommand} current-index argument must be valid UTF-8"
+        )))
+    })?;
+    let parsed = raw.parse::<usize>().map_err(|_err| {
+        FactorError::Usage(non_empty_msg(format!(
+            "{subcommand} current-index argument must be a non-negative integer"
+        )))
+    })?;
+    Ok(CurrentIndex(parsed))
+}
+
+/// Like [`run_and_report_with_args_vec`], but returns structured errors.
 #[cfg_attr(
     not(test),
     expect(
@@ -780,7 +2074,22 @@ fn run_and_report_with_args_vec(ctx: &Ctx<'_>, args: Vec<OsString>) -> i32 {
         reason = "central parse/dispatch function keeps CLI behavior consistent"
     )
 )]
+#[expect(
+    clippy::too_many_lines,
+    reason = "CLI dispatch keeps hidden helpers and public modes in one parser path"
+)]
 fn run_with_args_vec(ctx: &Ctx<'_>, args: Vec<OsString>) -> Result<i32, FactorError> {
+    if let Some(subcommand) = args.get(1).and_then(|arg| arg.to_str()) {
+        if subcommand == "rebase-exec-preflight" {
+            let current_index = parse_internal_current_index_arg(&args, subcommand)?;
+            return cmd_rebase_exec_preflight_in(ctx, current_index);
+        }
+        if subcommand == "rebase-exec-begin" {
+            let current_index = parse_internal_current_index_arg(&args, subcommand)?;
+            return cmd_rebase_exec_begin_in(ctx, current_index);
+        }
+    }
+
     let cli = match Cli::try_parse_from(args) {
         Ok(cli) => cli,
         Err(err) => {
@@ -812,30 +2121,31 @@ fn run_with_args_vec(ctx: &Ctx<'_>, args: Vec<OsString>) -> Result<i32, FactorEr
         return Ok(EXIT_OK);
     }
 
-    if cli.abort()
-        && (cli.status()
-            || cli.continue_flag()
-            || cli.finish()
-            || has_start_args()
-            || !cli.message().is_empty())
-    {
-        return Err(FactorError::Usage(non_empty_msg(
-            "--abort cannot be combined with other options".to_owned(),
-        )));
+    if cli.abort() {
+        if cli.status() || cli.continue_flag() || cli.finish() || has_start_args() {
+            return Err(FactorError::Usage(non_empty_msg(
+                "--abort cannot be combined with other options".to_owned(),
+            )));
+        }
+        return cmd_abort_in(ctx);
     }
 
-    if cli.status()
-        && (cli.continue_flag() || cli.finish() || has_start_args() || !cli.message().is_empty())
-    {
-        return Err(FactorError::Usage(non_empty_msg(
-            "--status cannot be combined with other options".to_owned(),
-        )));
+    if cli.status() {
+        if cli.continue_flag() || cli.finish() || has_start_args() || !cli.message().is_empty() {
+            return Err(FactorError::Usage(non_empty_msg(
+                "--status cannot be combined with other options".to_owned(),
+            )));
+        }
+        return cmd_status_in(ctx);
     }
 
-    if cli.finish() && (cli.continue_flag() || has_start_args()) {
-        return Err(FactorError::Usage(non_empty_msg(
-            "--finish cannot be combined with --continue, --exec, or COMMIT".to_owned(),
-        )));
+    if cli.finish() {
+        if cli.continue_flag() || has_start_args() {
+            return Err(FactorError::Usage(non_empty_msg(
+                "--finish cannot be combined with --continue, --exec, or COMMIT".to_owned(),
+            )));
+        }
+        return cmd_finish_in(ctx, cli.message());
     }
 
     if cli.continue_flag() {
@@ -845,79 +2155,79 @@ fn run_with_args_vec(ctx: &Ctx<'_>, args: Vec<OsString>) -> Result<i32, FactorEr
             )));
         }
         if cli.message().is_empty() {
+            if !is_factor_active_in(ctx) {
+                return Err(FactorError::Usage(non_empty_msg(
+                    "--continue requires --message <MSG>".to_owned(),
+                )));
+            }
+            let session = Session::from_active(ctx)?;
+            if session.phase(SessionPhase::Splitting)? == SessionPhase::PendingStart {
+                return cmd_continue_pending_start_in(ctx);
+            }
             return Err(FactorError::Usage(non_empty_msg(
                 "--continue requires --message <MSG>".to_owned(),
             )));
         }
-        return Err(FactorError::Usage(non_empty_msg(
-            "continue workflow lands in later commits".to_owned(),
-        )));
+        let messages = NonEmpty::from_vec(cli.message().to_vec()).ok_or_else(|| {
+            FactorError::Usage(non_empty_msg(
+                "--continue requires --message <MSG>".to_owned(),
+            ))
+        })?;
+        return cmd_continue_in(ctx, &messages);
     }
 
+    let exec = NonEmpty::from_vec(cli.exec().to_vec()).ok_or_else(|| {
+        FactorError::Usage(non_empty_msg(
+            "--exec <COMMAND> is required when starting a factor session".to_owned(),
+        ))
+    })?;
     if !cli.message().is_empty() {
         return Err(FactorError::Usage(non_empty_msg(
             "--message can only be used with --continue or --finish".to_owned(),
         )));
     }
-
-    if cli.abort() {
-        return cmd_abort_in(ctx);
+    trace_note(ctx, "factor_cmd_start", &[]);
+    if let Some(commits) = NonEmpty::from_vec(cli.commits().to_vec()) {
+        let state_dir = cmd_start_prep_in(ctx)?;
+        let resolved_refs = resolve_commit_refs(ctx, &commits)?;
+        let resolved_commits = sort_topologically(ctx, &resolved_refs)?;
+        return cmd_start_with_resolved_in(ctx, &exec, &state_dir, &resolved_commits);
     }
-
-    if cli.status() {
-        return cmd_status_in(ctx);
-    }
-
-    if cli.finish() {
-        return Err(FactorError::Usage(non_empty_msg(
-            "finish workflow lands in later commits".to_owned(),
-        )));
-    }
-
-    if cli.exec().is_empty() {
-        return Err(FactorError::Usage(non_empty_msg(
-            "--exec <COMMAND> is required when starting a factor session".to_owned(),
-        )));
-    }
-
-    ensure_repo_state(
-        ctx,
-        RepoStatePolicy::FullyClean,
-        "working tree must be clean before starting; stash, commit, or remove local changes",
-    )?;
-
-    Err(FactorError::Usage(non_empty_msg(
-        "start workflow lands in later commits".to_owned(),
-    )))
+    let state_dir = cmd_start_prep_in(ctx)?;
+    let resolved_commits = NonEmpty::new(resolve_commit(ctx, "HEAD")?);
+    cmd_start_with_resolved_in(ctx, &exec, &state_dir, &resolved_commits)
 }
 
 #[cfg(test)]
-mod tests {
-    use super::{
-        CommitMessage, Ctx, CurrentIndex, FactorError, Io, REAL_ENV, REAL_FS, REAL_RUNNER,
-        RepoStatePolicy, SessionPhase, ShortSha, SplitCount, StateBool, StateDir, StateFileKey,
-        build_ctx_from_cwd, ensure_repo_state, main_entry_with_vec, repo_status_matches_policy,
-        run_and_report_with_args_vec, run_with_args_vec,
-    };
-    use crate::exit_codes::{EXIT_OK, EXIT_USAGE};
-    use crate::git_factor::non_empty_msg;
-    use crate::test_support::{OrAbort as _, ResultOrAbort as _};
+mod proptests {
     use core::cell::RefCell;
-    use core::num::NonZeroU8;
+    use core::mem;
+    use std::env;
     use std::ffi::OsString;
     use std::fs;
     use std::io;
+    #[cfg(unix)]
+    use std::os::unix::ffi::OsStringExt as _;
     use std::path::{Path, PathBuf};
-    use std::process::Command;
+    use std::process::{self, ExitStatus, Output};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use crate::non_empty_string::NonEmptyString;
+    use nonempty::NonEmpty;
+    use proptest::collection::vec;
+    use proptest::prelude::*;
+    use proptest::string::string_regex;
     use tempfile::TempDir;
 
+    use super::*;
+
     #[derive(Default)]
-    struct BufferIo {
+    struct TestIo {
         err: RefCell<String>,
         out: RefCell<String>,
     }
 
-    impl Io for BufferIo {
+    impl Io for TestIo {
         fn err(&self, text: &str) -> io::Result<()> {
             self.err.borrow_mut().push_str(text);
             Ok(())
@@ -943,184 +2253,622 @@ mod tests {
         }
     }
 
-    fn ctx_for(path: &Path, io: &'static dyn Io) -> Ctx<'static> {
-        Ctx {
-            runner: &REAL_RUNNER,
-            cwd: path.to_path_buf(),
+    #[derive(Clone, Copy)]
+    struct TestEnv;
+
+    impl Env for TestEnv {
+        fn current_dir(&self) -> io::Result<PathBuf> {
+            Ok(PathBuf::from("."))
+        }
+
+        fn current_exe(&self) -> io::Result<PathBuf> {
+            Ok(PathBuf::from("git-factor"))
+        }
+
+        fn var_os(&self, _key: &str) -> Option<OsString> {
+            None
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    struct TestFs;
+
+    impl Fs for TestFs {
+        fn canonicalize(&self, path: &Path) -> io::Result<PathBuf> {
+            Ok(path.to_path_buf())
+        }
+
+        fn create_dir_all(&self, _path: &Path) -> io::Result<()> {
+            Ok(())
+        }
+
+        fn exists(&self, _path: &Path) -> bool {
+            false
+        }
+
+        fn is_dir(&self, _path: &Path) -> bool {
+            false
+        }
+
+        fn read_to_string(&self, _path: &Path) -> io::Result<String> {
+            Err(io::Error::new(io::ErrorKind::NotFound, "not found"))
+        }
+
+        fn remove_dir_all(&self, _path: &Path) -> io::Result<()> {
+            Ok(())
+        }
+
+        fn remove_file(&self, _path: &Path) -> io::Result<()> {
+            Ok(())
+        }
+
+        fn write_string(&self, _path: &Path, _content: &str) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    struct OverflowSplitCountFs;
+
+    impl Fs for OverflowSplitCountFs {
+        fn canonicalize(&self, path: &Path) -> io::Result<PathBuf> {
+            Ok(path.to_path_buf())
+        }
+
+        fn create_dir_all(&self, _path: &Path) -> io::Result<()> {
+            Ok(())
+        }
+
+        fn exists(&self, _path: &Path) -> bool {
+            false
+        }
+
+        fn is_dir(&self, path: &Path) -> bool {
+            path.ends_with("rebase-merge") || path.ends_with("rebase-apply")
+        }
+
+        fn read_to_string(&self, path: &Path) -> io::Result<String> {
+            if path.ends_with("split_count") {
+                Ok(u8::MAX.to_string())
+            } else if path.ends_with("requires_rebase") {
+                Ok("true".to_owned())
+            } else if path.ends_with("current_index") {
+                Ok(usize::MAX.to_string())
+            } else {
+                Err(io::Error::new(io::ErrorKind::NotFound, "not found"))
+            }
+        }
+
+        fn remove_dir_all(&self, _path: &Path) -> io::Result<()> {
+            Ok(())
+        }
+
+        fn remove_file(&self, _path: &Path) -> io::Result<()> {
+            Ok(())
+        }
+
+        fn write_string(&self, _path: &Path, _content: &str) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[cfg(unix)]
+    #[derive(Clone, Copy)]
+    struct NonUtf8Fs;
+
+    #[cfg(unix)]
+    impl Fs for NonUtf8Fs {
+        fn canonicalize(&self, _path: &Path) -> io::Result<PathBuf> {
+            let mut bytes = b"/tmp/".to_vec();
+            bytes.push(0xff);
+            bytes.extend_from_slice(b"/bin/git-factor");
+            Ok(PathBuf::from(OsString::from_vec(bytes)))
+        }
+
+        fn create_dir_all(&self, _path: &Path) -> io::Result<()> {
+            Ok(())
+        }
+
+        fn exists(&self, _path: &Path) -> bool {
+            false
+        }
+
+        fn is_dir(&self, _path: &Path) -> bool {
+            false
+        }
+
+        fn read_to_string(&self, _path: &Path) -> io::Result<String> {
+            Err(io::Error::new(io::ErrorKind::NotFound, "not found"))
+        }
+
+        fn remove_dir_all(&self, _path: &Path) -> io::Result<()> {
+            Ok(())
+        }
+
+        fn remove_file(&self, _path: &Path) -> io::Result<()> {
+            Ok(())
+        }
+
+        fn write_string(&self, _path: &Path, _content: &str) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    struct TestRunner;
+
+    impl Runner for TestRunner {
+        fn output(&self, _bin: &str, _args: &[&str], _cwd: &Path) -> io::Result<Output> {
+            Err(io::Error::other("unused in parser-only tests"))
+        }
+
+        fn status(
+            &self,
+            _bin: &str,
+            _args: &[&str],
+            _envs: &[(&str, &str)],
+            _quiet: bool,
+            _cwd: &Path,
+        ) -> io::Result<ExitStatus> {
+            Err(io::Error::other("unused in parser-only tests"))
+        }
+    }
+
+    struct ScriptedRunner {
+        outputs: RefCell<Vec<io::Result<Output>>>,
+        status_calls: RefCell<Vec<Vec<String>>>,
+        statuses: RefCell<Vec<io::Result<ExitStatus>>>,
+    }
+
+    impl ScriptedRunner {
+        fn new(outputs: Vec<io::Result<Output>>, statuses: Vec<io::Result<ExitStatus>>) -> Self {
+            let mut reversed_outputs = outputs;
+            reversed_outputs.reverse();
+            let mut reversed_statuses = statuses;
+            reversed_statuses.reverse();
+            Self {
+                outputs: RefCell::new(reversed_outputs),
+                status_calls: RefCell::new(Vec::new()),
+                statuses: RefCell::new(reversed_statuses),
+            }
+        }
+    }
+
+    impl Runner for ScriptedRunner {
+        fn output(&self, _bin: &str, _args: &[&str], _cwd: &Path) -> io::Result<Output> {
+            self.outputs
+                .borrow_mut()
+                .pop()
+                .or_abort("missing scripted output")
+        }
+
+        fn status(
+            &self,
+            _bin: &str,
+            args: &[&str],
+            _envs: &[(&str, &str)],
+            _quiet: bool,
+            _cwd: &Path,
+        ) -> io::Result<ExitStatus> {
+            self.status_calls.borrow_mut().push(
+                args.iter()
+                    .map(|arg| (*arg).to_owned())
+                    .collect::<Vec<String>>(),
+            );
+            self.statuses
+                .borrow_mut()
+                .pop()
+                .or_abort("missing scripted status")
+        }
+    }
+
+    fn test_ctx() -> (Ctx<'static>, &'static TestIo) {
+        let io = Box::leak(Box::new(TestIo::default()));
+        let env = Box::leak(Box::new(TestEnv));
+        let fs = Box::leak(Box::new(TestFs));
+        let runner = Box::leak(Box::new(TestRunner));
+        (
+            Ctx {
+                cwd: PathBuf::from("."),
+                runner,
+                io,
+                env,
+                fs,
+            },
             io,
-            env: &REAL_ENV,
-            fs: &REAL_FS,
+        )
+    }
+
+    #[test]
+    fn io_line_methods_cover_default_real_and_test_impls() {
+        REAL_IO
+            .errln("real-err")
+            .or_abort("real errln should succeed");
+        REAL_IO
+            .outln("real-out")
+            .or_abort("real outln should succeed");
+
+        let test_io = TestIo::default();
+        test_io
+            .errln("test-err")
+            .or_abort("test errln should succeed");
+        test_io
+            .outln("test-out")
+            .or_abort("test outln should succeed");
+        assert_eq!(test_io.err.borrow().as_str(), "test-err\n");
+        assert_eq!(test_io.out.borrow().as_str(), "test-out\n");
+
+        let dyn_test_io = TestIo::default();
+        let dyn_io: &dyn Io = &dyn_test_io;
+        dyn_io
+            .outln("dyn-test-out")
+            .or_abort("dyn test outln should succeed");
+        assert_eq!(dyn_test_io.out.borrow().as_str(), "dyn-test-out\n");
+
+        let ufcs_test_io = TestIo::default();
+        <TestIo as Io>::outln(&ufcs_test_io, "ufcs-test-out")
+            .or_abort("ufcs test outln should succeed");
+        <TestIo as Io>::outln(&ufcs_test_io, "ufcs-test-out-2")
+            .or_abort("second ufcs test outln should succeed");
+        assert_eq!(
+            ufcs_test_io.out.borrow().as_str(),
+            "ufcs-test-out\nufcs-test-out-2\n"
+        );
+
+        let (ctx, ctx_io) = test_ctx();
+        ctx.outln("ctx-test-out")
+            .or_abort("ctx outln should succeed");
+        assert_eq!(ctx_io.out.borrow().as_str(), "ctx-test-out\n");
+    }
+
+    fn shell_fragment() -> impl Strategy<Value = String> {
+        string_regex("[A-Za-z0-9._/-]{1,24}").or_abort("valid regex")
+    }
+
+    fn nonempty_exec_commands() -> impl Strategy<Value = NonEmpty<NonEmptyString>> {
+        vec(shell_fragment(), 1..6).prop_map(|values| {
+            let mut iter = values.into_iter();
+            let first = NonEmptyString::new(iter.next().or_abort("range ensures non-empty"))
+                .or_abort("regex ensures non-empty");
+            let mut out = NonEmpty::new(first);
+            for value in iter {
+                out.push(NonEmptyString::new(value).or_abort("regex ensures non-empty"));
+            }
+            out
+        })
+    }
+
+    proptest! {
+        #[test]
+        fn proptest_build_rebase_args_preserves_exec_order(
+            _exec in nonempty_exec_commands(),
+            parent in shell_fragment(),
+            is_root in any::<bool>(),
+        ) {
+            let args = build_rebase_args(parent.as_str(), is_root);
+            let prefix = [
+                "rebase",
+                "--empty",
+                "drop",
+                "--interactive",
+                "--no-autosquash",
+                "--no-autostash",
+                "--no-rebase-merges",
+                "--no-stat",
+                "--quiet",
+                "--reschedule-failed-exec",
+            ];
+            prop_assert!(args.starts_with(&prefix));
+
+            let mut tail = args.iter().skip(prefix.len());
+            if is_root {
+                prop_assert_eq!(tail.next().copied(), Some("--root"));
+            } else {
+                prop_assert_eq!(tail.next().copied(), Some(parent.as_str()));
+            }
+            prop_assert_eq!(tail.next(), None);
+        }
+
+        #[test]
+        fn proptest_nonempty_exec_commands_are_always_nonempty(
+            exec in nonempty_exec_commands(),
+        ) {
+            prop_assert!(!exec.is_empty());
+        }
+
+        #[test]
+        fn proptest_run_with_args_vec_reports_parse_errors(
+            invalid_flag in string_regex("zz[a-z0-9]{1,12}").or_abort("valid regex"),
+        ) {
+            let (ctx, io) = test_ctx();
+            let args = vec![
+                OsString::from("git-factor"),
+                OsString::from(format!("--{invalid_flag}")),
+            ];
+
+            let code = run_with_args_vec(&ctx, args).or_abort("parse errors map to exit code");
+            prop_assert_eq!(code, EXIT_USAGE);
+            prop_assert!(!io.err.borrow().is_empty());
+        }
+
+        #[test]
+        fn proptest_run_with_args_vec_rejects_abort_combinations(
+            include_status in any::<bool>(),
+            include_continue in any::<bool>(),
+            include_finish in any::<bool>(),
+        ) {
+            prop_assume!(include_status || include_continue || include_finish);
+
+            let (ctx, _io) = test_ctx();
+            let mut args = vec![OsString::from("git-factor"), OsString::from("--abort")];
+            if include_status {
+                args.push(OsString::from("--status"));
+            }
+            if include_continue {
+                args.push(OsString::from("--continue"));
+            }
+            if include_finish {
+                args.push(OsString::from("--finish"));
+            }
+
+            let err = run_with_args_vec(&ctx, args).err_or_abort("invalid combination should fail");
+            prop_assert!(matches!(err, FactorError::Usage(_)));
         }
     }
 
     #[test]
-    fn state_file_key_as_str_matches_expected_names() {
-        assert_eq!(StateFileKey::Commits.as_str(), "commits");
-        assert_eq!(StateFileKey::CurrentIndex.as_str(), "current_index");
-        assert_eq!(StateFileKey::Exec.as_str(), "exec");
-        assert_eq!(StateFileKey::ExpectedTree.as_str(), "expected_tree");
-        assert_eq!(StateFileKey::IsRoot.as_str(), "is_root");
-        assert_eq!(StateFileKey::Phase.as_str(), "phase");
-        assert_eq!(StateFileKey::RequiresRebase.as_str(), "requires_rebase");
-        assert_eq!(StateFileKey::SplitCount.as_str(), "split_count");
-        assert_eq!(StateFileKey::StartHead.as_str(), "start_head");
-        assert_eq!(StateFileKey::StartedRebase.as_str(), "started_rebase");
+    fn proptest_run_with_args_vec_no_options_prints_help() {
+        let (ctx, io) = test_ctx();
+        let args = vec![OsString::from("git-factor")];
+
+        let code = run_with_args_vec(&ctx, args).or_abort("no-options path should succeed");
+        assert_eq!(code, EXIT_OK);
+        assert!(io.out.borrow().contains("Usage:"));
     }
 
     #[test]
-    fn state_bool_round_trips() {
-        assert_eq!(StateBool::False.as_str(), "false");
-        assert_eq!(StateBool::True.as_str(), "true");
-        assert!(!StateBool::False.as_bool());
-        assert!(StateBool::True.as_bool());
-        assert_eq!(StateBool::from_bool(false), StateBool::False);
-        assert_eq!(StateBool::from_bool(true), StateBool::True);
+    fn proptest_run_with_args_vec_continue_requires_message() {
+        let (ctx, _io) = test_ctx();
+        let args = vec![OsString::from("git-factor"), OsString::from("--continue")];
+
+        let err =
+            run_with_args_vec(&ctx, args).err_or_abort("continue without message should fail");
+        assert_eq!(
+            mem::discriminant(&err),
+            mem::discriminant(&FactorError::Usage(non_empty_msg("x".to_owned())))
+        );
     }
 
     #[test]
-    fn repo_status_matches_policy_distinguishes_clean_staged_and_dirty_lines() {
-        assert!(repo_status_matches_policy("", RepoStatePolicy::FullyClean));
-        assert!(repo_status_matches_policy(
-            "\n",
-            RepoStatePolicy::StagedOnly
-        ));
-        assert!(repo_status_matches_policy(
-            "M  file.txt\n",
-            RepoStatePolicy::StagedOnly
-        ));
-        assert!(!repo_status_matches_policy(
-            " M file.txt\n",
-            RepoStatePolicy::StagedOnly
-        ));
-        assert!(!repo_status_matches_policy(
-            "?? file.txt\n",
-            RepoStatePolicy::StagedOnly
-        ));
-        assert!(!repo_status_matches_policy(
-            "!! file.txt\n",
-            RepoStatePolicy::StagedOnly
-        ));
-        assert!(!repo_status_matches_policy(
-            "MM file.txt\n",
-            RepoStatePolicy::StagedOnly
-        ));
-        assert!(!repo_status_matches_policy(
-            "M  file.txt\n",
-            RepoStatePolicy::FullyClean
-        ));
+    fn proptest_run_and_report_with_args_vec_converts_usage_errors() {
+        let (ctx, io) = test_ctx();
+        let args = vec![
+            OsString::from("git-factor"),
+            OsString::from("--abort"),
+            OsString::from("--status"),
+        ];
+
+        let code = run_and_report_with_args_vec(&ctx, args);
+        assert_eq!(code, EXIT_USAGE);
+        assert!(!io.err.borrow().is_empty());
     }
 
     #[test]
-    fn ensure_repo_state_uses_git_status_to_enforce_cleanliness() {
-        let dir = TempDir::new().or_abort("tempdir");
-        let io = Box::leak(Box::new(BufferIo::default()));
-        let ctx = ctx_for(dir.path(), io);
+    fn proptest_main_entry_with_vec_reports_ctx_errors() {
+        let io = Box::leak(Box::new(TestIo::default()));
+        let code = main_entry_with_vec(
+            io,
+            Err(FactorError::Usage(non_empty_msg(
+                "ctx setup failed".to_owned(),
+            ))),
+            vec![OsString::from("git-factor")],
+        );
+        assert_eq!(code, EXIT_USAGE);
+        assert!(!io.err.borrow().is_empty());
+    }
 
-        let status = Command::new("git")
-            .current_dir(dir.path())
-            .args(["init", "--quiet"])
-            .status()
-            .or_abort("git init");
-        assert!(status.success());
+    #[test]
+    fn proptest_main_entry_with_vec_passes_through_success_path() {
+        let (ctx, io) = test_ctx();
+        let code = main_entry_with_vec(io, Ok(ctx), vec![OsString::from("git-factor")]);
 
-        ensure_repo_state(&ctx, RepoStatePolicy::FullyClean, "repo must be clean")
-            .or_abort("clean repo should pass");
+        assert_eq!(code, EXIT_OK);
+        assert!(io.out.borrow().contains("Usage:"));
+    }
 
-        fs::write(dir.path().join("file.txt"), "dirty\n").or_abort("write dirty file");
+    #[test]
+    fn proptest_main_entry_with_vec_uses_default_program_name_when_args_are_empty() {
+        let (ctx, io) = test_ctx();
+        let code = main_entry_with_vec(io, Ok(ctx), Vec::<OsString>::new());
 
-        let err = ensure_repo_state(&ctx, RepoStatePolicy::FullyClean, "repo must be clean")
-            .err_or_abort("dirty repo should fail");
+        assert_eq!(code, EXIT_OK);
+        assert!(io.out.borrow().contains("Usage:"));
+    }
+
+    #[test]
+    fn proptest_build_ctx_from_cwd_reports_error() {
+        let result = build_ctx_from_cwd(Err(io::Error::other("cwd failed")));
+        let err = result
+            .err()
+            .or_abort("cwd failure should map to git command error");
         assert_eq!(
             err.to_string(),
-            "git command failed: repo must be clean\nSTATUS:\n?? file.txt"
-        );
-
-        let missing_ctx = ctx_for(dir.path().join("missing").as_path(), io);
-        let missing_err = ensure_repo_state(
-            &missing_ctx,
-            RepoStatePolicy::FullyClean,
-            "repo must be clean",
-        )
-        .err_or_abort("missing cwd should fail");
-        assert!(
-            missing_err
-                .to_string()
-                .starts_with("git command failed: git status --porcelain=v1: ")
+            "git command failed: cannot resolve cwd: cwd failed"
         );
     }
 
     #[test]
-    fn session_phase_parse_round_trips_and_rejects_unknown_values() {
-        assert_eq!(SessionPhase::PendingStart.as_str(), "pending_start");
-        assert_eq!(SessionPhase::Splitting.as_str(), "splitting");
-        assert_eq!(
-            SessionPhase::parse("pending_start").or_abort("pending_start phase"),
-            SessionPhase::PendingStart
-        );
-        assert_eq!(
-            SessionPhase::parse("splitting").or_abort("splitting phase"),
-            SessionPhase::Splitting
-        );
+    fn proptest_build_ctx_from_cwd_returns_real_context_on_success() {
+        let cwd = PathBuf::from("repo");
+        let ctx = build_ctx_from_cwd(Ok(cwd.clone())).or_abort("cwd success should build context");
 
-        let err = SessionPhase::parse("bogus").err_or_abort("bogus phase should fail");
+        assert_eq!(ctx.cwd, cwd);
         assert_eq!(
-            err.to_string(),
-            "git command failed: corrupted state file 'phase': invalid value 'bogus'"
+            ctx.env.current_dir().or_abort("ctx env current_dir"),
+            env::current_dir().or_abort("host current_dir")
         );
     }
 
     #[test]
-    fn current_index_reads_and_increments() {
-        let dir = TempDir::new().or_abort("tempdir");
-        let state_dir = dir.path().join("factor");
-        fs::create_dir_all(&state_dir).or_abort("create factor dir");
-        fs::write(state_dir.join("current_index"), "41\n").or_abort("write current_index");
-        let io = Box::leak(Box::new(BufferIo::default()));
-        let ctx = ctx_for(dir.path(), io);
-
-        let current_index =
-            CurrentIndex::read(&ctx, &StateDir::new(state_dir)).or_abort("read current_index");
-        assert_eq!(current_index.as_usize(), 41);
+    fn proptest_test_env_and_fs_trait_methods_are_exercised() {
+        let env = TestEnv;
         assert_eq!(
-            current_index
-                .increment()
-                .or_abort("increment current_index")
-                .as_usize(),
-            42
+            env.current_dir().or_abort("current_dir"),
+            PathBuf::from(".")
         );
+        assert_eq!(
+            env.current_exe().or_abort("current_exe"),
+            PathBuf::from("git-factor")
+        );
+        assert_eq!(env.var_os("GIT_FACTOR_TEST"), None);
+
+        let fs = TestFs;
+        let path = PathBuf::from("tmp");
+        fs.create_dir_all(path.as_path()).or_abort("create_dir_all");
+        fs.remove_dir_all(path.as_path()).or_abort("remove_dir_all");
+        fs.remove_file(path.as_path()).or_abort("remove_file");
+        fs.write_string(path.as_path(), "value")
+            .or_abort("write_string");
+        assert_eq!(
+            fs.canonicalize(path.as_path()).or_abort("canonicalize"),
+            PathBuf::from("tmp")
+        );
+        assert!(!fs.is_dir(path.as_path()));
+        assert!(!fs.exists(path.as_path()));
+        let read_err = fs
+            .read_to_string(path.as_path())
+            .err_or_abort("read_to_string should fail");
+        assert_eq!(read_err.kind(), io::ErrorKind::NotFound);
     }
 
     #[test]
-    fn current_index_increment_reports_overflow() {
-        let err = CurrentIndex(usize::MAX)
-            .increment()
-            .err_or_abort("usize::MAX current_index should overflow");
+    fn overflow_split_count_fs_trait_methods_are_exercised() {
+        let fs = OverflowSplitCountFs;
+        let path = PathBuf::from("tmp");
+        fs.create_dir_all(path.as_path()).or_abort("create_dir_all");
+        fs.remove_dir_all(path.as_path()).or_abort("remove_dir_all");
+        fs.remove_file(path.as_path()).or_abort("remove_file");
+        fs.write_string(path.as_path(), "value")
+            .or_abort("write_string");
         assert_eq!(
-            err.to_string(),
-            "git command failed: current_index overflow"
+            fs.canonicalize(path.as_path()).or_abort("canonicalize"),
+            PathBuf::from("tmp")
+        );
+        assert!(!fs.is_dir(path.as_path()));
+        assert!(!fs.exists(path.as_path()));
+
+        let non_split_err = fs
+            .read_to_string(path.as_path())
+            .err_or_abort("non split_count read_to_string should fail");
+        assert_eq!(non_split_err.kind(), io::ErrorKind::NotFound);
+
+        assert_eq!(
+            fs.read_to_string(Path::new(".git/factor/split_count"))
+                .or_abort("split_count should read"),
+            u8::MAX.to_string()
         );
     }
 
-    #[test]
-    fn split_count_reads_and_increments() {
-        let dir = TempDir::new().or_abort("tempdir");
-        let state_dir = dir.path().join("factor");
-        fs::create_dir_all(&state_dir).or_abort("create factor dir");
-        fs::write(state_dir.join("split_count"), "1\n").or_abort("write split_count");
-        let io = Box::leak(Box::new(BufferIo::default()));
-        let ctx = ctx_for(dir.path(), io);
+    fn success_status() -> ExitStatus {
+        match () {
+            #[cfg(unix)]
+            () => {
+                use std::os::unix::process::ExitStatusExt as _;
+                ExitStatus::from_raw(0)
+            }
+            #[cfg(windows)]
+            () => {
+                use std::os::windows::process::ExitStatusExt as _;
+                ExitStatus::from_raw(0)
+            }
+            #[cfg(not(any(unix, windows)))]
+            () => panic!("unsupported platform"),
+        }
+    }
 
-        let split_count =
-            SplitCount::read(&ctx, &StateDir::new(state_dir)).or_abort("read split_count");
-        assert_eq!(split_count.as_non_zero(), NonZeroU8::new(1));
-        assert_eq!(split_count.as_u8(), 1);
-        assert_eq!(
-            split_count
-                .increment()
-                .or_abort("increment split_count")
-                .as_u8(),
-            2
-        );
+    fn failure_status() -> ExitStatus {
+        match () {
+            #[cfg(unix)]
+            () => {
+                use std::os::unix::process::ExitStatusExt as _;
+                ExitStatus::from_raw(1 << 8)
+            }
+            #[cfg(windows)]
+            () => {
+                use std::os::windows::process::ExitStatusExt as _;
+                ExitStatus::from_raw(1)
+            }
+            #[cfg(not(any(unix, windows)))]
+            () => panic!("unsupported platform"),
+        }
+    }
+
+    #[test]
+    fn proptest_test_runner_trait_methods_are_exercised() {
+        let runner = TestRunner;
+        let cwd = Path::new(".");
+
+        let output_err = runner
+            .output("git", &["status"], cwd)
+            .err_or_abort("output should fail in parser-only test runner");
+        assert_eq!(output_err.kind(), io::ErrorKind::Other);
+        assert_eq!(output_err.to_string(), "unused in parser-only tests");
+
+        let status_err = runner
+            .status("git", &["status"], &[], false, cwd)
+            .err_or_abort("status should fail in parser-only test runner");
+        assert_eq!(status_err.kind(), io::ErrorKind::Other);
+        assert_eq!(status_err.to_string(), "unused in parser-only tests");
+
+        let _status = success_status();
+    }
+
+    #[test]
+    fn success_status_reports_success() {
+        assert!(success_status().success());
+    }
+
+    #[test]
+    fn failure_status_reports_failure() {
+        assert!(!failure_status().success());
+    }
+
+    fn advanced_parts(outcome: AdvanceOutcome) -> Option<(CommitMessage, ShortSha, NonZeroU8)> {
+        match outcome {
+            AdvanceOutcome::Advanced {
+                next_message,
+                next_short_sha,
+                previous_split_count,
+            } => Some((next_message, next_short_sha, previous_split_count)),
+            AdvanceOutcome::Completed { .. } => None,
+        }
+    }
+
+    fn completed_split_count(outcome: &AdvanceOutcome) -> Option<NonZeroU8> {
+        match *outcome {
+            AdvanceOutcome::Completed { final_split_count } => Some(final_split_count),
+            AdvanceOutcome::Advanced { .. } => None,
+        }
+    }
+
+    #[test]
+    fn increment_split_count_reports_overflow() {
+        let io = Box::leak(Box::new(TestIo::default()));
+        let env = Box::leak(Box::new(TestEnv));
+        let fs = Box::leak(Box::new(OverflowSplitCountFs));
+        let runner = Box::leak(Box::new(TestRunner));
+        let ctx = Ctx {
+            cwd: PathBuf::from("."),
+            env,
+            fs,
+            io,
+            runner,
+        };
+
+        let err = Session::with_state(&ctx, StateDir::new(PathBuf::from(".git/factor")), vec![])
+            .increment_split_count()
+            .err_or_abort("u32::MAX split_count should overflow");
+        assert_eq!(err.to_string(), "git command failed: split_count overflow");
     }
 
     #[test]
@@ -1159,11 +2907,7 @@ mod tests {
     }
 
     #[test]
-    fn short_sha_try_from_validates_format() {
-        let valid_short_sha =
-            ShortSha::try_from("abcdef1".to_owned()).or_abort("valid short sha should parse");
-        assert_eq!(valid_short_sha.as_str(), "abcdef1");
-
+    fn short_sha_try_from_rejects_invalid_values() {
         let too_long = "a".repeat(ShortSha::MAX_LEN + 1);
         let too_long_err = ShortSha::try_from(too_long).err_or_abort("too-long short sha");
         assert_eq!(
@@ -1186,112 +2930,1134 @@ mod tests {
     }
 
     #[test]
-    fn split_count_increment_reports_overflow() {
-        let err = SplitCount(u8::MAX)
+    fn advance_to_next_commit_reports_current_index_overflow() {
+        let err = CurrentIndex(usize::MAX)
             .increment()
-            .err_or_abort("u8::MAX split_count should overflow");
-        assert_eq!(err.to_string(), "git command failed: split_count overflow");
-    }
-
-    #[test]
-    fn run_with_args_vec_reports_parse_errors() {
-        let io = Box::leak(Box::new(BufferIo::default()));
-        let ctx = ctx_for(Path::new("."), io);
-        let args = vec![OsString::from("git-factor"), OsString::from("--bogus-flag")];
-
-        let code = run_with_args_vec(&ctx, args).or_abort("parse errors map to exit code");
-        assert_eq!(code, EXIT_USAGE);
-        assert!(!io.err.borrow().is_empty());
-    }
-
-    #[test]
-    fn run_with_args_vec_no_options_prints_help() {
-        let io = Box::leak(Box::new(BufferIo::default()));
-        let ctx = ctx_for(Path::new("."), io);
-        let args = vec![OsString::from("git-factor")];
-
-        let code = run_with_args_vec(&ctx, args).or_abort("no-options path should succeed");
-        assert_eq!(code, EXIT_OK);
-        assert!(io.out.borrow().contains("Usage:"));
-    }
-
-    #[test]
-    fn run_with_args_vec_continue_requires_message() {
-        let io = Box::leak(Box::new(BufferIo::default()));
-        let ctx = ctx_for(Path::new("."), io);
-        let args = vec![OsString::from("git-factor"), OsString::from("--continue")];
-
-        let err =
-            run_with_args_vec(&ctx, args).err_or_abort("continue without message should fail");
-        assert_eq!(err.to_string(), "--continue requires --message <MSG>");
-    }
-
-    #[test]
-    fn run_and_report_with_args_vec_converts_usage_errors() {
-        let io = Box::leak(Box::new(BufferIo::default()));
-        let ctx = ctx_for(Path::new("."), io);
-        let args = vec![
-            OsString::from("git-factor"),
-            OsString::from("--abort"),
-            OsString::from("--status"),
-        ];
-
-        let code = run_and_report_with_args_vec(&ctx, args);
-        assert_eq!(code, EXIT_USAGE);
-        assert!(!io.err.borrow().is_empty());
-    }
-
-    #[test]
-    fn main_entry_with_vec_reports_ctx_errors() {
-        let io = Box::leak(Box::new(BufferIo::default()));
-        let code = main_entry_with_vec(
-            io,
-            Err(FactorError::Usage(non_empty_msg(
-                "ctx setup failed".to_owned(),
-            ))),
-            vec![OsString::from("git-factor")],
-        );
-        assert_eq!(code, EXIT_USAGE);
-        assert!(!io.err.borrow().is_empty());
-    }
-
-    #[test]
-    fn main_entry_with_vec_passes_through_success_path() {
-        let io = Box::leak(Box::new(BufferIo::default()));
-        let ctx = ctx_for(Path::new("."), io);
-        let code = main_entry_with_vec(io, Ok(ctx), vec![OsString::from("git-factor")]);
-
-        assert_eq!(code, EXIT_OK);
-        assert!(io.out.borrow().contains("Usage:"));
-    }
-
-    #[test]
-    fn main_entry_with_vec_uses_default_program_name_when_args_are_empty() {
-        let io = Box::leak(Box::new(BufferIo::default()));
-        let ctx = ctx_for(Path::new("."), io);
-        let code = main_entry_with_vec(io, Ok(ctx), Vec::<OsString>::new());
-
-        assert_eq!(code, EXIT_OK);
-        assert!(io.out.borrow().contains("Usage:"));
-    }
-
-    #[test]
-    fn build_ctx_from_cwd_reports_error() {
-        let result = build_ctx_from_cwd(Err(io::Error::other("cwd failed")));
-        let err = result
-            .err()
-            .or_abort("cwd failure should map to git command error");
+            .err_or_abort("usize::MAX current_index should overflow");
         assert_eq!(
             err.to_string(),
-            "git command failed: cannot resolve cwd: cwd failed"
+            "git command failed: current_index overflow"
         );
     }
 
     #[test]
-    fn build_ctx_from_cwd_returns_real_context_on_success() {
-        let cwd = PathBuf::from("repo");
-        let ctx = build_ctx_from_cwd(Ok(cwd.clone())).or_abort("cwd success should build context");
+    fn session_from_active_loads_state_and_accessors() {
+        let dir = TempDir::new().or_abort("tempdir");
+        let repo = dir.path();
+        let git_dir = repo.join(".git");
+        let state_dir = git_dir.join("factor");
+        fs::create_dir_all(&state_dir).or_abort("create factor dir");
 
-        assert_eq!(ctx.cwd, cwd);
+        let current_commit = "0123456789abcdef0123456789abcdef01234567";
+        let start_head = "89abcdef0123456789abcdef0123456789abcdef";
+        let expected_tree = "dddddddddddddddddddddddddddddddddddddddd";
+        fs::write(state_dir.join("commits"), format!("{current_commit}\n"))
+            .or_abort("write commits");
+        fs::write(state_dir.join("current_index"), "0\n").or_abort("write current_index");
+        fs::write(state_dir.join("split_count"), "1\n").or_abort("write split_count");
+        fs::write(state_dir.join("exec"), "true\n").or_abort("write exec");
+        fs::write(state_dir.join("start_head"), format!("{start_head}\n"))
+            .or_abort("write start_head");
+        fs::write(state_dir.join("started_rebase"), "true\n").or_abort("write started_rebase");
+        fs::write(state_dir.join("requires_rebase"), "false\n").or_abort("write requires_rebase");
+        fs::write(state_dir.join("is_root"), "true\n").or_abort("write is_root");
+        fs::write(
+            state_dir.join("expected_tree"),
+            format!("{expected_tree}\n"),
+        )
+        .or_abort("write expected_tree");
+
+        let io = Box::leak(Box::new(TestIo::default()));
+        let env = Box::leak(Box::new(TestEnv));
+        let fs = &REAL_FS;
+        let runner = Box::leak(Box::new(ScriptedRunner::new(
+            vec![Ok(Output {
+                status: success_status(),
+                stdout: b".git\n".to_vec(),
+                stderr: Vec::new(),
+            })],
+            Vec::new(),
+        )));
+        let ctx = Ctx {
+            cwd: repo.to_path_buf(),
+            env,
+            fs,
+            io,
+            runner,
+        };
+
+        let session = Session::from_active(&ctx).or_abort("load active session");
+        assert_eq!(
+            session.current_commit().or_abort("current commit").as_str(),
+            current_commit
+        );
+        assert_eq!(
+            session.current_index().or_abort("current index").as_usize(),
+            0
+        );
+        assert_eq!(session.exec().or_abort("exec").as_str(), "true");
+        assert_eq!(
+            session.start_head().or_abort("start head").as_str(),
+            start_head
+        );
+        assert!(
+            session
+                .started_rebase(StateBool::False)
+                .or_abort("started_rebase")
+                .as_bool()
+        );
+        assert!(
+            !session
+                .requires_rebase(StateBool::True)
+                .or_abort("requires_rebase")
+                .as_bool()
+        );
+        assert!(
+            session
+                .is_root(StateBool::False)
+                .or_abort("is_root")
+                .as_bool()
+        );
+        assert_eq!(session.split_count().or_abort("split_count").as_u8(), 1);
+        assert_eq!(
+            session.expected_tree().or_abort("expected tree").as_str(),
+            expected_tree
+        );
+    }
+
+    #[test]
+    fn session_from_active_rejects_invalid_commit_entries() {
+        let dir = TempDir::new().or_abort("tempdir");
+        let repo = dir.path();
+        let state_dir = repo.join(".git").join("factor");
+        fs::create_dir_all(&state_dir).or_abort("create factor dir");
+        fs::write(state_dir.join("commits"), "bad\n").or_abort("write commits");
+
+        let io = Box::leak(Box::new(TestIo::default()));
+        let env = Box::leak(Box::new(TestEnv));
+        let fs = &REAL_FS;
+        let runner = Box::leak(Box::new(ScriptedRunner::new(
+            vec![Ok(Output {
+                status: success_status(),
+                stdout: b".git\n".to_vec(),
+                stderr: Vec::new(),
+            })],
+            Vec::new(),
+        )));
+        let ctx = Ctx {
+            cwd: repo.to_path_buf(),
+            env,
+            fs,
+            io,
+            runner,
+        };
+
+        let err = Session::from_active(&ctx)
+            .map(|_session| ())
+            .err_or_abort("invalid commits state should fail");
+        assert_eq!(err.to_string(), "invalid commit: bad");
+    }
+
+    #[test]
+    fn session_expected_tree_propagates_current_commit_lookup_error() {
+        let dir = TempDir::new().or_abort("tempdir");
+        let state_dir = dir.path().join(".git").join("factor");
+        fs::create_dir_all(&state_dir).or_abort("create factor dir");
+        fs::write(state_dir.join("current_index"), "1\n").or_abort("write current_index");
+
+        let io = Box::leak(Box::new(TestIo::default()));
+        let env = Box::leak(Box::new(TestEnv));
+        let fs = &REAL_FS;
+        let runner = Box::leak(Box::new(TestRunner));
+        let ctx = Ctx {
+            cwd: dir.path().to_path_buf(),
+            env,
+            fs,
+            io,
+            runner,
+        };
+        let commit = CommitSha::new("a".repeat(COMMIT_SHA_HEX_LEN)).or_abort("valid sha");
+
+        let err = Session::with_state(&ctx, StateDir::new(state_dir), vec![commit])
+            .expected_tree()
+            .err_or_abort("missing current commit should fail");
+        assert_eq!(
+            err.to_string(),
+            "git command failed: commit index 1 out of range (have 1 commits)"
+        );
+    }
+
+    #[test]
+    fn advance_to_next_commit_reports_zero_split_count_on_advance() {
+        let dir = TempDir::new().or_abort("tempdir");
+        let repo = dir.path();
+        let rebase_dir = repo.join(".git").join("rebase-merge");
+        let state_dir = repo.join(".git").join("factor");
+        fs::create_dir_all(&rebase_dir).or_abort("create rebase dir");
+        fs::create_dir_all(&state_dir).or_abort("create factor dir");
+
+        let first_commit = CommitSha::new("a".repeat(COMMIT_SHA_HEX_LEN)).or_abort("first sha");
+        let second_commit = CommitSha::new("b".repeat(COMMIT_SHA_HEX_LEN)).or_abort("second sha");
+        fs::write(state_dir.join("split_count"), "0\n").or_abort("write split_count");
+        fs::write(state_dir.join("requires_rebase"), "true\n").or_abort("write requires_rebase");
+        fs::write(state_dir.join("current_index"), "0\n").or_abort("write current_index");
+
+        let io = Box::leak(Box::new(TestIo::default()));
+        let env = Box::leak(Box::new(TestEnv));
+        let fs = &REAL_FS;
+        let runner = Box::leak(Box::new(ScriptedRunner::new(
+            vec![
+                Ok(Output {
+                    status: success_status(),
+                    stdout: b".git\n".to_vec(),
+                    stderr: Vec::new(),
+                }),
+                Ok(Output {
+                    status: success_status(),
+                    stdout: b".git\n".to_vec(),
+                    stderr: Vec::new(),
+                }),
+                Ok(Output {
+                    status: success_status(),
+                    stdout: Vec::new(),
+                    stderr: Vec::new(),
+                }),
+                Ok(Output {
+                    status: success_status(),
+                    stdout: b"next message\n".to_vec(),
+                    stderr: Vec::new(),
+                }),
+                Ok(Output {
+                    status: success_status(),
+                    stdout: b"bbbbbbb\n".to_vec(),
+                    stderr: Vec::new(),
+                }),
+            ],
+            vec![Ok(success_status()), Ok(success_status())],
+        )));
+        let ctx = Ctx {
+            cwd: repo.to_path_buf(),
+            env,
+            fs,
+            io,
+            runner,
+        };
+
+        let err = Session::with_state(
+            &ctx,
+            StateDir::new(state_dir),
+            vec![first_commit, second_commit],
+        )
+        .advance_to_next_commit()
+        .err_or_abort("zero split count should fail");
+        assert_eq!(
+            err.to_string(),
+            "git command failed: split_count is zero at advance"
+        );
+    }
+
+    #[test]
+    fn advance_to_next_commit_returns_next_commit_metadata_on_advance() {
+        let dir = TempDir::new().or_abort("tempdir");
+        let repo = dir.path();
+        let rebase_dir = repo.join(".git").join("rebase-merge");
+        let state_dir = repo.join(".git").join("factor");
+        fs::create_dir_all(&rebase_dir).or_abort("create rebase dir");
+        fs::create_dir_all(&state_dir).or_abort("create factor dir");
+
+        let first_commit = CommitSha::new("a".repeat(COMMIT_SHA_HEX_LEN)).or_abort("first sha");
+        let second_commit = CommitSha::new("b".repeat(COMMIT_SHA_HEX_LEN)).or_abort("second sha");
+        fs::write(state_dir.join("split_count"), "1\n").or_abort("write split_count");
+        fs::write(state_dir.join("requires_rebase"), "true\n").or_abort("write requires_rebase");
+        fs::write(state_dir.join("current_index"), "0\n").or_abort("write current_index");
+
+        let io = Box::leak(Box::new(TestIo::default()));
+        let env = Box::leak(Box::new(TestEnv));
+        let fs = &REAL_FS;
+        let runner = Box::leak(Box::new(ScriptedRunner::new(
+            vec![
+                Ok(Output {
+                    status: success_status(),
+                    stdout: b".git\n".to_vec(),
+                    stderr: Vec::new(),
+                }),
+                Ok(Output {
+                    status: success_status(),
+                    stdout: b".git\n".to_vec(),
+                    stderr: Vec::new(),
+                }),
+                Ok(Output {
+                    status: success_status(),
+                    stdout: Vec::new(),
+                    stderr: Vec::new(),
+                }),
+                Ok(Output {
+                    status: success_status(),
+                    stdout: b"next message\n".to_vec(),
+                    stderr: Vec::new(),
+                }),
+                Ok(Output {
+                    status: success_status(),
+                    stdout: b"bbbbbbb\n".to_vec(),
+                    stderr: Vec::new(),
+                }),
+            ],
+            vec![Ok(success_status()), Ok(success_status())],
+        )));
+        let ctx = Ctx {
+            cwd: repo.to_path_buf(),
+            env,
+            fs,
+            io,
+            runner,
+        };
+
+        let outcome = Session::with_state(
+            &ctx,
+            StateDir::new(state_dir.clone()),
+            vec![first_commit, second_commit],
+        )
+        .advance_to_next_commit()
+        .or_abort("advance should succeed");
+
+        let (next_message, next_short_sha, previous_split_count) =
+            advanced_parts(outcome).or_abort("expected Advanced outcome");
+        assert_eq!(next_message.as_str(), "next message");
+        assert_eq!(next_short_sha.as_str(), "bbbbbbb");
+        assert_eq!(previous_split_count.get(), 1);
+        assert_eq!(
+            fs::read_to_string(state_dir.join("current_index")).or_abort("read current_index"),
+            "1\n"
+        );
+        assert_eq!(
+            fs::read_to_string(state_dir.join("split_count")).or_abort("read split_count"),
+            "0\n"
+        );
+    }
+
+    #[test]
+    fn advance_to_next_commit_rejects_invalid_next_message_after_reset() {
+        let dir = TempDir::new().or_abort("tempdir");
+        let repo = dir.path();
+        let rebase_dir = repo.join(".git").join("rebase-merge");
+        let state_dir = repo.join(".git").join("factor");
+        fs::create_dir_all(&rebase_dir).or_abort("create rebase dir");
+        fs::create_dir_all(&state_dir).or_abort("create factor dir");
+
+        let first_commit = CommitSha::new("a".repeat(COMMIT_SHA_HEX_LEN)).or_abort("first sha");
+        let second_commit = CommitSha::new("b".repeat(COMMIT_SHA_HEX_LEN)).or_abort("second sha");
+        fs::write(state_dir.join("split_count"), "1\n").or_abort("write split_count");
+        fs::write(state_dir.join("requires_rebase"), "true\n").or_abort("write requires_rebase");
+        fs::write(state_dir.join("current_index"), "0\n").or_abort("write current_index");
+
+        let io = Box::leak(Box::new(TestIo::default()));
+        let env = Box::leak(Box::new(TestEnv));
+        let fs = &REAL_FS;
+        let runner = Box::leak(Box::new(ScriptedRunner::new(
+            vec![
+                Ok(Output {
+                    status: success_status(),
+                    stdout: b".git\n".to_vec(),
+                    stderr: Vec::new(),
+                }),
+                Ok(Output {
+                    status: success_status(),
+                    stdout: b".git\n".to_vec(),
+                    stderr: Vec::new(),
+                }),
+                Ok(Output {
+                    status: success_status(),
+                    stdout: Vec::new(),
+                    stderr: Vec::new(),
+                }),
+                Ok(Output {
+                    status: success_status(),
+                    stdout: Vec::new(),
+                    stderr: Vec::new(),
+                }),
+                Ok(Output {
+                    status: success_status(),
+                    stdout: b"bbbbbbb\n".to_vec(),
+                    stderr: Vec::new(),
+                }),
+            ],
+            vec![Ok(success_status()), Ok(success_status())],
+        )));
+        let ctx = Ctx {
+            cwd: repo.to_path_buf(),
+            env,
+            fs,
+            io,
+            runner,
+        };
+
+        let err = Session::with_state(
+            &ctx,
+            StateDir::new(state_dir),
+            vec![first_commit, second_commit],
+        )
+        .advance_to_next_commit()
+        .err_or_abort("empty next commit message should fail");
+        assert_eq!(err.to_string(), "git command failed: empty commit message");
+    }
+
+    #[test]
+    fn advance_to_next_commit_rejects_invalid_next_short_sha_after_reset() {
+        let dir = TempDir::new().or_abort("tempdir");
+        let repo = dir.path();
+        let rebase_dir = repo.join(".git").join("rebase-merge");
+        let state_dir = repo.join(".git").join("factor");
+        fs::create_dir_all(&rebase_dir).or_abort("create rebase dir");
+        fs::create_dir_all(&state_dir).or_abort("create factor dir");
+
+        let first_commit = CommitSha::new("a".repeat(COMMIT_SHA_HEX_LEN)).or_abort("first sha");
+        let second_commit = CommitSha::new("b".repeat(COMMIT_SHA_HEX_LEN)).or_abort("second sha");
+        fs::write(state_dir.join("split_count"), "1\n").or_abort("write split_count");
+        fs::write(state_dir.join("requires_rebase"), "true\n").or_abort("write requires_rebase");
+        fs::write(state_dir.join("current_index"), "0\n").or_abort("write current_index");
+
+        let io = Box::leak(Box::new(TestIo::default()));
+        let env = Box::leak(Box::new(TestEnv));
+        let fs = &REAL_FS;
+        let runner = Box::leak(Box::new(ScriptedRunner::new(
+            vec![
+                Ok(Output {
+                    status: success_status(),
+                    stdout: b".git\n".to_vec(),
+                    stderr: Vec::new(),
+                }),
+                Ok(Output {
+                    status: success_status(),
+                    stdout: b".git\n".to_vec(),
+                    stderr: Vec::new(),
+                }),
+                Ok(Output {
+                    status: success_status(),
+                    stdout: Vec::new(),
+                    stderr: Vec::new(),
+                }),
+                Ok(Output {
+                    status: success_status(),
+                    stdout: b"next message\n".to_vec(),
+                    stderr: Vec::new(),
+                }),
+                Ok(Output {
+                    status: success_status(),
+                    stdout: b"not-hex!\n".to_vec(),
+                    stderr: Vec::new(),
+                }),
+            ],
+            vec![Ok(success_status()), Ok(success_status())],
+        )));
+        let ctx = Ctx {
+            cwd: repo.to_path_buf(),
+            env,
+            fs,
+            io,
+            runner,
+        };
+
+        let err = Session::with_state(
+            &ctx,
+            StateDir::new(state_dir),
+            vec![first_commit, second_commit],
+        )
+        .advance_to_next_commit()
+        .err_or_abort("invalid next short sha should fail");
+        assert_eq!(
+            err.to_string(),
+            "git command failed: short SHA contains non-hex characters: not-hex!"
+        );
+    }
+
+    #[test]
+    fn advance_to_next_commit_reports_zero_split_count_on_completion() {
+        let dir = TempDir::new().or_abort("tempdir");
+        let state_dir = dir.path().join(".git").join("factor");
+        fs::create_dir_all(&state_dir).or_abort("create factor dir");
+        fs::write(state_dir.join("split_count"), "0\n").or_abort("write split_count");
+        fs::write(state_dir.join("requires_rebase"), "false\n").or_abort("write requires_rebase");
+
+        let io = Box::leak(Box::new(TestIo::default()));
+        let env = Box::leak(Box::new(TestEnv));
+        let fs = &REAL_FS;
+        let runner = Box::leak(Box::new(TestRunner));
+        let ctx = Ctx {
+            cwd: dir.path().to_path_buf(),
+            env,
+            fs,
+            io,
+            runner,
+        };
+
+        let err = Session::with_state(&ctx, StateDir::new(state_dir.clone()), vec![])
+            .advance_to_next_commit()
+            .err_or_abort("zero final split count should fail");
+        assert_eq!(
+            err.to_string(),
+            "git command failed: split_count is zero at completion"
+        );
+        assert!(
+            !state_dir.exists(),
+            "state dir should be removed before failure"
+        );
+    }
+
+    #[test]
+    fn cmd_abort_uses_current_commit_when_start_head_is_missing() {
+        let dir = TempDir::new().or_abort("tempdir");
+        let repo = dir.path();
+        let state_dir = repo.join(".git").join("factor");
+        fs::create_dir_all(&state_dir).or_abort("create factor dir");
+        let commit = "a".repeat(COMMIT_SHA_HEX_LEN);
+        fs::write(state_dir.join("commits"), format!("{commit}\n")).or_abort("write commits");
+        fs::write(state_dir.join("current_index"), "0\n").or_abort("write current_index");
+
+        let io = Box::leak(Box::new(TestIo::default()));
+        let env = Box::leak(Box::new(TestEnv));
+        let fs = &REAL_FS;
+        let runner = Box::leak(Box::new(ScriptedRunner::new(
+            vec![
+                Ok(Output {
+                    status: success_status(),
+                    stdout: b".git\n".to_vec(),
+                    stderr: Vec::new(),
+                }),
+                Ok(Output {
+                    status: success_status(),
+                    stdout: b".git\n".to_vec(),
+                    stderr: Vec::new(),
+                }),
+                Ok(Output {
+                    status: success_status(),
+                    stdout: b".git\n".to_vec(),
+                    stderr: Vec::new(),
+                }),
+            ],
+            vec![Ok(success_status()), Ok(success_status())],
+        )));
+        let ctx = Ctx {
+            cwd: repo.to_path_buf(),
+            env,
+            fs,
+            io,
+            runner,
+        };
+
+        let code = cmd_abort_in(&ctx).or_abort("abort should succeed");
+        assert_eq!(code, EXIT_OK);
+        assert_eq!(
+            io.out.borrow().as_str(),
+            "FACTOR: Session aborted for current commit step.\n"
+        );
+        assert!(!state_dir.exists(), "state dir should be removed");
+    }
+
+    #[test]
+    fn cmd_abort_propagates_current_commit_error_when_start_head_is_missing() {
+        let dir = TempDir::new().or_abort("tempdir");
+        let repo = dir.path();
+        let state_dir = repo.join(".git").join("factor");
+        fs::create_dir_all(&state_dir).or_abort("create factor dir");
+        let commit = "a".repeat(COMMIT_SHA_HEX_LEN);
+        fs::write(state_dir.join("commits"), format!("{commit}\n")).or_abort("write commits");
+        fs::write(state_dir.join("current_index"), "1\n").or_abort("write current_index");
+
+        let io = Box::leak(Box::new(TestIo::default()));
+        let env = Box::leak(Box::new(TestEnv));
+        let fs = &REAL_FS;
+        let runner = Box::leak(Box::new(ScriptedRunner::new(
+            vec![
+                Ok(Output {
+                    status: success_status(),
+                    stdout: b".git\n".to_vec(),
+                    stderr: Vec::new(),
+                }),
+                Ok(Output {
+                    status: success_status(),
+                    stdout: b".git\n".to_vec(),
+                    stderr: Vec::new(),
+                }),
+            ],
+            Vec::new(),
+        )));
+        let ctx = Ctx {
+            cwd: repo.to_path_buf(),
+            env,
+            fs,
+            io,
+            runner,
+        };
+
+        let err = cmd_abort_in(&ctx)
+            .err_or_abort("missing start_head should fall back to current commit lookup");
+        assert_eq!(
+            err.to_string(),
+            "git command failed: commit index 1 out of range (have 1 commits)"
+        );
+    }
+
+    #[test]
+    fn cmd_start_in_propagates_commit_resolution_error_after_prep() {
+        let dir = TempDir::new().or_abort("tempdir");
+        let repo = dir.path();
+
+        let io = Box::leak(Box::new(TestIo::default()));
+        let env = Box::leak(Box::new(TestEnv));
+        let fs = &REAL_FS;
+        let runner = Box::leak(Box::new(ScriptedRunner::new(
+            vec![
+                Ok(Output {
+                    status: success_status(),
+                    stdout: b".git\n".to_vec(),
+                    stderr: Vec::new(),
+                }),
+                Ok(Output {
+                    status: success_status(),
+                    stdout: b".git\n".to_vec(),
+                    stderr: Vec::new(),
+                }),
+                Ok(Output {
+                    status: success_status(),
+                    stdout: Vec::new(),
+                    stderr: Vec::new(),
+                }),
+                Ok(Output {
+                    status: success_status(),
+                    stdout: b"bad\n".to_vec(),
+                    stderr: Vec::new(),
+                }),
+            ],
+            Vec::new(),
+        )));
+        let ctx = Ctx {
+            cwd: repo.to_path_buf(),
+            env,
+            fs,
+            io,
+            runner,
+        };
+        let exec =
+            NonEmpty::new(NonEmptyString::try_from("true".to_owned()).or_abort("non-empty exec"));
+        let commit_refs = NonEmpty::new(
+            NonEmptyString::try_from("HEAD~1..HEAD".to_owned()).or_abort("non-empty commit ref"),
+        );
+
+        let err = cmd_start_in(&ctx, &exec, &commit_refs)
+            .err_or_abort("commit resolution should fail after prep");
+        assert_eq!(
+            err.to_string(),
+            "git command failed: no commits resolved from the given refs"
+        );
+    }
+
+    #[test]
+    fn cmd_start_in_propagates_sort_error_after_resolution() {
+        let dir = TempDir::new().or_abort("tempdir");
+        let repo = dir.path();
+        let resolved = "a".repeat(COMMIT_SHA_HEX_LEN);
+        let other = "b".repeat(COMMIT_SHA_HEX_LEN);
+
+        let io = Box::leak(Box::new(TestIo::default()));
+        let env = Box::leak(Box::new(TestEnv));
+        let fs = &REAL_FS;
+        let runner = Box::leak(Box::new(ScriptedRunner::new(
+            vec![
+                Ok(Output {
+                    status: success_status(),
+                    stdout: b".git\n".to_vec(),
+                    stderr: Vec::new(),
+                }),
+                Ok(Output {
+                    status: success_status(),
+                    stdout: b".git\n".to_vec(),
+                    stderr: Vec::new(),
+                }),
+                Ok(Output {
+                    status: success_status(),
+                    stdout: Vec::new(),
+                    stderr: Vec::new(),
+                }),
+                Ok(Output {
+                    status: success_status(),
+                    stdout: format!("{resolved}\n").into_bytes(),
+                    stderr: Vec::new(),
+                }),
+                Ok(Output {
+                    status: success_status(),
+                    stdout: format!("{other}\n").into_bytes(),
+                    stderr: Vec::new(),
+                }),
+            ],
+            Vec::new(),
+        )));
+        let ctx = Ctx {
+            cwd: repo.to_path_buf(),
+            env,
+            fs,
+            io,
+            runner,
+        };
+        let exec =
+            NonEmpty::new(NonEmptyString::try_from("true".to_owned()).or_abort("non-empty exec"));
+        let commit_refs =
+            NonEmpty::new(NonEmptyString::try_from("HEAD".to_owned()).or_abort("non-empty ref"));
+
+        let err =
+            cmd_start_in(&ctx, &exec, &commit_refs).err_or_abort("sorting should fail after prep");
+        assert_eq!(
+            err.to_string(),
+            "git command failed: no commits after sorting"
+        );
+    }
+
+    #[test]
+    fn validate_split_target_returns_not_ancestor_when_merge_base_fails() {
+        let io = Box::leak(Box::new(TestIo::default()));
+        let env = Box::leak(Box::new(TestEnv));
+        let fs = Box::leak(Box::new(TestFs));
+        let runner = Box::leak(Box::new(ScriptedRunner::new(
+            Vec::new(),
+            vec![Ok(failure_status())],
+        )));
+        let ctx = Ctx {
+            cwd: PathBuf::from("."),
+            env,
+            fs,
+            io,
+            runner,
+        };
+        let sha = CommitSha::new("0123456789abcdef0123456789abcdef01234567".to_owned())
+            .or_abort("valid sha");
+
+        let err = validate_split_target_in(&ctx, &sha).err_or_abort("non-ancestor should fail");
+        assert_eq!(
+            err.to_string(),
+            format!("commit {sha} is not an ancestor of HEAD")
+        );
+        assert_eq!(runner.status_calls.borrow().len(), 1);
+    }
+
+    #[test]
+    fn validate_split_target_accepts_non_merge_ancestor_commit() {
+        let io = Box::leak(Box::new(TestIo::default()));
+        let env = Box::leak(Box::new(TestEnv));
+        let fs = Box::leak(Box::new(TestFs));
+        let runner = Box::leak(Box::new(ScriptedRunner::new(
+            Vec::new(),
+            vec![Ok(success_status()), Ok(failure_status())],
+        )));
+        let ctx = Ctx {
+            cwd: PathBuf::from("."),
+            env,
+            fs,
+            io,
+            runner,
+        };
+        let sha = CommitSha::new("0123456789abcdef0123456789abcdef01234567".to_owned())
+            .or_abort("valid sha");
+
+        validate_split_target_in(&ctx, &sha).or_abort("non-merge ancestor should be accepted");
+        assert_eq!(runner.status_calls.borrow().len(), 2);
+    }
+
+    #[test]
+    fn advance_to_next_commit_enters_empty_root_cleanup_for_root_sessions() {
+        let io = Box::leak(Box::new(TestIo::default()));
+        let env = Box::leak(Box::new(TestEnv));
+        let fs = &REAL_FS;
+        let runner = Box::leak(Box::new(TestRunner));
+        let state_dir = env::temp_dir().join(format!(
+            "git-factor-root-cleanup-{}-{}",
+            process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .or_abort("current time should be >= unix epoch")
+                .as_nanos(),
+        ));
+        fs::create_dir_all(&state_dir).or_abort("create temp state dir");
+        fs::write(state_dir.join("split_count"), "1\n").or_abort("write split_count state");
+        fs::write(state_dir.join("requires_rebase"), "false\n")
+            .or_abort("write requires_rebase state");
+        fs::write(state_dir.join("is_root"), "true\n").or_abort("write is_root state");
+        let ctx = Ctx {
+            cwd: PathBuf::from("."),
+            env,
+            fs,
+            io,
+            runner,
+        };
+
+        let err = Session::with_state(&ctx, StateDir::new(state_dir.clone()), vec![])
+            .advance_to_next_commit()
+            .err_or_abort("root cleanup should invoke git operations");
+        let err_text = err.to_string();
+        assert!(
+            err_text.contains("unused in parser-only tests"),
+            "unexpected error"
+        );
+        let _ignored = fs::remove_dir_all(&state_dir);
+    }
+
+    #[test]
+    fn advance_to_next_commit_completes_root_cleanup_when_root_is_non_empty() {
+        let io = Box::leak(Box::new(TestIo::default()));
+        let env = Box::leak(Box::new(TestEnv));
+        let fs = &REAL_FS;
+        let runner = Box::leak(Box::new(ScriptedRunner::new(
+            vec![
+                Ok(Output {
+                    status: success_status(),
+                    stdout: b"0123456789abcdef0123456789abcdef01234567\n".to_vec(),
+                    stderr: Vec::new(),
+                }),
+                Ok(Output {
+                    status: success_status(),
+                    stdout: b"100644 blob deadbeef\tREADME.md\n".to_vec(),
+                    stderr: Vec::new(),
+                }),
+            ],
+            Vec::new(),
+        )));
+        let state_dir = env::temp_dir().join(format!(
+            "git-factor-root-cleanup-success-{}-{}",
+            process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .or_abort("current time should be >= unix epoch")
+                .as_nanos(),
+        ));
+        fs::create_dir_all(&state_dir).or_abort("create temp state dir");
+        fs::write(state_dir.join("split_count"), "1\n").or_abort("write split_count state");
+        fs::write(state_dir.join("requires_rebase"), "false\n")
+            .or_abort("write requires_rebase state");
+        fs::write(state_dir.join("is_root"), "true\n").or_abort("write is_root state");
+        let ctx = Ctx {
+            cwd: PathBuf::from("."),
+            env,
+            fs,
+            io,
+            runner,
+        };
+
+        let outcome = Session::with_state(&ctx, StateDir::new(state_dir.clone()), vec![])
+            .advance_to_next_commit()
+            .or_abort("root cleanup should complete when root has tree entries");
+
+        let final_split_count =
+            completed_split_count(&outcome).or_abort("expected Completed outcome");
+        assert_eq!(final_split_count.get(), 1);
+        assert!(!state_dir.exists(), "state dir should be removed");
+        let _ignored = fs::remove_dir_all(&state_dir);
+    }
+
+    #[test]
+    fn advance_to_next_commit_completes_without_root_cleanup_when_not_root() {
+        let io = Box::leak(Box::new(TestIo::default()));
+        let env = Box::leak(Box::new(TestEnv));
+        let fs = &REAL_FS;
+        let runner = Box::leak(Box::new(ScriptedRunner::new(Vec::new(), Vec::new())));
+        let state_dir = env::temp_dir().join(format!(
+            "git-factor-non-root-complete-{}-{}",
+            process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .or_abort("current time should be >= unix epoch")
+                .as_nanos(),
+        ));
+        fs::create_dir_all(&state_dir).or_abort("create temp state dir");
+        fs::write(state_dir.join("split_count"), "1\n").or_abort("write split_count state");
+        fs::write(state_dir.join("requires_rebase"), "false\n")
+            .or_abort("write requires_rebase state");
+        let ctx = Ctx {
+            cwd: PathBuf::from("."),
+            env,
+            fs,
+            io,
+            runner,
+        };
+
+        let outcome = Session::with_state(&ctx, StateDir::new(state_dir.clone()), vec![])
+            .advance_to_next_commit()
+            .or_abort("non-root completion should succeed without root cleanup");
+
+        let final_split_count =
+            completed_split_count(&outcome).or_abort("expected Completed outcome");
+        assert_eq!(final_split_count.get(), 1);
+        assert!(!state_dir.exists(), "state dir should be removed");
+        let _ignored = fs::remove_dir_all(&state_dir);
+    }
+
+    #[test]
+    fn advance_outcome_extractors_panic_on_wrong_variant() {
+        use std::panic::catch_unwind;
+
+        let advanced_panic = catch_unwind(|| {
+            let _ignored = advanced_parts(AdvanceOutcome::Completed {
+                final_split_count: NonZeroU8::new(1).or_abort("non-zero split count"),
+            })
+            .or_abort("expected Advanced outcome");
+        });
+        assert!(
+            advanced_panic.is_err(),
+            "expected Advanced extractor to panic"
+        );
+
+        let completed_panic = catch_unwind(|| {
+            let outcome = AdvanceOutcome::Advanced {
+                next_message: CommitMessage::try_from("next message".to_owned())
+                    .or_abort("valid message"),
+                next_short_sha: ShortSha::try_from("bbbbbbb".to_owned())
+                    .or_abort("valid short sha"),
+                previous_split_count: NonZeroU8::new(1).or_abort("non-zero split count"),
+            };
+            let _ignored = completed_split_count(&outcome).or_abort("expected Completed outcome");
+        });
+        assert!(
+            completed_panic.is_err(),
+            "expected Completed extractor to panic"
+        );
+    }
+
+    #[test]
+    fn run_start_rebase_uses_parent_arg_when_not_root() {
+        let io = Box::leak(Box::new(TestIo::default()));
+        let env = Box::leak(Box::new(TestEnv));
+        let fs = Box::leak(Box::new(OverflowSplitCountFs));
+        let runner = Box::leak(Box::new(ScriptedRunner::new(
+            vec![
+                Ok(Output {
+                    status: success_status(),
+                    stdout: b"abcd123\n".to_vec(),
+                    stderr: Vec::new(),
+                }),
+                Ok(Output {
+                    status: success_status(),
+                    stdout: b".git\n".to_vec(),
+                    stderr: Vec::new(),
+                }),
+            ],
+            vec![Ok(success_status())],
+        )));
+        let ctx = Ctx {
+            cwd: PathBuf::from("."),
+            env,
+            fs,
+            io,
+            runner,
+        };
+        let resolved = NonEmpty::new(
+            CommitSha::new("1111111111111111111111111111111111111111".to_owned())
+                .or_abort("valid sha"),
+        );
+        let base_sha = CommitSha::new("2222222222222222222222222222222222222222".to_owned())
+            .or_abort("valid sha");
+
+        run_start_rebase_in(
+            &ctx,
+            &resolved,
+            &base_sha,
+            false,
+            &StateDir::new(PathBuf::from(".git/factor")),
+        )
+        .or_abort("non-root rebase should succeed");
+
+        let calls = runner.status_calls.borrow();
+        let args = calls.first().or_abort("status call should be captured");
+        assert!(!args.iter().any(|arg| arg == "--root"));
+        assert!(
+            args.iter()
+                .any(|arg| arg == "2222222222222222222222222222222222222222^")
+        );
+    }
+
+    #[test]
+    fn run_start_rebase_uses_root_arg_when_root() {
+        let io = Box::leak(Box::new(TestIo::default()));
+        let env = Box::leak(Box::new(TestEnv));
+        let fs = Box::leak(Box::new(OverflowSplitCountFs));
+        let runner = Box::leak(Box::new(ScriptedRunner::new(
+            vec![
+                Ok(Output {
+                    status: success_status(),
+                    stdout: b"abcd123\n".to_vec(),
+                    stderr: Vec::new(),
+                }),
+                Ok(Output {
+                    status: success_status(),
+                    stdout: b".git\n".to_vec(),
+                    stderr: Vec::new(),
+                }),
+            ],
+            vec![Ok(success_status())],
+        )));
+        let ctx = Ctx {
+            cwd: PathBuf::from("."),
+            env,
+            fs,
+            io,
+            runner,
+        };
+        let resolved = NonEmpty::new(
+            CommitSha::new("1111111111111111111111111111111111111111".to_owned())
+                .or_abort("valid sha"),
+        );
+        let base_sha = CommitSha::new("2222222222222222222222222222222222222222".to_owned())
+            .or_abort("valid sha");
+
+        run_start_rebase_in(
+            &ctx,
+            &resolved,
+            &base_sha,
+            true,
+            &StateDir::new(PathBuf::from(".git/factor")),
+        )
+        .or_abort("root rebase should succeed");
+
+        let calls = runner.status_calls.borrow();
+        let args = calls.first().or_abort("status call should be captured");
+        assert!(args.iter().any(|arg| arg == "--root"));
+        assert!(
+            !args
+                .iter()
+                .any(|arg| arg == "2222222222222222222222222222222222222222^")
+        );
+    }
+
+    #[test]
+    fn run_start_rebase_propagates_status_io_errors() {
+        let io = Box::leak(Box::new(TestIo::default()));
+        let env = Box::leak(Box::new(TestEnv));
+        let fs = Box::leak(Box::new(TestFs));
+        let runner = Box::leak(Box::new(ScriptedRunner::new(
+            vec![Ok(Output {
+                status: success_status(),
+                stdout: b"abcd123\n".to_vec(),
+                stderr: Vec::new(),
+            })],
+            vec![Err(io::Error::other("runner failed"))],
+        )));
+        let ctx = Ctx {
+            cwd: PathBuf::from("."),
+            env,
+            fs,
+            io,
+            runner,
+        };
+        let resolved = NonEmpty::new(
+            CommitSha::new("1111111111111111111111111111111111111111".to_owned())
+                .or_abort("valid sha"),
+        );
+        let base_sha = CommitSha::new("2222222222222222222222222222222222222222".to_owned())
+            .or_abort("valid sha");
+
+        let err = run_start_rebase_in(
+            &ctx,
+            &resolved,
+            &base_sha,
+            false,
+            &StateDir::new(PathBuf::from(".git/factor")),
+        )
+        .err_or_abort("runner status failure should map to git command error");
+        assert_eq!(
+            err.to_string(),
+            "git command failed: git rebase: runner failed"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_start_rebase_reports_non_utf8_editor_path() {
+        let io = Box::leak(Box::new(TestIo::default()));
+        let env = Box::leak(Box::new(TestEnv));
+        let fs = Box::leak(Box::new(NonUtf8Fs));
+        let runner = Box::leak(Box::new(TestRunner));
+        let ctx = Ctx {
+            cwd: PathBuf::from("."),
+            env,
+            fs,
+            io,
+            runner,
+        };
+        let resolved = NonEmpty::new(
+            CommitSha::new("1111111111111111111111111111111111111111".to_owned())
+                .or_abort("valid sha"),
+        );
+        let base_sha = CommitSha::new("2222222222222222222222222222222222222222".to_owned())
+            .or_abort("valid sha");
+
+        let err = run_start_rebase_in(
+            &ctx,
+            &resolved,
+            &base_sha,
+            false,
+            &StateDir::new(PathBuf::from(".git/factor")),
+        )
+        .err_or_abort("non-utf8 editor path should fail");
+        assert_eq!(
+            err.to_string(),
+            "git command failed: editor path is not valid UTF-8"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn non_utf8_fs_delegates_non_canonicalize_operations() {
+        let fs = NonUtf8Fs;
+        let path = Path::new("ignored");
+
+        fs.create_dir_all(path)
+            .or_abort("create_dir_all should succeed");
+        assert!(!fs.exists(path));
+        assert!(!fs.is_dir(path));
+        let read_err = fs
+            .read_to_string(path)
+            .err_or_abort("read_to_string should return not found");
+        assert_eq!(read_err.kind(), io::ErrorKind::NotFound);
+        fs.remove_dir_all(path)
+            .or_abort("remove_dir_all should succeed");
+        fs.remove_file(path).or_abort("remove_file should succeed");
+        fs.write_string(path, "hello")
+            .or_abort("write_string should succeed");
+    }
+
+    #[test]
+    fn proptest_run_non_property_unit_suite() {
+        advance_to_next_commit_reports_zero_split_count_on_advance();
+        advance_to_next_commit_reports_zero_split_count_on_completion();
+        advance_to_next_commit_returns_next_commit_metadata_on_advance();
+        advance_to_next_commit_rejects_invalid_next_message_after_reset();
+        advance_to_next_commit_rejects_invalid_next_short_sha_after_reset();
+        advance_to_next_commit_completes_root_cleanup_when_root_is_non_empty();
+        advance_to_next_commit_completes_without_root_cleanup_when_not_root();
+        advance_to_next_commit_enters_empty_root_cleanup_for_root_sessions();
+        advance_outcome_extractors_panic_on_wrong_variant();
+        advance_to_next_commit_reports_current_index_overflow();
+        cmd_abort_propagates_current_commit_error_when_start_head_is_missing();
+        cmd_abort_uses_current_commit_when_start_head_is_missing();
+        cmd_start_in_propagates_commit_resolution_error_after_prep();
+        cmd_start_in_propagates_sort_error_after_resolution();
+        commit_message_try_from_rejects_invalid_values();
+        failure_status_reports_failure();
+        increment_split_count_reports_overflow();
+        io_line_methods_cover_default_real_and_test_impls();
+        overflow_split_count_fs_trait_methods_are_exercised();
+        #[cfg(unix)]
+        non_utf8_fs_delegates_non_canonicalize_operations();
+        #[cfg(unix)]
+        run_start_rebase_reports_non_utf8_editor_path();
+        run_start_rebase_propagates_status_io_errors();
+        run_start_rebase_uses_parent_arg_when_not_root();
+        run_start_rebase_uses_root_arg_when_root();
+        session_expected_tree_propagates_current_commit_lookup_error();
+        session_from_active_loads_state_and_accessors();
+        session_from_active_rejects_invalid_commit_entries();
+        short_sha_try_from_rejects_invalid_values();
+        success_status_reports_success();
+        validate_split_target_accepts_non_merge_ancestor_commit();
+        validate_split_target_returns_not_ancestor_when_merge_base_fails();
     }
 }
+
+#[cfg(test)]
+mod tests;

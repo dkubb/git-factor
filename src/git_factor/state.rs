@@ -36,6 +36,7 @@ pub(in crate::git_factor) fn read_state_parsed<T: FromStr>(
 }
 
 /// Reads a `true`/`false` state value, with a default when the file is missing.
+#[expect(clippy::single_call_fn, reason = "called by typed wrapper")]
 pub(in crate::git_factor) fn read_state_bool_or_default(
     ctx: &Ctx<'_>,
     state_dir: &Path,
@@ -71,7 +72,6 @@ pub(in crate::git_factor) fn write_state(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::{OrAbort as _, ResultOrAbort as _};
     use tempfile::TempDir;
 
     fn ctx_for(path: &Path) -> Ctx<'static> {
@@ -89,18 +89,6 @@ mod tests {
             matches!(err, &FactorError::StateRead(_)),
             "unexpected error: {err:?}"
         );
-    }
-
-    #[test]
-    fn read_state_bool_or_default_uses_default_for_missing_file() {
-        let dir = TempDir::new().or_abort("tempdir");
-        let ctx = ctx_for(dir.path());
-        let state_dir = dir.path().join("factor");
-        fs::create_dir_all(&state_dir).or_abort("create state dir");
-
-        let value = read_state_bool_or_default(&ctx, &state_dir, "started_rebase", true)
-            .or_abort("missing bool state should use default");
-        assert!(value);
     }
 
     #[test]

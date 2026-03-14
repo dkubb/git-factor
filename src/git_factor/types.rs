@@ -82,13 +82,6 @@ impl TreeHash {
 
     /// Creates a new `TreeHash` from a string, validating it is exactly
     /// 40 hexadecimal characters.
-    #[cfg_attr(
-        test,
-        expect(
-            clippy::single_call_fn,
-            reason = "typed tree-hash parsing stays centralized while only tests use it so far"
-        )
-    )]
     pub(in crate::git_factor) fn new(raw: &str) -> Result<Self, FactorError> {
         let sha = match Sha::parse(raw.to_owned()) {
             Ok(sha) => sha,
