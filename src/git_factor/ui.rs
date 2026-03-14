@@ -88,3 +88,52 @@ pub(in crate::git_factor) fn print_hints_with_remaining_in(
 
     Ok(())
 }
+
+/// Prints the session-started guide with pending file summary.
+pub(in crate::git_factor) fn print_session_started(
+    ctx: &Ctx<'_>,
+    started: &str,
+    message: &str,
+) -> Result<(), FactorError> {
+    let stat_output = git_output(ctx, &["diff", "--stat"])?;
+    let remaining = stat_output.lines().last().unwrap_or_default().to_owned();
+    let untracked_output = git_output(ctx, &["ls-files", "--others", "--exclude-standard"])?;
+    let original_message = format!("ORIGINAL MESSAGE: {message}");
+    out_lines(ctx, &[started, original_message.as_str(), "UNSTAGED:"])?;
+    for line in stat_output.lines() {
+        ctx.outln(&format!("  {line}"))?;
+    }
+    if !untracked_output.is_empty() {
+        ctx.outln("UNTRACKED:")?;
+        for line in untracked_output.lines() {
+            ctx.outln(&format!("  {line}"))?;
+        }
+    }
+    let is_advance = started.starts_with("FACTOR: Now splitting ");
+    if is_advance {
+        out_lines(
+            ctx,
+            &[
+                "",
+                "NEXT: Stage changes for the next commit, then run:",
+                "  git factor --continue --message \"type: description\"",
+                "",
+            ],
+        )?;
+    } else {
+        out_lines(
+            ctx,
+            &[
+                "",
+                "NEXT: Stage changes for the first atomic commit, then run:",
+                "  git factor --continue --message \"type: description\"",
+                "",
+                "Run git factor --help for the full workflow guide.",
+                "",
+            ],
+        )?;
+    }
+    print_hints_with_remaining_in(ctx, remaining.as_str())?;
+
+    Ok(())
+}
