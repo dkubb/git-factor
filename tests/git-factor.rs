@@ -12,6 +12,7 @@ mod support;
 
 #[cfg(test)]
 mod tests {
+    use std::env;
     use std::fs;
     use std::path::Path;
     use std::process::{self, Command};
@@ -302,6 +303,95 @@ EXAMPLES:
             .stderr(predicate::str::contains(
                 "unexpected argument '--definitely-not-a-real-flag'",
             ));
+    }
+
+    #[test]
+    fn start_rejects_dirty_worktree_with_actionable_error() {
+        let dir = init_repo();
+        let repo = dir.path();
+
+        commit_file(repo, "file.txt", "one\n", "chore: base");
+        must_ok(fs::write(repo.join("file.txt"), "one\ndirty\n"));
+
+        Command::new(git_factor_bin())
+            .current_dir(repo)
+            .args(["--exec", "true", "HEAD"])
+            .assert()
+            .code(EXIT_SOFTWARE)
+            .stdout(predicate::str::is_empty())
+            .stderr(predicate::str::diff(
+                "git command failed: working tree must be clean before starting; stash, commit, or remove local changes\nSTATUS:\n M file.txt\n"
+                    .to_owned(),
+            ));
+    }
+
+    #[test]
+    fn start_surfaces_status_command_exit_code() {
+        let dir = init_repo();
+        let repo = dir.path();
+        let (_wrapper_dir, bin, count_file) = make_ordered_git_wrapper(&[GitWrapperStep {
+            args: vec!["status".to_owned(), "--porcelain=v1".to_owned()],
+            exit_code: 17,
+            stderr: String::new(),
+            stdout: String::new(),
+        }]);
+        let path = {
+            let mut paths = vec![bin];
+            if let Some(current) = env::var_os("PATH") {
+                paths.extend(env::split_paths(&current));
+            }
+            env::join_paths(paths).unwrap_or_else(|_| process::abort())
+        };
+
+        commit_file(repo, "file.txt", "one\n", "chore: base");
+
+        Command::new(git_factor_bin())
+            .current_dir(repo)
+            .env("PATH", path)
+            .args(["--exec", "true", "HEAD"])
+            .assert()
+            .code(EXIT_SOFTWARE)
+            .stdout(predicate::str::is_empty())
+            .stderr(predicate::str::diff(
+                "git command failed: git status --porcelain=v1 failed (exit 17)\n".to_owned(),
+            ));
+
+        assert_eq!(must_ok(fs::read_to_string(count_file)).trim(), "1");
+    }
+
+    #[test]
+    fn start_rejects_unexpected_status_stderr() {
+        let dir = init_repo();
+        let repo = dir.path();
+        let (_wrapper_dir, bin, count_file) = make_ordered_git_wrapper(&[GitWrapperStep {
+            args: vec!["status".to_owned(), "--porcelain=v1".to_owned()],
+            exit_code: 0,
+            stderr: "warning: status noise\n".to_owned(),
+            stdout: String::new(),
+        }]);
+        let path = {
+            let mut paths = vec![bin];
+            if let Some(current) = env::var_os("PATH") {
+                paths.extend(env::split_paths(&current));
+            }
+            env::join_paths(paths).unwrap_or_else(|_| process::abort())
+        };
+
+        commit_file(repo, "file.txt", "one\n", "chore: base");
+
+        Command::new(git_factor_bin())
+            .current_dir(repo)
+            .env("PATH", path)
+            .args(["--exec", "true", "HEAD"])
+            .assert()
+            .code(EXIT_SOFTWARE)
+            .stdout(predicate::str::is_empty())
+            .stderr(predicate::str::diff(
+                "git command failed: git status --porcelain=v1 produced unexpected stderr: warning: status noise\n"
+                    .to_owned(),
+            ));
+
+        assert_eq!(must_ok(fs::read_to_string(count_file)).trim(), "1");
     }
 
     #[test]

@@ -435,6 +435,15 @@ impl<'ctx> Session<'ctx> {
     }
 }
 
+/// Allowed repository states at gate boundaries.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RepoStatePolicy {
+    /// No staged, unstaged, or untracked changes are allowed.
+    FullyClean,
+    /// Staged changes are allowed, but unstaged or untracked changes are not.
+    StagedOnly,
+}
+
 /// Returns the path to the factor state directory.
 fn factor_dir_in(ctx: &Ctx<'_>) -> Result<PathBuf, FactorError> {
     Ok(git_dir_in(ctx)?.join("factor"))
@@ -469,6 +478,95 @@ fn is_mid_rebase_in(ctx: &Ctx<'_>) -> bool {
     git_dir_in(ctx).is_ok_and(|dir| {
         ctx.fs.is_dir(&dir.join(REBASE_MERGE_DIR)) || ctx.fs.is_dir(&dir.join(REBASE_APPLY_DIR))
     })
+}
+
+/// Returns the exact porcelain status output, asserting success and empty stderr.
+#[expect(
+    clippy::single_call_fn,
+    reason = "status normalization is centralized for repo cleanliness checks"
+)]
+fn repo_status_stdout(ctx: &Ctx<'_>) -> Result<String, FactorError> {
+    let output = ctx
+        .runner
+        .output("git", &["status", "--porcelain=v1"], &ctx.cwd)
+        .map_err(|err| {
+            FactorError::GitCommand(non_empty_msg(format!("git status --porcelain=v1: {err}")))
+        })?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+
+    if !output.status.success() {
+        return Err(FactorError::GitCommand(non_empty_msg(format!(
+            "git status --porcelain=v1 failed (exit {})",
+            output.status.code().unwrap_or(EXIT_SOFTWARE)
+        ))));
+    }
+
+    if !stderr.is_empty() {
+        return Err(FactorError::GitCommand(non_empty_msg(format!(
+            "git status --porcelain=v1 produced unexpected stderr: {}",
+            stderr.trim_end()
+        ))));
+    }
+
+    Ok(stdout)
+}
+
+/// Returns whether the porcelain output matches the required gate-boundary policy.
+#[cfg_attr(
+    not(test),
+    expect(
+        clippy::single_call_fn,
+        reason = "repo-state policy evaluation is intentionally centralized"
+    )
+)]
+fn repo_status_matches_policy(stdout: &str, policy: RepoStatePolicy) -> bool {
+    for line in stdout.lines() {
+        if line.is_empty() {
+            continue;
+        }
+        if matches!(policy, RepoStatePolicy::FullyClean) {
+            return false;
+        }
+        if line.starts_with("??") || line.starts_with("!!") {
+            return false;
+        }
+        let bytes = line.as_bytes();
+        if bytes.get(1) != Some(&b' ') {
+            return false;
+        }
+    }
+
+    true
+}
+
+/// Enforces the expected repository cleanliness invariant.
+#[cfg_attr(
+    not(test),
+    expect(
+        clippy::single_call_fn,
+        reason = "repo-state checks stay centralized so start and continue use the same contract"
+    )
+)]
+fn ensure_repo_state(
+    ctx: &Ctx<'_>,
+    policy: RepoStatePolicy,
+    message: &str,
+) -> Result<(), FactorError> {
+    let stdout = repo_status_stdout(ctx)?;
+    if repo_status_matches_policy(stdout.as_str(), policy) {
+        return Ok(());
+    }
+
+    let trimmed = stdout.trim_end();
+    let mut full = message.to_owned();
+    if !trimmed.is_empty() {
+        full.push_str("\nSTATUS:\n");
+        full.push_str(trimmed);
+    }
+
+    Err(FactorError::GitCommand(non_empty_msg(full)))
 }
 
 /// Runs a git command with optional environment overrides.
@@ -782,6 +880,12 @@ fn run_with_args_vec(ctx: &Ctx<'_>, args: Vec<OsString>) -> Result<i32, FactorEr
         )));
     }
 
+    ensure_repo_state(
+        ctx,
+        RepoStatePolicy::FullyClean,
+        "working tree must be clean before starting; stash, commit, or remove local changes",
+    )?;
+
     Err(FactorError::Usage(non_empty_msg(
         "start workflow lands in later commits".to_owned(),
     )))
@@ -791,8 +895,9 @@ fn run_with_args_vec(ctx: &Ctx<'_>, args: Vec<OsString>) -> Result<i32, FactorEr
 mod tests {
     use super::{
         CommitMessage, Ctx, CurrentIndex, FactorError, Io, REAL_ENV, REAL_FS, REAL_RUNNER,
-        SessionPhase, ShortSha, SplitCount, StateBool, StateDir, StateFileKey, build_ctx_from_cwd,
-        main_entry_with_vec, run_and_report_with_args_vec, run_with_args_vec,
+        RepoStatePolicy, SessionPhase, ShortSha, SplitCount, StateBool, StateDir, StateFileKey,
+        build_ctx_from_cwd, ensure_repo_state, main_entry_with_vec, repo_status_matches_policy,
+        run_and_report_with_args_vec, run_with_args_vec,
     };
     use crate::exit_codes::{EXIT_OK, EXIT_USAGE};
     use crate::git_factor::non_empty_msg;
@@ -803,6 +908,7 @@ mod tests {
     use std::fs;
     use std::io;
     use std::path::{Path, PathBuf};
+    use std::process::Command;
     use tempfile::TempDir;
 
     #[derive(Default)]
@@ -869,6 +975,78 @@ mod tests {
         assert!(StateBool::True.as_bool());
         assert_eq!(StateBool::from_bool(false), StateBool::False);
         assert_eq!(StateBool::from_bool(true), StateBool::True);
+    }
+
+    #[test]
+    fn repo_status_matches_policy_distinguishes_clean_staged_and_dirty_lines() {
+        assert!(repo_status_matches_policy("", RepoStatePolicy::FullyClean));
+        assert!(repo_status_matches_policy(
+            "\n",
+            RepoStatePolicy::StagedOnly
+        ));
+        assert!(repo_status_matches_policy(
+            "M  file.txt\n",
+            RepoStatePolicy::StagedOnly
+        ));
+        assert!(!repo_status_matches_policy(
+            " M file.txt\n",
+            RepoStatePolicy::StagedOnly
+        ));
+        assert!(!repo_status_matches_policy(
+            "?? file.txt\n",
+            RepoStatePolicy::StagedOnly
+        ));
+        assert!(!repo_status_matches_policy(
+            "!! file.txt\n",
+            RepoStatePolicy::StagedOnly
+        ));
+        assert!(!repo_status_matches_policy(
+            "MM file.txt\n",
+            RepoStatePolicy::StagedOnly
+        ));
+        assert!(!repo_status_matches_policy(
+            "M  file.txt\n",
+            RepoStatePolicy::FullyClean
+        ));
+    }
+
+    #[test]
+    fn ensure_repo_state_uses_git_status_to_enforce_cleanliness() {
+        let dir = TempDir::new().or_abort("tempdir");
+        let io = Box::leak(Box::new(BufferIo::default()));
+        let ctx = ctx_for(dir.path(), io);
+
+        let status = Command::new("git")
+            .current_dir(dir.path())
+            .args(["init", "--quiet"])
+            .status()
+            .or_abort("git init");
+        assert!(status.success());
+
+        ensure_repo_state(&ctx, RepoStatePolicy::FullyClean, "repo must be clean")
+            .or_abort("clean repo should pass");
+
+        fs::write(dir.path().join("file.txt"), "dirty\n").or_abort("write dirty file");
+
+        let err = ensure_repo_state(&ctx, RepoStatePolicy::FullyClean, "repo must be clean")
+            .err_or_abort("dirty repo should fail");
+        assert_eq!(
+            err.to_string(),
+            "git command failed: repo must be clean\nSTATUS:\n?? file.txt"
+        );
+
+        let missing_ctx = ctx_for(dir.path().join("missing").as_path(), io);
+        let missing_err = ensure_repo_state(
+            &missing_ctx,
+            RepoStatePolicy::FullyClean,
+            "repo must be clean",
+        )
+        .err_or_abort("missing cwd should fail");
+        assert!(
+            missing_err
+                .to_string()
+                .starts_with("git command failed: git status --porcelain=v1: ")
+        );
     }
 
     #[test]
