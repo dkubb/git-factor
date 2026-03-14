@@ -234,3 +234,269 @@ impl Fs for NthReadFailureFs {
     fs_delegate!(remove_file);
     fs_delegate!(write_string);
 }
+
+#[derive(Clone, Default)]
+struct ScriptedRunner {
+    outputs: RefCell<HashMap<String, VecDeque<Output>>>,
+    statuses: RefCell<HashMap<String, VecDeque<ExitStatus>>>,
+}
+
+impl ScriptedRunner {
+    fn output_key(bin: &str, args: &[&str], cwd: &Path) -> String {
+        format!(
+            "output\x1f{bin}\x1f{}\x1f{}",
+            cwd.display(),
+            args.join("\x1f")
+        )
+    }
+
+    fn status_key(
+        bin: &str,
+        args: &[&str],
+        envs: &[(&str, &str)],
+        quiet: bool,
+        cwd: &Path,
+    ) -> String {
+        let env_key = envs
+            .iter()
+            .map(|&(key, value)| format!("{key}={value}"))
+            .collect::<Vec<String>>()
+            .join("\x1f");
+        format!(
+            "status\x1f{bin}\x1f{}\x1f{quiet}\x1f{env_key}\x1f{}",
+            cwd.display(),
+            args.join("\x1f")
+        )
+    }
+
+    fn with_output(self, bin: &str, args: &[&str], cwd: &Path, stdout: &str) -> Self {
+        self.with_output_status(bin, args, cwd, 0, stdout, "")
+    }
+
+    fn with_output_status(
+        self,
+        bin: &str,
+        args: &[&str],
+        cwd: &Path,
+        code: i32,
+        stdout: &str,
+        stderr: &str,
+    ) -> Self {
+        let key = Self::output_key(bin, args, cwd);
+        self.outputs
+            .borrow_mut()
+            .entry(key)
+            .or_default()
+            .push_back(Output {
+                status: exit_status(code),
+                stdout: stdout.as_bytes().to_vec(),
+                stderr: stderr.as_bytes().to_vec(),
+            });
+        self
+    }
+
+    fn with_status(
+        self,
+        bin: &str,
+        args: &[&str],
+        envs: &[(&str, &str)],
+        quiet: bool,
+        cwd: &Path,
+        code: i32,
+    ) -> Self {
+        let key = Self::status_key(bin, args, envs, quiet, cwd);
+        self.statuses
+            .borrow_mut()
+            .entry(key)
+            .or_default()
+            .push_back(exit_status(code));
+        self
+    }
+}
+
+impl Runner for ScriptedRunner {
+    fn output(&self, bin: &str, args: &[&str], cwd: &Path) -> io::Result<Output> {
+        let key = Self::output_key(bin, args, cwd);
+        if let Some(output) = self
+            .outputs
+            .borrow_mut()
+            .get_mut(&key)
+            .and_then(VecDeque::pop_front)
+        {
+            return Ok(output);
+        }
+        if bin == "git" && args == ["rev-parse", "--git-dir"] {
+            return Ok(Output {
+                status: exit_status(0),
+                stdout: b".git\n".to_vec(),
+                stderr: Vec::new(),
+            });
+        }
+        Err(io::Error::other(format!("unexpected output call: {key}")))
+    }
+
+    fn status(
+        &self,
+        bin: &str,
+        args: &[&str],
+        envs: &[(&str, &str)],
+        quiet: bool,
+        cwd: &Path,
+    ) -> io::Result<ExitStatus> {
+        let key = Self::status_key(bin, args, envs, quiet, cwd);
+        self.statuses
+            .borrow_mut()
+            .get_mut(&key)
+            .and_then(VecDeque::pop_front)
+            .ok_or_else(|| io::Error::other(format!("unexpected status call: {key}")))
+    }
+}
+
+struct NthRunnerFailure {
+    calls: Mutex<usize>,
+    fail_at: usize,
+    inner: ScriptedRunner,
+}
+
+impl NthRunnerFailure {
+    fn new(inner: ScriptedRunner, fail_at: usize) -> Self {
+        Self {
+            inner,
+            fail_at,
+            calls: Mutex::new(0),
+        }
+    }
+
+    fn should_fail(&self) -> bool {
+        let mut calls = self.calls.lock().or_abort("runner calls lock");
+        *calls = calls.checked_add(1).or_abort("counter should not overflow");
+        *calls == self.fail_at
+    }
+}
+
+impl Runner for NthRunnerFailure {
+    fn output(&self, bin: &str, args: &[&str], cwd: &Path) -> io::Result<Output> {
+        if self.should_fail() {
+            return Err(io::Error::other("forced runner failure"));
+        }
+        self.inner.output(bin, args, cwd)
+    }
+
+    fn status(
+        &self,
+        bin: &str,
+        args: &[&str],
+        envs: &[(&str, &str)],
+        quiet: bool,
+        cwd: &Path,
+    ) -> io::Result<ExitStatus> {
+        if self.should_fail() {
+            return Err(io::Error::other("forced runner failure"));
+        }
+        self.inner.status(bin, args, envs, quiet, cwd)
+    }
+}
+
+struct RebaseContinueCompletesRunner {
+    completed: Mutex<bool>,
+    inner: ScriptedRunner,
+    rebase_dir: PathBuf,
+}
+
+impl RebaseContinueCompletesRunner {
+    fn new(inner: ScriptedRunner, rebase_dir: PathBuf) -> Self {
+        Self {
+            inner,
+            rebase_dir,
+            completed: Mutex::new(false),
+        }
+    }
+}
+
+impl Runner for RebaseContinueCompletesRunner {
+    fn output(&self, bin: &str, args: &[&str], cwd: &Path) -> io::Result<Output> {
+        self.inner.output(bin, args, cwd)
+    }
+
+    fn status(
+        &self,
+        bin: &str,
+        args: &[&str],
+        envs: &[(&str, &str)],
+        quiet: bool,
+        cwd: &Path,
+    ) -> io::Result<ExitStatus> {
+        if bin == "git" && args == ["rebase", "--continue"] {
+            let mut completed = self.completed.lock().map_err(|error| {
+                io::Error::other(format!(
+                    "rebase completion lock should not be poisoned: {error}"
+                ))
+            })?;
+            if !*completed {
+                drop(fs::remove_dir_all(&self.rebase_dir));
+                *completed = true;
+            }
+        }
+        self.inner.status(bin, args, envs, quiet, cwd)
+    }
+}
+
+struct RebaseStartPausesRunner {
+    inner: ScriptedRunner,
+    rebase_dir: PathBuf,
+}
+
+impl RebaseStartPausesRunner {
+    fn new(inner: ScriptedRunner, rebase_dir: PathBuf) -> Self {
+        Self { inner, rebase_dir }
+    }
+}
+
+impl Runner for RebaseStartPausesRunner {
+    fn output(&self, bin: &str, args: &[&str], cwd: &Path) -> io::Result<Output> {
+        self.inner.output(bin, args, cwd)
+    }
+
+    fn status(
+        &self,
+        bin: &str,
+        args: &[&str],
+        envs: &[(&str, &str)],
+        quiet: bool,
+        cwd: &Path,
+    ) -> io::Result<ExitStatus> {
+        let status = self.inner.status(bin, args, envs, quiet, cwd)?;
+        if bin == "git"
+            && args.first() == Some(&"rebase")
+            && args.contains(&"--interactive")
+            && status.success()
+        {
+            fs::create_dir_all(&self.rebase_dir).or_abort("create rebase-merge");
+        }
+        Ok(status)
+    }
+}
+
+struct BashStatusFailureRunner {
+    inner: ScriptedRunner,
+}
+
+impl Runner for BashStatusFailureRunner {
+    fn output(&self, bin: &str, args: &[&str], cwd: &Path) -> io::Result<Output> {
+        self.inner.output(bin, args, cwd)
+    }
+
+    fn status(
+        &self,
+        bin: &str,
+        args: &[&str],
+        envs: &[(&str, &str)],
+        quiet: bool,
+        cwd: &Path,
+    ) -> io::Result<ExitStatus> {
+        if bin == "bash" && args == ["-c", "true"] {
+            return Err(io::Error::other("forced bash status failure"));
+        }
+        self.inner.status(bin, args, envs, quiet, cwd)
+    }
+}
