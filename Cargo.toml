@@ -15,3 +15,6 @@ path = "src/bin/git-sequence-editor.rs"
 [dependencies]
 clap = { version = "4.5.56", features = ["derive"] }
 thiserror = "2.0.18"
+
+[dev-dependencies]
+tempfile = { version = "3.24.0", default-features = false }
