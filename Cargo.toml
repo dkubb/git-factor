@@ -30,9 +30,13 @@ edition = "2024"
 publish = false
 license = "LicenseRef-Private"
 
-[dependencies]
+[workspace.dependencies]
 clap = { version = "4.5.56", features = ["derive"] }
 thiserror = "2.0.18"
+
+[dependencies]
+clap = { workspace = true }
+thiserror = { workspace = true }
 
 [dev-dependencies]
 proptest = "1.9.0"
