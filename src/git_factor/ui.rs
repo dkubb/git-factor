@@ -435,4 +435,131 @@ mod tests {
         );
     }
 
+    #[test]
+    fn print_session_started_reports_single_commit_and_untracked_paths() {
+        let dir = TempDir::new().or_abort("tempdir");
+        let references_dir = dir.path().join("references");
+        fs::create_dir_all(&references_dir).or_abort("create references dir");
+        fs::write(references_dir.join("rust.md"), "# rust\n").or_abort("write rust reference");
+
+        let runner = HintRunner {
+            diff_stat: " file.txt | 1 +\n 1 file changed, 1 insertion(+)\n".to_owned(),
+            untracked: "new.txt\n".to_owned(),
+            toplevel: dir.path().to_path_buf(),
+            fail_on: None,
+        };
+        let io = BufferIo::default();
+        let env = HintEnv {
+            cwd: dir.path().to_path_buf(),
+            claude_code: false,
+        };
+        let status = runner
+            .status("git", &["status"], &[], true, dir.path())
+            .or_abort("runner status");
+        assert!(status.success(), "status should be success");
+        let unexpected = runner
+            .output("git", &["unexpected"], dir.path())
+            .err_or_abort("unexpected command should fail");
+        assert!(
+            unexpected.to_string().contains("unexpected args"),
+            "unexpected error: {unexpected:?}"
+        );
+        let ctx = Ctx {
+            runner: &runner,
+            cwd: dir.path().to_path_buf(),
+            io: &io,
+            env: &env,
+            fs: &REAL_FS,
+        };
+
+        print_session_started(
+            &ctx,
+            "FACTOR: Split session started for aaaaaaa.",
+            "feat: example",
+        )
+        .or_abort("print_session_started should succeed");
+        let stdout = io.stdout();
+        assert!(
+            stdout.contains("FACTOR: Split session started for aaaaaaa."),
+            "stdout: {stdout}"
+        );
+        assert!(
+            stdout.contains("ORIGINAL MESSAGE: feat: example"),
+            "stdout: {stdout}"
+        );
+        assert!(stdout.contains("UNTRACKED:"), "stdout: {stdout}");
+        assert!(stdout.contains("new.txt"), "stdout: {stdout}");
+        assert!(
+            stdout.contains("Run git factor --help for the full workflow guide."),
+            "stdout: {stdout}"
+        );
+    }
+
+    #[test]
+    fn print_session_started_reports_advance_guidance() {
+        let dir = TempDir::new().or_abort("tempdir");
+        let runner = HintRunner {
+            diff_stat: " file.txt | 1 +\n 1 file changed, 1 insertion(+)\n".to_owned(),
+            untracked: String::new(),
+            toplevel: dir.path().to_path_buf(),
+            fail_on: None,
+        };
+        let io = BufferIo::default();
+        let env = HintEnv {
+            cwd: dir.path().to_path_buf(),
+            claude_code: false,
+        };
+        let ctx = Ctx {
+            runner: &runner,
+            cwd: dir.path().to_path_buf(),
+            io: &io,
+            env: &env,
+            fs: &REAL_FS,
+        };
+
+        print_session_started(&ctx, "FACTOR: Now splitting aaaaaaa.", "feat: example")
+            .or_abort("print_session_started should succeed");
+        let stdout = io.stdout();
+        assert!(
+            stdout.contains("NEXT: Stage changes for the next commit, then run:"),
+            "stdout: {stdout}"
+        );
+        assert!(
+            !stdout.contains("Run git factor --help for the full workflow guide."),
+            "stdout: {stdout}"
+        );
+    }
+
+    #[test]
+    fn print_session_started_reports_advance_guidance_output_failure() {
+        let dir = TempDir::new().or_abort("tempdir");
+        let runner = HintRunner {
+            diff_stat: " file.txt | 1 +\n 1 file changed, 1 insertion(+)\n".to_owned(),
+            untracked: String::new(),
+            toplevel: dir.path().to_path_buf(),
+            fail_on: None,
+        };
+        let io = FailOnExactTextIo {
+            text: "NEXT: Stage changes for the next commit, then run:".to_owned(),
+        };
+        let env = HintEnv {
+            cwd: dir.path().to_path_buf(),
+            claude_code: false,
+        };
+        let ctx = Ctx {
+            runner: &runner,
+            cwd: dir.path().to_path_buf(),
+            io: &io,
+            env: &env,
+            fs: &REAL_FS,
+        };
+
+        let err = print_session_started(&ctx, "FACTOR: Now splitting aaaaaaa.", "feat: example")
+            .err_or_abort("advance guidance output should fail");
+        assert!(
+            err.to_string().contains("io fail"),
+            "unexpected error: {err:?}"
+        );
+    }
+
 }
