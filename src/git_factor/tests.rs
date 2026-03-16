@@ -7948,6 +7948,191 @@ fn cmd_continue_errors_when_rebase_is_required_but_not_active() {
 }
 
 #[test]
+fn cmd_continue_errors_when_session_is_pending_start() {
+    let dir = TempDir::new().or_abort("tempdir");
+    let repo = dir.path();
+    let original = "a".repeat(SHA_LEN);
+    let state_dir = setup_factor_state(
+        repo,
+        &original,
+        "0\n",
+        Some("false\n"),
+        Some(TREE_EXPECTED_NL),
+    );
+    fs::write(state_dir.join("phase"), "pending_start\n").or_abort("write phase");
+
+    let messages = test_messages();
+    let runner =
+        ScriptedRunner::default().with_output("git", &["rev-parse", "--git-dir"], repo, ".git\n");
+    let io = TestIo::default();
+    let env = TestEnv {
+        cwd: repo.to_path_buf(),
+    };
+    let ctx = Ctx {
+        runner: &runner,
+        cwd: repo.to_path_buf(),
+        io: &io,
+        env: &env,
+        fs: &REAL_FS,
+    };
+
+    let err = cmd_continue_in(&ctx, &messages).err_or_abort("expected pending-start usage error");
+    assert_eq!(
+        err.to_string(),
+        "run 'git factor --continue' with no --message to begin splitting this commit"
+    );
+}
+
+#[test]
+fn cmd_continue_errors_when_repo_has_unstaged_changes_before_gate() {
+    let dir = TempDir::new().or_abort("tempdir");
+    let repo = dir.path();
+    let original = "a".repeat(SHA_LEN);
+    setup_factor_state(
+        repo,
+        &original,
+        "0\n",
+        Some("false\n"),
+        Some(TREE_EXPECTED_NL),
+    );
+
+    let messages = test_messages();
+    let runner = with_git_dir_outputs(ScriptedRunner::default(), repo, 2)
+        .with_status("git", &["diff", "--quiet", "--staged"], &[], false, repo, 1)
+        .with_status(
+            "git",
+            &["checkout", "--quiet", "--", "."],
+            &[],
+            false,
+            repo,
+            0,
+        )
+        .with_status(
+            "git",
+            &["clean", "--force", "--quiet", "-d"],
+            &[],
+            false,
+            repo,
+            0,
+        )
+        .with_status(
+            "git",
+            &["checkout-index", "--all", "--force", "--quiet"],
+            &[],
+            false,
+            repo,
+            0,
+        )
+        .with_output(
+            "git",
+            &["diff", "--diff-filter=D", "--name-only", "--staged"],
+            repo,
+            "",
+        )
+        .with_output_status(
+            "git",
+            &["status", "--porcelain=v1"],
+            repo,
+            0,
+            " M file.txt\n",
+            "",
+        );
+    let io = TestIo::default();
+    let env = TestEnv {
+        cwd: repo.to_path_buf(),
+    };
+    let ctx = Ctx {
+        runner: &runner,
+        cwd: repo.to_path_buf(),
+        io: &io,
+        env: &env,
+        fs: &REAL_FS,
+    };
+
+    let err = cmd_continue_in(&ctx, &messages).err_or_abort("expected repo-state error");
+    assert_eq!(
+        err.to_string(),
+        "git command failed: continue gate requires staged changes only; remove unstaged or untracked changes first\nSTATUS:\n M file.txt"
+    );
+}
+
+#[test]
+fn cmd_continue_pending_start_opens_split_session() {
+    let dir = TempDir::new().or_abort("tempdir");
+    let repo = dir.path();
+    let original = "a".repeat(SHA_LEN);
+    let state_dir = setup_factor_state(
+        repo,
+        &original,
+        "0\n",
+        Some("false\n"),
+        Some(TREE_EXPECTED_NL),
+    );
+    fs::write(state_dir.join("phase"), "pending_start\n").or_abort("write phase");
+
+    let runner = with_git_dir_outputs(ScriptedRunner::default(), repo, 2)
+        .with_output("git", &["status", "--porcelain=v1"], repo, "")
+        .with_status("git", &["reset", "--quiet", "HEAD~1"], &[], false, repo, 0)
+        .with_output(
+            "git",
+            &["show", "--format=%B", "--no-patch", original.as_str()],
+            repo,
+            "subject\n",
+        )
+        .with_output(
+            "git",
+            &["rev-parse", "--short", original.as_str()],
+            repo,
+            "aaaaaaa\n",
+        )
+        .with_output(
+            "git",
+            &["diff", "--stat"],
+            repo,
+            "file.txt | 1 +\n1 file changed, 1 insertion(+)\n",
+        )
+        .with_output(
+            "git",
+            &["ls-files", "--others", "--exclude-standard"],
+            repo,
+            "",
+        )
+        .with_output(
+            "git",
+            &["rev-parse", "--show-toplevel"],
+            repo,
+            &format!("{}\n", repo.display()),
+        );
+    let io = TestIo::default();
+    let env = TestEnv {
+        cwd: repo.to_path_buf(),
+    };
+    let ctx = Ctx {
+        runner: &runner,
+        cwd: repo.to_path_buf(),
+        io: &io,
+        env: &env,
+        fs: &REAL_FS,
+    };
+
+    let code = cmd_continue_pending_start_in(&ctx).or_abort("pending start should open");
+    assert_eq!(code, EXIT_OK);
+    assert_eq!(
+        fs::read_to_string(state_dir.join("phase")).or_abort("read phase"),
+        "splitting\n"
+    );
+    let stdout = io.stdout();
+    assert!(
+        stdout.contains("FACTOR: Now splitting aaaaaaa."),
+        "stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("ORIGINAL MESSAGE: subject"),
+        "stdout: {stdout}"
+    );
+}
+
+#[test]
 fn cmd_finish_errors_when_rebase_is_required_but_not_active() {
     let dir = TempDir::new().or_abort("tempdir");
     let repo = dir.path();
@@ -11911,6 +12096,9 @@ fn proptest_run_unit_suite_part_3() {
 
 #[test]
 fn proptest_run_unit_suite_part_4() {
+    cmd_continue_errors_when_session_is_pending_start();
+    cmd_continue_errors_when_repo_has_unstaged_changes_before_gate();
+    cmd_continue_pending_start_opens_split_session();
     run_with_args_vec_propagates_io_errors_for_parser_and_help_output();
     run_with_args_without_user_args_prints_help();
     scripted_runner_missing_output_is_an_error();

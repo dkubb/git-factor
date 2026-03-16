@@ -1373,9 +1373,12 @@ fn print_continue_command(ctx: &Ctx<'_>, heading: &str) -> Result<(), FactorErro
 }
 
 /// Opens a pending-start factor session after rebase preflight/begin succeeded.
-#[expect(
-    clippy::single_call_fn,
-    reason = "pending-start transition stays isolated from normal continue flow"
+#[cfg_attr(
+    not(test),
+    expect(
+        clippy::single_call_fn,
+        reason = "pending-start transition stays isolated from normal continue flow"
+    )
 )]
 fn cmd_continue_pending_start_in(ctx: &Ctx<'_>) -> Result<i32, FactorError> {
     if !is_factor_active_in(ctx) {
