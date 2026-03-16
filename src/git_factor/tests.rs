@@ -5005,6 +5005,35 @@ fn run_with_args_rejects_continue_when_combined_with_commit() {
 }
 
 #[test]
+fn run_with_args_rejects_retry_when_combined_with_message() {
+    let dir = TempDir::new().or_abort("tempdir");
+    let io = TestIo::default();
+    let ctx = Ctx {
+        runner: &REAL_RUNNER,
+        cwd: dir.path().to_path_buf(),
+        io: &io,
+        env: &REAL_ENV,
+        fs: &REAL_FS,
+    };
+
+    let err = run_with_args_vec(
+        &ctx,
+        vec![
+            OsString::from("git-factor"),
+            OsString::from("--retry"),
+            OsString::from("--message"),
+            OsString::from("msg"),
+        ],
+    )
+    .err_or_abort("retry/message should be rejected");
+
+    assert_eq!(
+        err.to_string(),
+        "--retry cannot be combined with other options"
+    );
+}
+
+#[test]
 fn run_with_args_rejects_continue_without_message() {
     let dir = TempDir::new().or_abort("tempdir");
     let io = TestIo::default();
@@ -5294,6 +5323,35 @@ fn run_with_args_continue_delegates_to_continue_handler() {
         ],
     )
     .err_or_abort("continue should delegate to command handler");
+    assert!(
+        matches!(err, FactorError::NoActiveSession),
+        "err was: {err:?}"
+    );
+}
+
+#[test]
+fn run_with_args_retry_delegates_to_retry_handler() {
+    let dir = TempDir::new().or_abort("tempdir");
+    let repo = dir.path();
+    let runner =
+        ScriptedRunner::default().with_output("git", &["rev-parse", "--git-dir"], repo, ".git\n");
+    let io = TestIo::default();
+    let env = TestEnv {
+        cwd: repo.to_path_buf(),
+    };
+    let ctx = Ctx {
+        runner: &runner,
+        cwd: repo.to_path_buf(),
+        io: &io,
+        env: &env,
+        fs: &REAL_FS,
+    };
+
+    let err = run_with_args_vec(
+        &ctx,
+        vec![OsString::from("git-factor"), OsString::from("--retry")],
+    )
+    .err_or_abort("retry should delegate to command handler");
     assert!(
         matches!(err, FactorError::NoActiveSession),
         "err was: {err:?}"
@@ -6233,6 +6291,66 @@ fn cmd_continue_errors_when_no_staged_changes() {
     assert!(
         matches!(err, FactorError::NoStagedChanges),
         "err was: {err:?}"
+    );
+}
+
+#[test]
+fn cmd_retry_errors_when_no_active_session() {
+    let dir = TempDir::new().or_abort("tempdir");
+    let repo = dir.path();
+    let runner =
+        ScriptedRunner::default().with_output("git", &["rev-parse", "--git-dir"], repo, ".git\n");
+    let io = TestIo::default();
+    let env = TestEnv {
+        cwd: repo.to_path_buf(),
+    };
+    let ctx = Ctx {
+        runner: &runner,
+        cwd: repo.to_path_buf(),
+        io: &io,
+        env: &env,
+        fs: &REAL_FS,
+    };
+
+    let err = cmd_retry_in(&ctx).err_or_abort("expected no active session");
+    assert!(
+        matches!(err, FactorError::NoActiveSession),
+        "err was: {err:?}"
+    );
+}
+
+#[test]
+fn cmd_retry_errors_when_session_is_pending_start() {
+    let dir = TempDir::new().or_abort("tempdir");
+    let repo = dir.path();
+    let original = "a".repeat(SHA_LEN);
+    let state_dir = setup_factor_state(
+        repo,
+        &original,
+        "0\n",
+        Some("false\n"),
+        Some(TREE_EXPECTED_NL),
+    );
+    fs::write(state_dir.join("phase"), "pending_start\n").or_abort("write phase");
+
+    let runner =
+        ScriptedRunner::default().with_output("git", &["rev-parse", "--git-dir"], repo, ".git\n");
+    let io = TestIo::default();
+    let env = TestEnv {
+        cwd: repo.to_path_buf(),
+    };
+    let ctx = Ctx {
+        runner: &runner,
+        cwd: repo.to_path_buf(),
+        io: &io,
+        env: &env,
+        fs: &REAL_FS,
+    };
+
+    let err = cmd_retry_in(&ctx).err_or_abort("expected pending-start usage error");
+    assert_eq!(
+        err.to_string(),
+        "run 'git factor --continue' with no --message to begin splitting this commit"
     );
 }
 
@@ -12079,12 +12197,14 @@ fn proptest_run_unit_suite_part_3() {
     run_with_args_rejects_abort_when_combined_with_status();
     run_with_args_rejects_continue_when_combined_with_commit();
     run_with_args_rejects_continue_when_combined_with_exec();
+    run_with_args_rejects_retry_when_combined_with_message();
     run_with_args_rejects_continue_without_message();
     run_with_args_rejects_finish_when_combined_with_commit();
     run_with_args_rejects_finish_when_combined_with_continue();
     run_with_args_rejects_finish_when_combined_with_exec();
     run_with_args_rejects_message_when_not_continuing_or_finishing();
     run_with_args_rejects_message_without_exec_or_commit();
+    run_with_args_retry_delegates_to_retry_handler();
     run_with_args_rejects_status_when_combined_with_commit();
     run_with_args_rejects_status_when_combined_with_continue();
     run_with_args_rejects_status_when_combined_with_exec();
@@ -12096,6 +12216,8 @@ fn proptest_run_unit_suite_part_3() {
 
 #[test]
 fn proptest_run_unit_suite_part_4() {
+    cmd_retry_errors_when_no_active_session();
+    cmd_retry_errors_when_session_is_pending_start();
     cmd_continue_errors_when_session_is_pending_start();
     cmd_continue_errors_when_repo_has_unstaged_changes_before_gate();
     cmd_continue_pending_start_opens_split_session();

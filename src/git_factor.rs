@@ -1391,6 +1391,33 @@ fn cmd_continue_pending_start_in(ctx: &Ctx<'_>) -> Result<i32, FactorError> {
     Ok(EXIT_OK)
 }
 
+/// Discards the current split attempt and restores the remaining pool.
+#[cfg_attr(
+    not(test),
+    expect(
+        clippy::single_call_fn,
+        reason = "retry path stays isolated from continue/finish for session clarity"
+    )
+)]
+fn cmd_retry_in(ctx: &Ctx<'_>) -> Result<i32, FactorError> {
+    trace_note(ctx, "factor_cmd_retry", &[]);
+
+    if !is_factor_active_in(ctx) {
+        return Err(FactorError::NoActiveSession);
+    }
+    let session = Session::from_active(ctx)?;
+    if session.phase(SessionPhase::Splitting)? != SessionPhase::Splitting {
+        return Err(FactorError::Usage(non_empty_msg(
+            "run 'git factor --continue' with no --message to begin splitting this commit"
+                .to_owned(),
+        )));
+    }
+
+    Err(FactorError::Usage(non_empty_msg(
+        "retry support for active split attempts is not implemented".to_owned(),
+    )))
+}
+
 /// Traces tree hash comparison and returns whether the trees converged.
 fn trace_tree_convergence(
     ctx: &Ctx<'_>,
@@ -2150,6 +2177,7 @@ fn run_with_args_vec(ctx: &Ctx<'_>, args: Vec<OsString>) -> Result<i32, FactorEr
     if !cli.abort()
         && !cli.status()
         && !cli.continue_flag()
+        && !cli.retry()
         && !cli.finish()
         && !has_start_args()
         && cli.message().is_empty()
@@ -2160,7 +2188,7 @@ fn run_with_args_vec(ctx: &Ctx<'_>, args: Vec<OsString>) -> Result<i32, FactorEr
     }
 
     if cli.abort() {
-        if cli.status() || cli.continue_flag() || cli.finish() || has_start_args() {
+        if cli.status() || cli.continue_flag() || cli.retry() || cli.finish() || has_start_args() {
             return Err(FactorError::Usage(non_empty_msg(
                 "--abort cannot be combined with other options".to_owned(),
             )));
@@ -2169,12 +2197,32 @@ fn run_with_args_vec(ctx: &Ctx<'_>, args: Vec<OsString>) -> Result<i32, FactorEr
     }
 
     if cli.status() {
-        if cli.continue_flag() || cli.finish() || has_start_args() || !cli.message().is_empty() {
+        if cli.continue_flag()
+            || cli.retry()
+            || cli.finish()
+            || has_start_args()
+            || !cli.message().is_empty()
+        {
             return Err(FactorError::Usage(non_empty_msg(
                 "--status cannot be combined with other options".to_owned(),
             )));
         }
         return cmd_status_in(ctx);
+    }
+
+    if cli.retry() {
+        if cli.continue_flag()
+            || cli.finish()
+            || has_start_args()
+            || !cli.message().is_empty()
+            || cli.abort()
+            || cli.status()
+        {
+            return Err(FactorError::Usage(non_empty_msg(
+                "--retry cannot be combined with other options".to_owned(),
+            )));
+        }
+        return cmd_retry_in(ctx);
     }
 
     if cli.finish() {

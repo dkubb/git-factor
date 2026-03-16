@@ -34,6 +34,14 @@ struct SessionProgressFlags {
     /// original commit message.
     #[arg(long = "finish", help_heading = "Session Control")]
     finish: bool,
+
+    /// Discard the current split attempt and restore the remaining pool.
+    ///
+    /// Restores the green baseline commit into the index and working tree,
+    /// then unstages everything so the session returns to the normal
+    /// "remaining changes are unstaged" state.
+    #[arg(long = "retry", help_heading = "Session Control", hide = true)]
+    retry: bool,
 }
 
 /// Split a large git commit into smaller atomic commits.
@@ -148,6 +156,11 @@ impl Cli {
         &self.message
     }
 
+    /// Returns whether `--retry` was requested.
+    pub(in crate::git_factor) const fn retry(&self) -> bool {
+        self.session_progress.retry
+    }
+
     /// Returns whether `--status` was requested.
     pub(in crate::git_factor) const fn status(&self) -> bool {
         self.session_query.status
@@ -178,6 +191,7 @@ mod proptests {
             abort in any::<bool>(),
             status in any::<bool>(),
             continue_flag in any::<bool>(),
+            retry in any::<bool>(),
             finish in any::<bool>(),
             commits in vec(token(), 0..4),
             execs in vec(token(), 0..4),
@@ -193,6 +207,9 @@ mod proptests {
             }
             if continue_flag {
                 args.push("--continue".to_owned());
+            }
+            if retry {
+                args.push("--retry".to_owned());
             }
             if finish {
                 args.push("--finish".to_owned());
@@ -212,6 +229,7 @@ mod proptests {
             prop_assert_eq!(cli.abort(), abort);
             prop_assert_eq!(cli.status(), status);
             prop_assert_eq!(cli.continue_flag(), continue_flag);
+            prop_assert_eq!(cli.retry(), retry);
             prop_assert_eq!(cli.finish(), finish);
             prop_assert_eq!(
                 cli.commits()
