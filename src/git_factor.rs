@@ -1195,10 +1195,6 @@ fn restore_staged_and_worktree_from_commit(
 }
 
 /// Restores the remaining pool and returns unstaged/untracked summaries.
-#[expect(
-    clippy::single_call_fn,
-    reason = "continue/retry paths share one pool restore routine"
-)]
 fn restore_remaining_pool(
     ctx: &Ctx<'_>,
     original_commit: &CommitSha,
@@ -1219,10 +1215,6 @@ fn restore_remaining_pool(
 }
 
 /// Prints the restored remaining-pool summary and next-step guidance.
-#[expect(
-    clippy::single_call_fn,
-    reason = "continue/retry paths share one remaining-pool printer"
-)]
 fn print_remaining_pool_state(
     ctx: &Ctx<'_>,
     heading: &str,
@@ -1412,10 +1404,27 @@ fn cmd_retry_in(ctx: &Ctx<'_>) -> Result<i32, FactorError> {
                 .to_owned(),
         )));
     }
+    let requires_rebase = session.requires_rebase(StateBool::True)?;
+    if requires_rebase.as_bool() && !is_mid_rebase_in(ctx) {
+        return Err(FactorError::GitCommand(non_empty_msg(
+            "no rebase in progress".to_owned(),
+        )));
+    }
 
-    Err(FactorError::Usage(non_empty_msg(
-        "retry support for active split attempts is not implemented".to_owned(),
-    )))
+    let original_commit = session.current_commit()?;
+    let expected_tree = session.expected_tree()?;
+
+    run_git(ctx, &["clean", "--force", "--quiet", "-d"])?;
+
+    let (stat_output, untracked_output) =
+        restore_remaining_pool(ctx, &original_commit, &expected_tree)?;
+    print_remaining_pool_state(
+        ctx,
+        "FACTOR: Split attempt discarded.",
+        stat_output.as_str(),
+        untracked_output.as_str(),
+    )?;
+    Ok(EXIT_OK)
 }
 
 /// Traces tree hash comparison and returns whether the trees converged.

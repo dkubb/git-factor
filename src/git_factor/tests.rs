@@ -6355,6 +6355,118 @@ fn cmd_retry_errors_when_session_is_pending_start() {
 }
 
 #[test]
+fn cmd_retry_errors_when_rebase_is_required_but_not_active() {
+    let dir = TempDir::new().or_abort("tempdir");
+    let repo = dir.path();
+    let original = "a".repeat(SHA_LEN);
+    setup_factor_state(
+        repo,
+        &original,
+        "0\n",
+        Some("true\n"),
+        Some(TREE_EXPECTED_NL),
+    );
+
+    let runner =
+        ScriptedRunner::default().with_output("git", &["rev-parse", "--git-dir"], repo, ".git\n");
+    let io = TestIo::default();
+    let env = TestEnv {
+        cwd: repo.to_path_buf(),
+    };
+    let ctx = Ctx {
+        runner: &runner,
+        cwd: repo.to_path_buf(),
+        io: &io,
+        env: &env,
+        fs: &REAL_FS,
+    };
+
+    let err = cmd_retry_in(&ctx).err_or_abort("expected no rebase error");
+    assert_eq!(err.to_string(), "git command failed: no rebase in progress");
+}
+
+#[test]
+fn cmd_retry_restores_remaining_pool_and_prints_guidance() {
+    let dir = TempDir::new().or_abort("tempdir");
+    let repo = dir.path();
+    let original = "a".repeat(SHA_LEN);
+    setup_factor_state(
+        repo,
+        &original,
+        "0\n",
+        Some("false\n"),
+        Some(TREE_EXPECTED_NL),
+    );
+
+    let runner = with_git_dir_outputs(ScriptedRunner::default(), repo, 2)
+        .with_status(
+            "git",
+            &[
+                "restore",
+                "--source",
+                original.as_str(),
+                "--staged",
+                "--worktree",
+                "--",
+                ".",
+            ],
+            &[],
+            false,
+            repo,
+            0,
+        )
+        .with_output("git", &["write-tree"], repo, TREE_EXPECTED_NL)
+        .with_status("git", &["reset", "--quiet"], &[], false, repo, 0)
+        .with_output(
+            "git",
+            &["diff", "--stat"],
+            repo,
+            "file.txt | 1 +\n1 file changed, 1 insertion(+)\n",
+        )
+        .with_output(
+            "git",
+            &["ls-files", "--others", "--exclude-standard"],
+            repo,
+            "scratch.tmp\n",
+        )
+        .with_output(
+            "git",
+            &["rev-parse", "--show-toplevel"],
+            repo,
+            &format!("{}\n", repo.display()),
+        )
+        .with_status(
+            "git",
+            &["clean", "--force", "--quiet", "-d"],
+            &[],
+            false,
+            repo,
+            0,
+        );
+    let io = TestIo::default();
+    let env = TestEnv {
+        cwd: repo.to_path_buf(),
+    };
+    let ctx = Ctx {
+        runner: &runner,
+        cwd: repo.to_path_buf(),
+        io: &io,
+        env: &env,
+        fs: &REAL_FS,
+    };
+
+    let code = cmd_retry_in(&ctx).or_abort("retry should succeed");
+    assert_eq!(code, EXIT_OK);
+    let stdout = io.stdout();
+    assert!(
+        stdout.contains("FACTOR: Split attempt discarded."),
+        "stdout: {stdout}"
+    );
+    assert!(stdout.contains("UNTRACKED:"), "stdout: {stdout}");
+    assert!(stdout.contains("  scratch.tmp"), "stdout: {stdout}");
+}
+
+#[test]
 fn cmd_finish_errors_when_no_active_session() {
     let dir = TempDir::new().or_abort("tempdir");
     let repo = dir.path();
@@ -12218,6 +12330,8 @@ fn proptest_run_unit_suite_part_3() {
 fn proptest_run_unit_suite_part_4() {
     cmd_retry_errors_when_no_active_session();
     cmd_retry_errors_when_session_is_pending_start();
+    cmd_retry_errors_when_rebase_is_required_but_not_active();
+    cmd_retry_restores_remaining_pool_and_prints_guidance();
     cmd_continue_errors_when_session_is_pending_start();
     cmd_continue_errors_when_repo_has_unstaged_changes_before_gate();
     cmd_continue_pending_start_opens_split_session();
