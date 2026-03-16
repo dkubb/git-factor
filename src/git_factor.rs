@@ -409,6 +409,18 @@ struct Session<'ctx> {
     state_dir: StateDir,
 }
 
+/// Bootstrap inputs needed to create factor state during the first rebase begin.
+struct RebaseExecBeginBootstrap {
+    /// Ordered commits selected for this factor session.
+    commits: NonEmpty<CommitSha>,
+    /// Joined start/split gate command.
+    exec_command: NonEmptyString,
+    /// Whether the session span begins at the repository root.
+    is_root: StateBool,
+    /// Original `HEAD` captured before the session started.
+    start_head: CommitSha,
+}
+
 impl<'ctx> Session<'ctx> {
     /// Advances to the next commit in a multi-commit factor session.
     ///
@@ -721,9 +733,12 @@ fn output_text(output: &Output) -> (String, String) {
 }
 
 /// Returns the exact porcelain status output, asserting success and empty stderr.
-#[expect(
-    clippy::single_call_fn,
-    reason = "status normalization is centralized for repo cleanliness checks"
+#[cfg_attr(
+    not(test),
+    expect(
+        clippy::single_call_fn,
+        reason = "status capture is isolated to keep repo-state enforcement readable"
+    )
 )]
 fn repo_status_stdout(ctx: &Ctx<'_>) -> Result<String, FactorError> {
     let output = git_raw_output(ctx, &["status", "--porcelain=v1"])?;
@@ -742,9 +757,12 @@ fn repo_status_stdout(ctx: &Ctx<'_>) -> Result<String, FactorError> {
 }
 
 /// Returns whether the porcelain output matches the required gate-boundary policy.
-#[expect(
-    clippy::single_call_fn,
-    reason = "repo-state policy evaluation is intentionally centralized"
+#[cfg_attr(
+    not(test),
+    expect(
+        clippy::single_call_fn,
+        reason = "repo-state policy checks stay centralized for gate-boundary invariants"
+    )
 )]
 fn repo_status_matches_policy(stdout: &str, policy: RepoStatePolicy) -> bool {
     for line in stdout.lines() {
@@ -817,9 +835,12 @@ fn update_current_commit_in_state(
 }
 
 /// Returns an absolute executable command prefix for hidden rebase helpers.
-#[expect(
-    clippy::single_call_fn,
-    reason = "current executable quoting is reused only by rebase-exec command building"
+#[cfg_attr(
+    not(test),
+    expect(
+        clippy::single_call_fn,
+        reason = "current executable resolution is isolated for helper command construction"
+    )
 )]
 fn current_exe_command_prefix(ctx: &Ctx<'_>) -> Result<String, FactorError> {
     let current_exe = ctx.env.current_exe().map_err(|err| {
@@ -835,20 +856,83 @@ fn current_exe_command_prefix(ctx: &Ctx<'_>) -> Result<String, FactorError> {
     Ok(shell_quote(current_exe_str))
 }
 
+/// Joins commit SHAs into one hidden internal CLI argument.
+#[expect(
+    clippy::single_call_fn,
+    reason = "commit-list encoding is centralized for hidden rebase helper commands"
+)]
+fn encode_internal_commits_arg(commits: &NonEmpty<CommitSha>) -> String {
+    commits
+        .iter()
+        .map(CommitSha::as_str)
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
 /// Builds a shell-safe hidden helper command for rebase `exec` lines.
 fn rebase_exec_command(
     ctx: &Ctx<'_>,
     subcommand: &str,
-    current_index: CurrentIndex,
+    args: &[&str],
 ) -> Result<String, FactorError> {
     let prefix = current_exe_command_prefix(ctx)?;
-    let current_index_text = current_index.as_usize().to_string();
+    let mut command_parts = vec![prefix, shell_quote(subcommand)];
+    command_parts.extend(args.iter().copied().map(shell_quote));
 
-    Ok(format!(
-        "{prefix} {} {}",
-        shell_quote(subcommand),
-        shell_quote(current_index_text.as_str())
-    ))
+    Ok(command_parts.join(" "))
+}
+
+/// Builds the hidden preflight command for one rebase-backed factor step.
+#[cfg_attr(
+    not(test),
+    expect(
+        clippy::single_call_fn,
+        reason = "preflight command assembly stays isolated for hidden rebase helper wiring"
+    )
+)]
+fn rebase_exec_preflight_command(
+    ctx: &Ctx<'_>,
+    current_index: CurrentIndex,
+    exec_command: &NonEmptyString,
+) -> Result<String, FactorError> {
+    let current_index_text = current_index.as_usize().to_string();
+    rebase_exec_command(
+        ctx,
+        "rebase-exec-preflight",
+        &[current_index_text.as_str(), exec_command.as_str()],
+    )
+}
+
+/// Builds the hidden begin command for one rebase-backed factor step.
+#[cfg_attr(
+    not(test),
+    expect(
+        clippy::single_call_fn,
+        reason = "begin command assembly stays isolated for hidden rebase helper wiring"
+    )
+)]
+fn rebase_exec_begin_command(
+    ctx: &Ctx<'_>,
+    current_index: CurrentIndex,
+    start_head: &CommitSha,
+    is_root: bool,
+    exec_command: &NonEmptyString,
+    commits: &NonEmpty<CommitSha>,
+) -> Result<String, FactorError> {
+    let current_index_text = current_index.as_usize().to_string();
+    let is_root_text = StateBool::from_bool(is_root).as_str();
+    let commits_text = encode_internal_commits_arg(commits);
+    rebase_exec_command(
+        ctx,
+        "rebase-exec-begin",
+        &[
+            current_index_text.as_str(),
+            start_head.as_str(),
+            is_root_text,
+            exec_command.as_str(),
+            commits_text.as_str(),
+        ],
+    )
 }
 
 /// Aborts the current factor session.
@@ -938,6 +1022,51 @@ fn write_state_pairs(
         write_state(ctx, state_dir.as_path(), key.as_str(), value)?;
     }
     Ok(())
+}
+
+/// Creates the persisted factor state for a newly active session.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "post-gate session bootstrap writes all persisted fields in one place"
+)]
+fn write_initial_session_state(
+    ctx: &Ctx<'_>,
+    state_dir: &StateDir,
+    commits: &NonEmpty<CommitSha>,
+    current_index: CurrentIndex,
+    exec_command: &NonEmptyString,
+    phase: SessionPhase,
+    requires_rebase: StateBool,
+    started_rebase: StateBool,
+    start_head: &CommitSha,
+    is_root: StateBool,
+) -> Result<(), FactorError> {
+    ctx.fs
+        .create_dir_all(state_dir.as_path())
+        .map_err(FactorError::StateWrite)?;
+    let current_index_text = current_index.as_usize().to_string();
+    let split_count_text = SplitCount::zero().as_u8().to_string();
+    let commits_content = commits.iter().map(CommitSha::as_str).collect::<Vec<_>>();
+    write_state(
+        ctx,
+        state_dir.as_path(),
+        StateFileKey::Commits.as_str(),
+        &commits_content.join("\n"),
+    )?;
+    write_state_pairs(
+        ctx,
+        state_dir,
+        &[
+            (StateFileKey::CurrentIndex, current_index_text.as_str()),
+            (StateFileKey::Exec, exec_command.as_str()),
+            (StateFileKey::Phase, phase.as_str()),
+            (StateFileKey::SplitCount, split_count_text.as_str()),
+            (StateFileKey::RequiresRebase, requires_rebase.as_str()),
+            (StateFileKey::StartedRebase, started_rebase.as_str()),
+            (StateFileKey::StartHead, start_head.as_str()),
+            (StateFileKey::IsRoot, is_root.as_str()),
+        ],
+    )
 }
 
 /// Removes the factor state path, supporting either a directory or a stray file.
@@ -1073,6 +1202,7 @@ fn enter_pending_split_session(
 fn cmd_rebase_exec_preflight_in(
     ctx: &Ctx<'_>,
     current_index: CurrentIndex,
+    bootstrap_exec: &NonEmptyString,
 ) -> Result<i32, FactorError> {
     let current_index_text = current_index.as_usize().to_string();
     trace_note(
@@ -1080,22 +1210,29 @@ fn cmd_rebase_exec_preflight_in(
         "factor_rebase_exec_preflight",
         &[("current_index", current_index_text.as_str())],
     );
-    let session = Session::from_active(ctx)?;
-    let expected_index = session.current_index()?;
-    if expected_index != current_index {
-        return Err(FactorError::GitCommand(non_empty_msg(format!(
-            "unexpected current_index: expected {}, got {}",
-            expected_index.as_usize(),
-            current_index.as_usize()
-        ))));
-    }
+    let exec_command = match Session::from_active(ctx) {
+        Ok(session) => {
+            let expected_index = session.current_index()?;
+            if expected_index != current_index {
+                return Err(FactorError::GitCommand(non_empty_msg(format!(
+                    "unexpected current_index: expected {}, got {}",
+                    expected_index.as_usize(),
+                    current_index.as_usize()
+                ))));
+            }
+            session.exec()?
+        }
+        Err(FactorError::StateRead(err)) if err.kind() == io::ErrorKind::NotFound => {
+            bootstrap_exec.clone()
+        }
+        Err(err) => return Err(err),
+    };
     ensure_repo_state(
         ctx,
         RepoStatePolicy::FullyClean,
         "cannot run the start gate because the repository is not clean",
     )?;
 
-    let exec_command = session.exec()?;
     let output = command_output_with(ctx, "bash", &["-c", exec_command.as_str()])?;
     let (stdout, stderr) = output_text(&output);
     if !stdout.is_empty() {
@@ -1139,6 +1276,7 @@ fn cmd_rebase_exec_preflight_in(
 fn cmd_rebase_exec_begin_in(
     ctx: &Ctx<'_>,
     current_index: CurrentIndex,
+    bootstrap: &RebaseExecBeginBootstrap,
 ) -> Result<i32, FactorError> {
     let current_index_text = current_index.as_usize().to_string();
     trace_note(
@@ -1146,20 +1284,47 @@ fn cmd_rebase_exec_begin_in(
         "factor_rebase_exec_begin",
         &[("current_index", current_index_text.as_str())],
     );
-    let session = Session::from_active(ctx)?;
-    let expected_index = session.current_index()?;
-    if expected_index != current_index {
-        return Err(FactorError::GitCommand(non_empty_msg(format!(
-            "unexpected current_index: expected {}, got {}",
-            expected_index.as_usize(),
-            current_index.as_usize()
-        ))));
-    }
     ensure_repo_state(
         ctx,
         RepoStatePolicy::FullyClean,
         "cannot begin the factor session because the repository is not clean",
     )?;
+    let session = match Session::from_active(ctx) {
+        Ok(session) => {
+            let expected_index = session.current_index()?;
+            if expected_index != current_index {
+                return Err(FactorError::GitCommand(non_empty_msg(format!(
+                    "unexpected current_index: expected {}, got {}",
+                    expected_index.as_usize(),
+                    current_index.as_usize()
+                ))));
+            }
+            session
+        }
+        Err(FactorError::StateRead(err)) if err.kind() == io::ErrorKind::NotFound => {
+            if current_index != CurrentIndex(0) {
+                return Err(FactorError::GitCommand(non_empty_msg(format!(
+                    "missing factor state before begin for current_index {}",
+                    current_index.as_usize()
+                ))));
+            }
+            let state_dir = factor_dir_in(ctx)?;
+            write_initial_session_state(
+                ctx,
+                &state_dir,
+                &bootstrap.commits,
+                current_index,
+                &bootstrap.exec_command,
+                SessionPhase::PendingStart,
+                StateBool::True,
+                StateBool::True,
+                &bootstrap.start_head,
+                bootstrap.is_root,
+            )?;
+            Session::from_active(ctx)?
+        }
+        Err(err) => return Err(err),
+    };
     let split_count_text = SplitCount::zero().as_u8().to_string();
     write_state_pairs(
         ctx,
@@ -1662,9 +1827,6 @@ fn cmd_start_with_resolved_in(
     let message = commit_message(ctx, span_start)?;
     let exec_command = joined_exec_command(exec);
     validate_exec_syntax(ctx, exec_command.as_str())?;
-    ctx.fs
-        .create_dir_all(state_dir.as_path())
-        .map_err(FactorError::StateWrite)?;
     let parent_status = command_status_with(
         ctx,
         "git",
@@ -1692,33 +1854,7 @@ fn cmd_start_with_resolved_in(
     let first_commit = span.first_commit();
     let requires_rebase = StateBool::from_bool(!single_head_session);
     let is_root_state = StateBool::from_bool(span.is_root());
-    let phase = if single_head_session {
-        SessionPhase::Splitting
-    } else {
-        SessionPhase::PendingStart
-    };
     let current_index = CurrentIndex(0);
-    let current_index_text = current_index.as_usize().to_string();
-    let split_count = SplitCount::zero();
-    let split_count_text = split_count.as_u8().to_string();
-    let session_state_pairs = [
-        (StateFileKey::CurrentIndex, current_index_text.as_str()),
-        (StateFileKey::Exec, exec_command.as_str()),
-        (StateFileKey::Phase, phase.as_str()),
-        (StateFileKey::SplitCount, split_count_text.as_str()),
-        (StateFileKey::RequiresRebase, requires_rebase.as_str()),
-        (StateFileKey::StartedRebase, requires_rebase.as_str()),
-        (StateFileKey::StartHead, head_commit.as_str()),
-        (StateFileKey::IsRoot, is_root_state.as_str()),
-    ];
-    let commits_content: Vec<&str> = span.commits().iter().map(CommitSha::as_str).collect();
-    write_state(
-        ctx,
-        state_dir.as_path(),
-        StateFileKey::Commits.as_str(),
-        &commits_content.join("\n"),
-    )?;
-    write_state_pairs(ctx, state_dir, &session_state_pairs)?;
     if single_head_session {
         let output = command_output_with(ctx, "bash", &["-c", exec_command.as_str()])?;
         let (stdout, stderr) = output_text(&output);
@@ -1734,7 +1870,6 @@ fn cmd_start_with_resolved_in(
             ctx.outln(&format!("CODE: {}", status_code(output.status)))?;
             ctx.outln("")?;
             ctx.outln("NEXT: Fix the current commit, amend it, then rerun git factor.")?;
-            session_remove_state_dir_warning(ctx, state_dir)?;
             return Err(FactorError::ExecFailed {
                 code: status_code(output.status),
                 command: exec_command,
@@ -1744,6 +1879,18 @@ fn cmd_start_with_resolved_in(
             ctx,
             RepoStatePolicy::FullyClean,
             "start gate must not leave tracked, unstaged, or untracked changes behind",
+        )?;
+        write_initial_session_state(
+            ctx,
+            state_dir,
+            span.commits(),
+            current_index,
+            &exec_command,
+            SessionPhase::Splitting,
+            requires_rebase,
+            StateBool::False,
+            &head_commit,
+            is_root_state,
         )?;
         capture_expected_tree_in_state(ctx, state_dir)?;
         let reset_target = if span.is_root() {
@@ -1766,7 +1913,15 @@ fn cmd_start_with_resolved_in(
         return Ok(EXIT_OK);
     }
 
-    match run_start_rebase_in(ctx, span.commits(), first_commit, span.is_root(), state_dir)? {
+    match run_start_rebase_in(
+        ctx,
+        span.commits(),
+        first_commit,
+        span.is_root(),
+        state_dir,
+        &head_commit,
+        &exec_command,
+    )? {
         StartRebaseOutcome::PausedAtBreak => {
             let session = Session::from_active(ctx)?;
             let (next_short_sha, next_message) = enter_pending_split_session(ctx, &session)?;
@@ -1844,6 +1999,8 @@ fn run_start_rebase_in(
     base_sha: &CommitSha,
     is_root: bool,
     state_dir: &StateDir,
+    start_head: &CommitSha,
+    exec_command: &NonEmptyString,
 ) -> Result<StartRebaseOutcome, FactorError> {
     let editor = editor_path(ctx)?;
     let editor_str = match editor.to_str() {
@@ -1858,8 +2015,15 @@ fn run_start_rebase_in(
     for (index, sha) in resolved_commits.iter().enumerate() {
         let short = git_output(ctx, &["rev-parse", "--short", sha.as_str()])?;
         let current_index = CurrentIndex(index);
-        let preflight = rebase_exec_command(ctx, "rebase-exec-preflight", current_index)?;
-        let begin = rebase_exec_command(ctx, "rebase-exec-begin", current_index)?;
+        let preflight = rebase_exec_preflight_command(ctx, current_index, exec_command)?;
+        let begin = rebase_exec_begin_command(
+            ctx,
+            current_index,
+            start_head,
+            is_root,
+            exec_command,
+            resolved_commits,
+        )?;
         seq_parts.push("--factor-target".to_owned());
         seq_parts.push(short);
         seq_parts.push("--factor-preflight".to_owned());
@@ -2130,27 +2294,113 @@ fn run_and_report_with_args_vec(ctx: &Ctx<'_>, args: Vec<OsString>) -> i32 {
     }
 }
 
+/// Parses one hidden internal UTF-8 argument from CLI argv.
+fn parse_internal_utf8_arg<'args>(
+    args: &'args [OsString],
+    subcommand: &str,
+    index: usize,
+    label: &str,
+) -> Result<&'args str, FactorError> {
+    args.get(index).and_then(|arg| arg.to_str()).ok_or_else(|| {
+        FactorError::Usage(non_empty_msg(format!(
+            "{subcommand} {label} argument must be valid UTF-8"
+        )))
+    })
+}
+
 /// Parses the hidden internal current-index argument from CLI argv.
 fn parse_internal_current_index_arg(
     args: &[OsString],
     subcommand: &str,
 ) -> Result<CurrentIndex, FactorError> {
-    if args.len() != 3 {
-        return Err(FactorError::Usage(non_empty_msg(format!(
-            "{subcommand} requires exactly one current-index argument"
-        ))));
-    }
-    let raw = args.get(2).and_then(|arg| arg.to_str()).ok_or_else(|| {
-        FactorError::Usage(non_empty_msg(format!(
-            "{subcommand} current-index argument must be valid UTF-8"
-        )))
-    })?;
+    let raw = parse_internal_utf8_arg(args, subcommand, 2, "current-index")?;
     let parsed = raw.parse::<usize>().map_err(|_err| {
         FactorError::Usage(non_empty_msg(format!(
             "{subcommand} current-index argument must be a non-negative integer"
         )))
     })?;
     Ok(CurrentIndex(parsed))
+}
+
+/// Parses the hidden internal args for `rebase-exec-preflight`.
+#[expect(
+    clippy::single_call_fn,
+    reason = "preflight argv parsing is isolated from the main CLI dispatch"
+)]
+fn parse_internal_preflight_args(
+    args: &[OsString],
+    subcommand: &str,
+) -> Result<(CurrentIndex, NonEmptyString), FactorError> {
+    if args.len() != 4 {
+        return Err(FactorError::Usage(non_empty_msg(format!(
+            "{subcommand} requires exactly two arguments: current-index and exec-command"
+        ))));
+    }
+    let current_index = parse_internal_current_index_arg(args, subcommand)?;
+    let exec_command = NonEmptyString::try_from(
+        parse_internal_utf8_arg(args, subcommand, 3, "exec-command")?.to_owned(),
+    )
+    .map_err(|_err| {
+        FactorError::Usage(non_empty_msg(format!(
+            "{subcommand} exec-command argument must not be empty"
+        )))
+    })?;
+    Ok((current_index, exec_command))
+}
+
+/// Parses the hidden internal args for `rebase-exec-begin`.
+#[expect(
+    clippy::single_call_fn,
+    reason = "begin argv parsing is isolated from the main CLI dispatch"
+)]
+fn parse_internal_begin_args(
+    args: &[OsString],
+    subcommand: &str,
+) -> Result<(CurrentIndex, RebaseExecBeginBootstrap), FactorError> {
+    if args.len() != 7 {
+        return Err(FactorError::Usage(non_empty_msg(format!(
+            "{subcommand} requires exactly five arguments: current-index, start-head, is-root, exec-command, and commits"
+        ))));
+    }
+    let current_index = parse_internal_current_index_arg(args, subcommand)?;
+    let start_head =
+        CommitSha::new(parse_internal_utf8_arg(args, subcommand, 3, "start-head")?.to_owned())?;
+    let is_root = match parse_internal_utf8_arg(args, subcommand, 4, "is-root")? {
+        "true" => StateBool::True,
+        "false" => StateBool::False,
+        raw => {
+            return Err(FactorError::Usage(non_empty_msg(format!(
+                "{subcommand} is-root argument must be 'true' or 'false', got '{raw}'"
+            ))));
+        }
+    };
+    let exec_command = NonEmptyString::try_from(
+        parse_internal_utf8_arg(args, subcommand, 5, "exec-command")?.to_owned(),
+    )
+    .map_err(|_err| {
+        FactorError::Usage(non_empty_msg(format!(
+            "{subcommand} exec-command argument must not be empty"
+        )))
+    })?;
+    let commits_raw = parse_internal_utf8_arg(args, subcommand, 6, "commits")?;
+    let parsed_commits = commits_raw
+        .split(',')
+        .map(|sha| CommitSha::new(sha.to_owned()))
+        .collect::<Result<Vec<_>, _>>()?;
+    let commits = NonEmpty::from_vec(parsed_commits).ok_or_else(|| {
+        FactorError::Usage(non_empty_msg(format!(
+            "{subcommand} commits argument must not be empty"
+        )))
+    })?;
+    Ok((
+        current_index,
+        RebaseExecBeginBootstrap {
+            commits,
+            exec_command,
+            is_root,
+            start_head,
+        },
+    ))
 }
 
 /// Like [`run_and_report_with_args_vec`], but returns structured errors.
@@ -2168,12 +2418,12 @@ fn parse_internal_current_index_arg(
 fn run_with_args_vec(ctx: &Ctx<'_>, args: Vec<OsString>) -> Result<i32, FactorError> {
     if let Some(subcommand) = args.get(1).and_then(|arg| arg.to_str()) {
         if subcommand == "rebase-exec-preflight" {
-            let current_index = parse_internal_current_index_arg(&args, subcommand)?;
-            return cmd_rebase_exec_preflight_in(ctx, current_index);
+            let (current_index, exec_command) = parse_internal_preflight_args(&args, subcommand)?;
+            return cmd_rebase_exec_preflight_in(ctx, current_index, &exec_command);
         }
         if subcommand == "rebase-exec-begin" {
-            let current_index = parse_internal_current_index_arg(&args, subcommand)?;
-            return cmd_rebase_exec_begin_in(ctx, current_index);
+            let (current_index, bootstrap) = parse_internal_begin_args(&args, subcommand)?;
+            return cmd_rebase_exec_begin_in(ctx, current_index, &bootstrap);
         }
     }
 
@@ -3960,6 +4210,9 @@ mod proptests {
         );
         let base_sha = CommitSha::new("2222222222222222222222222222222222222222".to_owned())
             .or_abort("valid sha");
+        let start_head = CommitSha::new("3333333333333333333333333333333333333333".to_owned())
+            .or_abort("valid sha");
+        let exec_command = NonEmptyString::try_from("true".to_owned()).or_abort("non-empty");
 
         run_start_rebase_in(
             &ctx,
@@ -3967,6 +4220,8 @@ mod proptests {
             &base_sha,
             false,
             &StateDir::new(PathBuf::from(".git/factor")),
+            &start_head,
+            &exec_command,
         )
         .or_abort("non-root rebase should succeed");
 
@@ -4012,6 +4267,9 @@ mod proptests {
         );
         let base_sha = CommitSha::new("2222222222222222222222222222222222222222".to_owned())
             .or_abort("valid sha");
+        let start_head = CommitSha::new("3333333333333333333333333333333333333333".to_owned())
+            .or_abort("valid sha");
+        let exec_command = NonEmptyString::try_from("true".to_owned()).or_abort("non-empty");
 
         run_start_rebase_in(
             &ctx,
@@ -4019,6 +4277,8 @@ mod proptests {
             &base_sha,
             true,
             &StateDir::new(PathBuf::from(".git/factor")),
+            &start_head,
+            &exec_command,
         )
         .or_abort("root rebase should succeed");
 
@@ -4058,6 +4318,9 @@ mod proptests {
         );
         let base_sha = CommitSha::new("2222222222222222222222222222222222222222".to_owned())
             .or_abort("valid sha");
+        let start_head = CommitSha::new("3333333333333333333333333333333333333333".to_owned())
+            .or_abort("valid sha");
+        let exec_command = NonEmptyString::try_from("true".to_owned()).or_abort("non-empty");
 
         let err = run_start_rebase_in(
             &ctx,
@@ -4065,6 +4328,8 @@ mod proptests {
             &base_sha,
             false,
             &StateDir::new(PathBuf::from(".git/factor")),
+            &start_head,
+            &exec_command,
         )
         .err_or_abort("runner status failure should map to git command error");
         assert_eq!(
@@ -4093,6 +4358,9 @@ mod proptests {
         );
         let base_sha = CommitSha::new("2222222222222222222222222222222222222222".to_owned())
             .or_abort("valid sha");
+        let start_head = CommitSha::new("3333333333333333333333333333333333333333".to_owned())
+            .or_abort("valid sha");
+        let exec_command = NonEmptyString::try_from("true".to_owned()).or_abort("non-empty");
 
         let err = run_start_rebase_in(
             &ctx,
@@ -4100,6 +4368,8 @@ mod proptests {
             &base_sha,
             false,
             &StateDir::new(PathBuf::from(".git/factor")),
+            &start_head,
+            &exec_command,
         )
         .err_or_abort("non-utf8 editor path should fail");
         assert_eq!(

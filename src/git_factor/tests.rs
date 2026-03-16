@@ -443,12 +443,36 @@ impl Runner for RebaseContinueCompletesRunner {
 
 struct RebaseStartPausesRunner {
     inner: ScriptedRunner,
+    pending_start_state: Option<PendingStartState>,
     rebase_dir: PathBuf,
 }
 
+struct PendingStartState {
+    commits: Vec<String>,
+    is_root: bool,
+    start_head: String,
+    state_dir: PathBuf,
+}
+
 impl RebaseStartPausesRunner {
-    fn new(inner: ScriptedRunner, rebase_dir: PathBuf) -> Self {
-        Self { inner, rebase_dir }
+    fn with_pending_start_state(
+        inner: ScriptedRunner,
+        rebase_dir: PathBuf,
+        state_dir: PathBuf,
+        commits: Vec<String>,
+        start_head: String,
+        is_root: bool,
+    ) -> Self {
+        Self {
+            inner,
+            rebase_dir,
+            pending_start_state: Some(PendingStartState {
+                commits,
+                is_root,
+                start_head,
+                state_dir,
+            }),
+        }
     }
 }
 
@@ -472,6 +496,31 @@ impl Runner for RebaseStartPausesRunner {
             && status.success()
         {
             fs::create_dir_all(&self.rebase_dir).or_abort("create rebase-merge");
+            if let Some(state) = self.pending_start_state.as_ref() {
+                fs::create_dir_all(&state.state_dir).or_abort("create factor state dir");
+                fs::write(state.state_dir.join("commits"), state.commits.join("\n"))
+                    .or_abort("write commits");
+                fs::write(state.state_dir.join("current_index"), "0")
+                    .or_abort("write current_index");
+                fs::write(
+                    state.state_dir.join("phase"),
+                    SessionPhase::PendingStart.as_str(),
+                )
+                .or_abort("write phase");
+                fs::write(state.state_dir.join("split_count"), "0").or_abort("write split_count");
+                fs::write(state.state_dir.join("requires_rebase"), "true")
+                    .or_abort("write requires_rebase");
+                fs::write(state.state_dir.join("started_rebase"), "true")
+                    .or_abort("write started_rebase");
+                fs::write(state.state_dir.join("start_head"), &state.start_head)
+                    .or_abort("write start_head");
+                fs::write(
+                    state.state_dir.join("is_root"),
+                    if state.is_root { "true" } else { "false" },
+                )
+                .or_abort("write is_root");
+                fs::write(state.state_dir.join("exec"), "true").or_abort("write exec");
+            }
         }
         Ok(status)
     }
@@ -1456,35 +1505,46 @@ fn run_start_two_shas(ctx: &Ctx<'_>, sha_a: &str, sha_b: &str) -> Result<i32, Fa
     )
 }
 
-fn build_sequence_editor(repo: &Path) -> String {
+fn build_sequence_editor(repo: &Path, sha_a: &str, sha_b: &str) -> String {
     let canon_repo = fs::canonicalize(repo).or_abort("canonicalize repo");
     let editor = canon_repo.join("git-sequence-editor");
     let factor = repo.join("git-factor");
     let editor_str = editor.to_str().or_abort("editor path is UTF-8");
     let factor_str = factor.to_str().or_abort("factor path is UTF-8");
+    let commits = format!("{sha_a},{sha_b}");
     let preflight_zero = format!(
-        "{} {} {}",
+        "{} {} {} {}",
         shell_quote(factor_str),
         shell_quote("rebase-exec-preflight"),
-        shell_quote("0")
+        shell_quote("0"),
+        shell_quote("true")
     );
     let begin_zero = format!(
-        "{} {} {}",
+        "{} {} {} {} {} {} {}",
         shell_quote(factor_str),
         shell_quote("rebase-exec-begin"),
-        shell_quote("0")
+        shell_quote("0"),
+        shell_quote(sha_b),
+        shell_quote("false"),
+        shell_quote("true"),
+        shell_quote(commits.as_str())
     );
     let preflight_one = format!(
-        "{} {} {}",
+        "{} {} {} {}",
         shell_quote(factor_str),
         shell_quote("rebase-exec-preflight"),
-        shell_quote("1")
+        shell_quote("1"),
+        shell_quote("true")
     );
     let begin_one = format!(
-        "{} {} {}",
+        "{} {} {} {} {} {} {}",
         shell_quote(factor_str),
         shell_quote("rebase-exec-begin"),
-        shell_quote("1")
+        shell_quote("1"),
+        shell_quote(sha_b),
+        shell_quote("false"),
+        shell_quote("true"),
+        shell_quote(commits.as_str())
     );
     [
         shell_quote(editor_str),
@@ -1509,7 +1569,7 @@ fn build_sequence_editor(repo: &Path) -> String {
     reason = "range start fixture scripts the entire preflight, sequence-editor, and rebase setup flow"
 )]
 fn start_range_ref_runner(repo: &Path, sha_a: &str, sha_b: &str) -> ScriptedRunner {
-    let seq_editor = build_sequence_editor(repo);
+    let seq_editor = build_sequence_editor(repo, sha_a, sha_b);
     with_git_dir_outputs(ScriptedRunner::default(), repo, 2)
         .with_output("git", &["status", "--porcelain=v1"], repo, "")
         .with_output(
@@ -1671,6 +1731,209 @@ fn ctx_from_parts<'ctx>(
         io,
         runner,
     })
+}
+
+#[test]
+fn repo_status_stdout_returns_exact_porcelain_stdout() {
+    let dir = TempDir::new().or_abort("tempdir");
+    let env = TestEnv {
+        cwd: dir.path().to_path_buf(),
+    };
+    let io = TestIo::default();
+    let runner = ScriptedRunner::default().with_output_status(
+        "git",
+        &["status", "--porcelain=v1"],
+        dir.path(),
+        0,
+        "M  src/git_factor.rs\n",
+        "",
+    );
+    let ctx = ctx_from_parts(&env, &runner, &io, &REAL_FS).or_abort("ctx");
+
+    let stdout = repo_status_stdout(&ctx).or_abort("repo status should succeed");
+
+    assert_eq!(stdout, "M  src/git_factor.rs\n");
+}
+
+#[test]
+fn repo_status_stdout_rejects_nonempty_stderr() {
+    let dir = TempDir::new().or_abort("tempdir");
+    let env = TestEnv {
+        cwd: dir.path().to_path_buf(),
+    };
+    let io = TestIo::default();
+    let runner = ScriptedRunner::default().with_output_status(
+        "git",
+        &["status", "--porcelain=v1"],
+        dir.path(),
+        0,
+        "",
+        "warning: odd status output\n",
+    );
+    let ctx = ctx_from_parts(&env, &runner, &io, &REAL_FS).or_abort("ctx");
+
+    let err = repo_status_stdout(&ctx).err_or_abort("stderr should be rejected");
+
+    assert_eq!(
+        err.to_string(),
+        "git command failed: git status --porcelain=v1 produced unexpected output (exit 0)\nSTDERR:\nwarning: odd status output"
+    );
+}
+
+#[test]
+fn repo_status_matches_policy_distinguishes_fully_clean_and_staged_only() {
+    assert!(repo_status_matches_policy("", RepoStatePolicy::FullyClean));
+    assert!(repo_status_matches_policy(
+        "M  src/git_factor.rs\n",
+        RepoStatePolicy::StagedOnly
+    ));
+    assert!(!repo_status_matches_policy(
+        "M  src/git_factor.rs\n",
+        RepoStatePolicy::FullyClean
+    ));
+    assert!(!repo_status_matches_policy(
+        " M src/git_factor.rs\n",
+        RepoStatePolicy::StagedOnly
+    ));
+    assert!(!repo_status_matches_policy(
+        "?? scratch.txt\n",
+        RepoStatePolicy::StagedOnly
+    ));
+    assert!(!repo_status_matches_policy(
+        "!! target/\n",
+        RepoStatePolicy::StagedOnly
+    ));
+}
+
+#[test]
+fn ensure_repo_state_reports_status_when_policy_is_violated() {
+    let dir = TempDir::new().or_abort("tempdir");
+    let env = TestEnv {
+        cwd: dir.path().to_path_buf(),
+    };
+    let io = TestIo::default();
+    let runner = ScriptedRunner::default().with_output_status(
+        "git",
+        &["status", "--porcelain=v1"],
+        dir.path(),
+        0,
+        "?? scratch.txt\n",
+        "",
+    );
+    let ctx = ctx_from_parts(&env, &runner, &io, &REAL_FS).or_abort("ctx");
+
+    let err = ensure_repo_state(&ctx, RepoStatePolicy::FullyClean, "repo must be clean")
+        .err_or_abort("dirty state should fail");
+
+    assert_eq!(
+        err.to_string(),
+        "git command failed: repo must be clean\nSTATUS:\n?? scratch.txt"
+    );
+}
+
+#[test]
+fn current_exe_command_prefix_shell_quotes_current_executable() {
+    let dir = TempDir::new().or_abort("tempdir");
+    let env = TestEnv {
+        cwd: dir.path().join("dir with spaces"),
+    };
+    let io = TestIo::default();
+    let runner = ScriptedRunner::default();
+    let ctx = ctx_from_parts(&env, &runner, &io, &REAL_FS).or_abort("ctx");
+
+    let prefix = current_exe_command_prefix(&ctx).or_abort("current exe prefix");
+
+    assert_eq!(
+        prefix,
+        shell_quote(env.cwd.join("git-factor").to_str().or_abort("utf-8 path"))
+    );
+}
+
+#[test]
+fn current_exe_command_prefix_propagates_current_exe_failures() {
+    let dir = TempDir::new().or_abort("tempdir");
+    let env = ExeFailingEnv {
+        cwd: dir.path().to_path_buf(),
+    };
+    let io = TestIo::default();
+    let runner = ScriptedRunner::default();
+    let ctx = ctx_from_parts(&env, &runner, &io, &REAL_FS).or_abort("ctx");
+
+    let err = current_exe_command_prefix(&ctx).err_or_abort("current_exe should fail");
+
+    assert_eq!(
+        err.to_string(),
+        "git command failed: cannot resolve current executable: no exe"
+    );
+}
+
+#[test]
+fn rebase_exec_hidden_commands_quote_all_dynamic_arguments() {
+    let dir = TempDir::new().or_abort("tempdir");
+    let env = TestEnv {
+        cwd: dir.path().join("dir with spaces"),
+    };
+    let io = TestIo::default();
+    let runner = ScriptedRunner::default();
+    let ctx = ctx_from_parts(&env, &runner, &io, &REAL_FS).or_abort("ctx");
+    let exec_command =
+        NonEmptyString::try_from("just ci && cargo test --quiet".to_owned()).or_abort("exec");
+    let start_head = CommitSha::new("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_owned())
+        .or_abort("start head");
+    let mut commits = NonEmpty::new(
+        CommitSha::new("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned()).or_abort("sha a"),
+    );
+    commits.push(
+        CommitSha::new("cccccccccccccccccccccccccccccccccccccccc".to_owned()).or_abort("sha c"),
+    );
+
+    let preflight =
+        rebase_exec_preflight_command(&ctx, CurrentIndex(3), &exec_command).or_abort("preflight");
+    let begin = rebase_exec_begin_command(
+        &ctx,
+        CurrentIndex(3),
+        &start_head,
+        true,
+        &exec_command,
+        &commits,
+    )
+    .or_abort("begin");
+
+    assert_eq!(
+        preflight,
+        format!(
+            "{} {} {} {}",
+            shell_quote(
+                env.cwd
+                    .join("git-factor")
+                    .to_str()
+                    .or_abort("utf-8 current exe"),
+            ),
+            shell_quote("rebase-exec-preflight"),
+            shell_quote("3"),
+            shell_quote(exec_command.as_str()),
+        )
+    );
+    assert_eq!(
+        begin,
+        format!(
+            "{} {} {} {} {} {} {}",
+            shell_quote(
+                env.cwd
+                    .join("git-factor")
+                    .to_str()
+                    .or_abort("utf-8 current exe"),
+            ),
+            shell_quote("rebase-exec-begin"),
+            shell_quote("3"),
+            shell_quote(start_head.as_str()),
+            shell_quote("true"),
+            shell_quote(exec_command.as_str()),
+            shell_quote(
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa,cccccccccccccccccccccccccccccccccccccccc",
+            ),
+        )
+    );
 }
 
 #[test]
@@ -3042,9 +3305,13 @@ fn cmd_start_range_ref_inserts_shas_and_propagates_io_error_on_multi_commit_bann
 
     let sha_a = "a".repeat(SHA_LEN);
     let sha_b = "b".repeat(SHA_LEN);
-    let runner = RebaseStartPausesRunner::new(
+    let runner = RebaseStartPausesRunner::with_pending_start_state(
         start_range_ref_runner(repo, &sha_a, &sha_b),
         repo.join(".git").join("rebase-merge"),
+        repo.join(".git").join("factor"),
+        vec![sha_a.clone(), sha_b.clone()],
+        sha_b.clone(),
+        false,
     );
     let io = FailingIo;
     let env = TestEnv {
@@ -3083,9 +3350,13 @@ fn cmd_start_range_ref_inserts_shas_and_starts_multi_commit_session() {
 
     let sha_a = "a".repeat(SHA_LEN);
     let sha_b = "b".repeat(SHA_LEN);
-    let runner = RebaseStartPausesRunner::new(
+    let runner = RebaseStartPausesRunner::with_pending_start_state(
         start_range_ref_runner(repo, &sha_a, &sha_b),
         repo.join(".git").join("rebase-merge"),
+        repo.join(".git").join("factor"),
+        vec![sha_a.clone(), sha_b.clone()],
+        sha_b.clone(),
+        false,
     );
     let io = TestIo::default();
     let env = TestEnv {
@@ -10658,13 +10929,13 @@ fn rehydrate_pool_preserving_index_reports_quit_failure_after_successful_cherry_
 }
 
 #[test]
-fn cmd_start_reports_rebase_failure_and_cleanup_warning_when_state_remove_fails() {
+fn cmd_start_rebase_failure_does_not_warn_when_state_was_never_created() {
     let dir = TempDir::new().or_abort("tempdir");
     let repo = dir.path();
     fs::write(repo.join("git-factor"), "").or_abort("create git-factor");
     let sha_a = "a".repeat(SHA_LEN);
     let sha_b = "b".repeat(SHA_LEN);
-    let seq_editor = build_sequence_editor(repo);
+    let seq_editor = build_sequence_editor(repo, &sha_a, &sha_b);
     let runner = start_rebase_failure_runner(repo, &sha_a, &sha_b, &seq_editor);
     let io = TestIo::default();
     let env = TestEnv {
@@ -10683,11 +10954,7 @@ fn cmd_start_reports_rebase_failure_and_cleanup_warning_when_state_remove_fails(
         matches!(&err, FactorError::GitCommand(msg) if msg.contains("git rebase failed (exit")),
         "err was: {err:?}"
     );
-    assert!(
-        io.stderr().contains("failed to remove factor state path"),
-        "stderr should contain removal warning but was: {}",
-        io.stderr()
-    );
+    assert!(io.stderr().is_empty(), "stderr should be empty");
 }
 
 #[test]
@@ -10906,13 +11173,13 @@ fn cmd_start_propagates_worktree_status_error_before_commit_resolution() {
 }
 
 #[test]
-fn cmd_start_propagates_io_error_when_cleanup_warning_write_fails_after_rebase_failure() {
+fn cmd_start_rebase_failure_skips_cleanup_warning_io_when_state_was_never_created() {
     let dir = TempDir::new().or_abort("tempdir");
     let repo = dir.path();
     fs::write(repo.join("git-factor"), "").or_abort("create git-factor");
     let sha_a = "a".repeat(SHA_LEN);
     let sha_b = "b".repeat(SHA_LEN);
-    let seq_editor = build_sequence_editor(repo);
+    let seq_editor = build_sequence_editor(repo, &sha_a, &sha_b);
     let runner = start_rebase_failure_runner(repo, &sha_a, &sha_b, &seq_editor);
     let io = FailingIo;
     let env = TestEnv {
@@ -10926,9 +11193,10 @@ fn cmd_start_propagates_io_error_when_cleanup_warning_write_fails_after_rebase_f
         fs: &FailingRemoveDirAllFs,
     };
 
-    let err = run_start_two_shas(&ctx, &sha_a, &sha_b).err_or_abort("expected io failure");
+    let err =
+        run_start_two_shas(&ctx, &sha_a, &sha_b).err_or_abort("expected rebase failure error");
     assert!(
-        matches!(&err, FactorError::Io(inner) if inner.to_string().contains("io fail")),
+        matches!(&err, FactorError::GitCommand(msg) if msg.contains("git rebase failed (exit")),
         "err was: {err:?}"
     );
 }
@@ -10994,7 +11262,7 @@ fn cmd_start_reports_rebase_failure_without_cleanup_warning_when_state_removal_s
     fs::write(repo.join("git-factor"), "").or_abort("create git-factor");
     let sha_a = "a".repeat(SHA_LEN);
     let sha_b = "b".repeat(SHA_LEN);
-    let seq_editor = build_sequence_editor(repo);
+    let seq_editor = build_sequence_editor(repo, &sha_a, &sha_b);
     let runner = start_rebase_failure_runner(repo, &sha_a, &sha_b, &seq_editor);
     let io = TestIo::default();
     let env = TestEnv {
@@ -12197,7 +12465,7 @@ fn proptest_run_unit_suite_part_2() {
     cmd_start_propagates_expected_tree_capture_error_after_state_write();
     cmd_start_propagates_head_lookup_error_after_sorting();
     cmd_start_propagates_invalid_exec_syntax();
-    cmd_start_propagates_io_error_when_cleanup_warning_write_fails_after_rebase_failure();
+    cmd_start_rebase_failure_skips_cleanup_warning_io_when_state_was_never_created();
     cmd_start_propagates_is_root_state_write_failure();
     cmd_start_propagates_rebase_status_error_in_multi_commit_session();
     cmd_start_propagates_requires_rebase_state_write_failure();
@@ -12208,7 +12476,7 @@ fn proptest_run_unit_suite_part_2() {
     cmd_start_range_ref_inserts_shas_and_propagates_io_error_on_multi_commit_banner();
     cmd_start_range_ref_inserts_shas_and_starts_multi_commit_session();
     cmd_start_rejects_merge_commit_during_validation();
-    cmd_start_reports_rebase_failure_and_cleanup_warning_when_state_remove_fails();
+    cmd_start_rebase_failure_does_not_warn_when_state_was_never_created();
     cmd_start_reports_rebase_failure_without_cleanup_warning_when_state_removal_succeeds();
     cmd_start_root_session_propagates_mixed_reset_error();
     cmd_start_single_head_root_session_propagates_reset_error();

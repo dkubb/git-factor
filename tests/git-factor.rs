@@ -3643,19 +3643,26 @@ fi
         let bad_editor = bin_dir.path().join("git-sequence-editor");
         write_executable(&bad_editor, "#!/bin/sh\nexit 1\n");
         let bad_editor_canonical = fs::canonicalize(&bad_editor).or_abort();
+        let head_sha = git(repo, &["rev-parse", "HEAD"]);
+        let target_sha = git(repo, &["rev-parse", "HEAD~1"]);
         let edited_short_sha = git(repo, &["rev-parse", "--short", "HEAD~1"]);
         let factor_str = factor.to_str().or_abort();
         let preflight = format!(
-            "{} {} {}",
+            "{} {} {} {}",
             shell_quote(factor_str),
             shell_quote("rebase-exec-preflight"),
-            shell_quote("0")
+            shell_quote("0"),
+            shell_quote("true")
         );
         let begin = format!(
-            "{} {} {}",
+            "{} {} {} {} {} {} {}",
             shell_quote(factor_str),
             shell_quote("rebase-exec-begin"),
-            shell_quote("0")
+            shell_quote("0"),
+            shell_quote(head_sha.as_str()),
+            shell_quote("true"),
+            shell_quote("true"),
+            shell_quote(target_sha.as_str())
         );
         let sequence_editor = [
             shell_quote(bad_editor_canonical.to_str().or_abort()),
