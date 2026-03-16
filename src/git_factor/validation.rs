@@ -815,6 +815,48 @@ mod tests {
         }
     }
 
+    struct ParentParseRunner;
+
+    impl Runner for ParentParseRunner {
+        fn output(&self, _bin: &str, args: &[&str], _cwd: &Path) -> io::Result<Output> {
+            let end_parent_ref = format!("{SPAN_END_SHA}^");
+            if args == ["rev-parse", "--verify", end_parent_ref.as_str()] {
+                Ok(Output {
+                    status: ExitStatus::from_raw(0),
+                    stdout: b"not-a-commit\n".to_vec(),
+                    stderr: Vec::new(),
+                })
+            } else {
+                Err(io::Error::other(format!(
+                    "unexpected output args: {}",
+                    args.join(" ")
+                )))
+            }
+        }
+
+        fn status(
+            &self,
+            _bin: &str,
+            args: &[&str],
+            _envs: &[(&str, &str)],
+            _quiet: bool,
+            _cwd: &Path,
+        ) -> io::Result<ExitStatus> {
+            let start_merge_ref = format!("{SPAN_START_SHA}^2");
+            let end_merge_ref = format!("{SPAN_END_SHA}^2");
+            if args == ["rev-parse", "--quiet", "--verify", start_merge_ref.as_str()]
+                || args == ["rev-parse", "--quiet", "--verify", end_merge_ref.as_str()]
+            {
+                Ok(ExitStatus::from_raw(256))
+            } else {
+                Err(io::Error::other(format!(
+                    "unexpected status args: {}",
+                    args.join(" ")
+                )))
+            }
+        }
+    }
+
     fn ctx_for(path: &Path) -> Ctx<'static> {
         Ctx {
             runner: &REAL_RUNNER,
@@ -1324,6 +1366,34 @@ mod tests {
             format!(
                 "{SPAN_START_SHA} {SPAN_END_SHA} (selected commits must form a contiguous ancestry span)"
             )
+        );
+    }
+
+    #[test]
+    fn validate_contiguous_span_rejects_invalid_parent_sha_output() {
+        let dir = TempDir::new().or_abort("tempdir");
+        let runner = ParentParseRunner;
+        let env = TestEnv {
+            cwd: dir.path().to_path_buf(),
+        };
+        let ctx = Ctx {
+            runner: &runner,
+            cwd: dir.path().to_path_buf(),
+            io: &REAL_IO,
+            env: &env,
+            fs: &REAL_FS,
+        };
+        let commits = NonEmpty {
+            head: CommitSha::new(SPAN_START_SHA.to_owned()).or_abort("start"),
+            tail: vec![CommitSha::new(SPAN_END_SHA.to_owned()).or_abort("end")],
+        };
+
+        let err =
+            validate_contiguous_span(&ctx, &commits).err_or_abort("invalid parent sha should fail");
+
+        assert_eq!(
+            invalid_commit_message(&err).or_abort("expected InvalidCommit"),
+            SPAN_END_SHA
         );
     }
 
@@ -1873,6 +1943,73 @@ mod tests {
                 .to_string()
                 .contains("unexpected status args"),
             "unexpected error: {unexpected_lookup_status:?}"
+        );
+    }
+
+    #[test]
+    fn parent_parse_runner_covers_expected_and_unexpected_paths() {
+        let parent_parse_runner = ParentParseRunner;
+        let invalid_parent_output = parent_parse_runner
+            .output(
+                "git",
+                &["rev-parse", "--verify", &format!("{SPAN_END_SHA}^")],
+                Path::new("."),
+            )
+            .or_abort("invalid parent output");
+        assert!(invalid_parent_output.status.success());
+        assert_eq!(invalid_parent_output.stdout, b"not-a-commit\n");
+        assert!(invalid_parent_output.stderr.is_empty());
+
+        let parse_start_merge = parent_parse_runner
+            .status(
+                "git",
+                &[
+                    "rev-parse",
+                    "--quiet",
+                    "--verify",
+                    &format!("{SPAN_START_SHA}^2"),
+                ],
+                &[],
+                false,
+                Path::new("."),
+            )
+            .or_abort("parse start merge check");
+        assert!(!parse_start_merge.success());
+
+        let parse_end_merge = parent_parse_runner
+            .status(
+                "git",
+                &[
+                    "rev-parse",
+                    "--quiet",
+                    "--verify",
+                    &format!("{SPAN_END_SHA}^2"),
+                ],
+                &[],
+                false,
+                Path::new("."),
+            )
+            .or_abort("parse end merge check");
+        assert!(!parse_end_merge.success());
+
+        let unexpected_parse_output = parent_parse_runner
+            .output("git", &["status"], Path::new("."))
+            .err_or_abort("unexpected parse output args should fail");
+        assert!(
+            unexpected_parse_output
+                .to_string()
+                .contains("unexpected output args"),
+            "unexpected error: {unexpected_parse_output:?}"
+        );
+
+        let unexpected_parse_status = parent_parse_runner
+            .status("git", &["status"], &[], false, Path::new("."))
+            .err_or_abort("unexpected parse status args should fail");
+        assert!(
+            unexpected_parse_status
+                .to_string()
+                .contains("unexpected status args"),
+            "unexpected error: {unexpected_parse_status:?}"
         );
     }
 
