@@ -2258,11 +2258,30 @@ fn run_and_report_with_args_vec(ctx: &Ctx<'_>, args: &[OsString]) -> i32 {
     match run_with_args_vec(ctx, args.to_owned()) {
         Ok(code) => code,
         Err(err) => {
+            persist_unexpected_session_error(ctx, &err, args);
             let (code, message) = error_to_exit(&err);
             drop(ctx.errln(&message));
             code
         }
     }
+}
+
+/// Persists unexpected active-session failures for later debugging.
+#[expect(
+    clippy::single_call_fn,
+    reason = "best-effort error-log persistence stays separate from exit reporting"
+)]
+fn persist_unexpected_session_error(ctx: &Ctx<'_>, err: &FactorError, args: &[OsString]) {
+    if !err.should_persist_error_log() {
+        return;
+    }
+    let Ok(state_dir) = factor_dir_in(ctx) else {
+        return;
+    };
+    if !ctx.fs.is_dir(state_dir.as_path()) {
+        return;
+    }
+    drop(write_error_log(ctx, args, err));
 }
 
 /// Parses one hidden internal UTF-8 argument from CLI argv.

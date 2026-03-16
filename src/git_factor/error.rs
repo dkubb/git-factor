@@ -91,13 +91,6 @@ pub(in crate::git_factor) enum FactorError {
 
 impl FactorError {
     /// Returns true when this error should be persisted to `.git/factor/error.log`.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "used by later error-log persistence wiring in the same factor split"
-        )
-    )]
     pub(in crate::git_factor) const fn should_persist_error_log(&self) -> bool {
         match self {
             &Self::GitCommand(_)

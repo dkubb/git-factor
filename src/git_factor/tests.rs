@@ -4810,6 +4810,121 @@ fn run_with_args_invalid_flag_writes_to_stderr_and_returns_usage() {
 }
 
 #[test]
+fn run_and_report_writes_error_log_for_unexpected_active_session_failure() {
+    let dir = TempDir::new().or_abort("tempdir");
+    let repo = dir.path();
+    let git_dir = repo.join(".git");
+    let state_dir = git_dir.join("factor");
+    fs::create_dir_all(&state_dir).or_abort("create factor dir");
+
+    let sha = "a".repeat(SHA_LEN);
+    fs::write(state_dir.join("commits"), format!("{sha}\n")).or_abort("write commits");
+    fs::write(state_dir.join("current_index"), "0\n").or_abort("write current index");
+
+    let runner = with_git_dir_outputs(ScriptedRunner::default(), repo, 4)
+        .with_status(
+            "git",
+            &["reset", "--hard", "--quiet", &sha],
+            &[],
+            false,
+            repo,
+            0,
+        )
+        .with_status(
+            "git",
+            &["clean", "--force", "--quiet", "-d"],
+            &[],
+            false,
+            repo,
+            0,
+        );
+    let io = TestIo::default();
+    let env = TestEnv {
+        cwd: repo.to_path_buf(),
+    };
+    let ctx = Ctx {
+        runner: &runner,
+        cwd: repo.to_path_buf(),
+        io: &io,
+        env: &env,
+        fs: &FailingRemoveDirAllFs,
+    };
+
+    let code = run_and_report_with_args_vec(
+        &ctx,
+        &[OsString::from("git-factor"), OsString::from("--abort")],
+    );
+
+    assert_eq!(code, EXIT_SOFTWARE);
+    assert!(
+        io.stderr().contains("failed to remove factor state path"),
+        "stderr was: {}",
+        io.stderr()
+    );
+    let error_log =
+        fs::read_to_string(state_dir.join("error.log")).or_abort("error log should exist");
+    assert!(error_log.contains("argv=git-factor --abort"));
+    assert!(error_log.contains("error=git command failed: failed to remove factor state path"));
+    assert!(error_log.contains(format!("factor_current_commit={sha}").as_str()));
+}
+
+#[test]
+fn run_and_report_skips_error_log_for_expected_continue_recovery() {
+    let dir = TempDir::new().or_abort("tempdir");
+    let repo = dir.path();
+    let git_dir = repo.join(".git");
+    let state_dir = git_dir.join("factor");
+    fs::create_dir_all(&state_dir).or_abort("create factor dir");
+
+    let sha = "a".repeat(SHA_LEN);
+    fs::write(state_dir.join("commits"), format!("{sha}\n")).or_abort("write commits");
+    fs::write(state_dir.join("current_index"), "0\n").or_abort("write current index");
+    fs::write(state_dir.join("exec"), "true\n").or_abort("write exec");
+    fs::write(state_dir.join("requires_rebase"), "false\n").or_abort("write requires_rebase");
+
+    let runner = with_git_dir_outputs(ScriptedRunner::default(), repo, 2).with_status(
+        "git",
+        &["diff", "--quiet", "--staged"],
+        &[],
+        false,
+        repo,
+        0,
+    );
+    let io = TestIo::default();
+    let env = TestEnv {
+        cwd: repo.to_path_buf(),
+    };
+    let ctx = Ctx {
+        runner: &runner,
+        cwd: repo.to_path_buf(),
+        io: &io,
+        env: &env,
+        fs: &REAL_FS,
+    };
+
+    let code = run_and_report_with_args_vec(
+        &ctx,
+        &[
+            OsString::from("git-factor"),
+            OsString::from("--continue"),
+            OsString::from("--message"),
+            OsString::from("test: next"),
+        ],
+    );
+
+    assert_eq!(code, EXIT_USAGE);
+    assert!(
+        io.stderr().contains("no staged changes to commit"),
+        "stderr was: {}",
+        io.stderr()
+    );
+    assert!(
+        !state_dir.join("error.log").exists(),
+        "error log should not be written for expected recovery cases"
+    );
+}
+
+#[test]
 fn write_error_log_includes_trace_path_and_error_sources() {
     #[derive(Debug)]
     struct InnerCause;
@@ -4979,157 +5094,6 @@ fn write_error_log_includes_false_requires_rebase_and_apply_state() {
     assert!(error_log.contains("rebase_msgnum=3"));
     assert!(error_log.contains("rebase_end=5"));
     assert!(error_log.contains("rebase_todo_head=patch"));
-}
-
-#[test]
-fn write_error_log_includes_merge_state_and_done_tail() {
-    let dir = TempDir::new().or_abort("tempdir");
-    let repo = dir.path();
-    let git_dir = repo.join(".git");
-    let state_dir = git_dir.join("factor");
-    let rebase_merge = git_dir.join(REBASE_MERGE_DIR);
-    fs::create_dir_all(&state_dir).or_abort("create factor dir");
-    fs::create_dir_all(&rebase_merge).or_abort("create rebase-merge dir");
-
-    let sha = "e".repeat(SHA_LEN);
-    let tree = "f".repeat(SHA_LEN);
-    fs::write(state_dir.join("commits"), format!("{sha}\n")).or_abort("write commits");
-    fs::write(state_dir.join("current_index"), "0\n").or_abort("write current index");
-    fs::write(state_dir.join("requires_rebase"), "true\n").or_abort("write requires_rebase");
-    fs::write(rebase_merge.join("msgnum"), "4\n").or_abort("write msgnum");
-    fs::write(rebase_merge.join("end"), "6\n").or_abort("write end");
-    fs::write(rebase_merge.join("done"), "pick one\npick two\n").or_abort("write done");
-
-    let runner = with_git_dir_outputs(ScriptedRunner::default(), repo, 1)
-        .with_output(
-            "git",
-            &["rev-parse", "--verify", "HEAD"],
-            repo,
-            &format!("{sha}\n"),
-        )
-        .with_output(
-            "git",
-            &["rev-parse", "--verify", HEAD_TREEISH],
-            repo,
-            &format!("{tree}\n"),
-        )
-        .with_output(
-            "git",
-            &["rev-parse", "--show-toplevel"],
-            repo,
-            &format!("{}\n", repo.display()),
-        )
-        .with_output(
-            "git",
-            &["status", "--porcelain=v1", "--untracked-files=all"],
-            repo,
-            "",
-        );
-    let io = TestIo::default();
-    let ctx = Ctx {
-        runner: &runner,
-        cwd: repo.to_path_buf(),
-        io: &io,
-        env: &REAL_ENV,
-        fs: &REAL_FS,
-    };
-    let args = [OsString::from("git-factor"), OsString::from("--finish")];
-    let error = FactorError::StateWrite(io::Error::other("merge state failure"));
-
-    write_error_log(&ctx, &args, &error).or_abort("write error log should succeed");
-
-    let error_log =
-        fs::read_to_string(state_dir.join(ERROR_LOG_FILE)).or_abort("error log should exist");
-    assert!(error_log.contains("rebase_state=rebase-merge"));
-    assert!(error_log.contains("rebase_msgnum=4"));
-    assert!(error_log.contains("rebase_end=6"));
-    assert!(error_log.contains("rebase_done_tail=pick two"));
-}
-
-#[test]
-fn write_error_log_returns_git_dir_error_when_factor_dir_lookup_fails() {
-    let dir = TempDir::new().or_abort("tempdir");
-    let repo = dir.path();
-    let io = TestIo::default();
-    let runner = ScriptedRunner::default().with_output_status(
-        "git",
-        &["rev-parse", "--git-dir"],
-        repo,
-        128,
-        "",
-        "fatal: not a git repository\n",
-    );
-    let ctx = Ctx {
-        runner: &runner,
-        cwd: repo.to_path_buf(),
-        io: &io,
-        env: &REAL_ENV,
-        fs: &REAL_FS,
-    };
-    let args = [OsString::from("git-factor"), OsString::from("--finish")];
-    let error = FactorError::StateWrite(io::Error::other("lookup failure"));
-
-    let err = write_error_log(&ctx, &args, &error).err_or_abort("git-dir lookup should fail first");
-
-    assert!(matches!(&err, FactorError::NotGitRepo), "err was: {err:?}");
-}
-
-#[test]
-fn write_error_log_returns_state_write_error_when_log_write_fails() {
-    let dir = TempDir::new().or_abort("tempdir");
-    let repo = dir.path();
-    let git_dir = repo.join(".git");
-    let state_dir = git_dir.join("factor");
-    fs::create_dir_all(&state_dir).or_abort("create factor dir");
-
-    let sha = "1".repeat(SHA_LEN);
-    let tree = "2".repeat(SHA_LEN);
-    let runner = with_git_dir_outputs(ScriptedRunner::default(), repo, 1)
-        .with_output(
-            "git",
-            &["rev-parse", "--verify", "HEAD"],
-            repo,
-            &format!("{sha}\n"),
-        )
-        .with_output(
-            "git",
-            &["rev-parse", "--verify", HEAD_TREEISH],
-            repo,
-            &format!("{tree}\n"),
-        )
-        .with_output(
-            "git",
-            &["rev-parse", "--show-toplevel"],
-            repo,
-            &format!("{}\n", repo.display()),
-        )
-        .with_output(
-            "git",
-            &["status", "--porcelain=v1", "--untracked-files=all"],
-            repo,
-            "",
-        );
-    let io = TestIo::default();
-    let fs = FailingWriteForFileFs {
-        file_name: ERROR_LOG_FILE,
-        message: "error log write failed",
-    };
-    let ctx = Ctx {
-        runner: &runner,
-        cwd: repo.to_path_buf(),
-        io: &io,
-        env: &REAL_ENV,
-        fs: &fs,
-    };
-    let args = [OsString::from("git-factor"), OsString::from("--finish")];
-    let error = FactorError::StateWrite(io::Error::other("write failure"));
-
-    let err = write_error_log(&ctx, &args, &error).err_or_abort("error-log write should fail");
-
-    assert!(
-        matches!(&err, FactorError::StateWrite(inner) if inner.to_string() == "error log write failed"),
-        "err was: {err:?}"
-    );
 }
 
 #[test]

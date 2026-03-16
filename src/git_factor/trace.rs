@@ -588,8 +588,8 @@ fn push_log_line(content: &mut String, args: Arguments<'_>) {
 #[cfg_attr(
     not(test),
     expect(
-        dead_code,
-        reason = "used by later error-log persistence wiring in the same factor split"
+        clippy::single_call_fn,
+        reason = "error-log formatting is isolated from control-flow handling"
     )
 )]
 #[expect(
