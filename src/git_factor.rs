@@ -1194,6 +1194,61 @@ fn restore_staged_and_worktree_from_commit(
     )
 }
 
+/// Restores the remaining pool and returns unstaged/untracked summaries.
+#[expect(
+    clippy::single_call_fn,
+    reason = "continue/retry paths share one pool restore routine"
+)]
+fn restore_remaining_pool(
+    ctx: &Ctx<'_>,
+    original_commit: &CommitSha,
+    expected_tree: &TreeHash,
+) -> Result<(String, String), FactorError> {
+    restore_staged_and_worktree_from_commit(ctx, original_commit)?;
+    let restored_tree = TreeHash::new(&git_output(ctx, &["write-tree"])?)?;
+    if restored_tree != *expected_tree {
+        return Err(FactorError::TreeHashMismatch {
+            actual: restored_tree,
+            expected: expected_tree.clone(),
+        });
+    }
+    run_git(ctx, &["reset", "--quiet"])?;
+    let stat_output = git_output(ctx, &["diff", "--stat"])?;
+    let untracked_output = git_output(ctx, &["ls-files", "--others", "--exclude-standard"])?;
+    Ok((stat_output, untracked_output))
+}
+
+/// Prints the restored remaining-pool summary and next-step guidance.
+#[expect(
+    clippy::single_call_fn,
+    reason = "continue/retry paths share one remaining-pool printer"
+)]
+fn print_remaining_pool_state(
+    ctx: &Ctx<'_>,
+    heading: &str,
+    stat_output: &str,
+    untracked_output: &str,
+) -> Result<(), FactorError> {
+    let remaining = stat_output.lines().last().unwrap_or_default().to_owned();
+    ctx.outln(heading)?;
+    ctx.outln("STATE: Remaining changes are unstaged.")?;
+    ctx.outln("UNSTAGED:")?;
+    for line in stat_output.lines() {
+        ctx.outln(&format!("  {line}"))?;
+    }
+    if !untracked_output.is_empty() {
+        ctx.outln("UNTRACKED:")?;
+        for line in untracked_output.lines() {
+            ctx.outln(&format!("  {line}"))?;
+        }
+    }
+    ctx.out("\n")?;
+    print_continue_command(ctx, "NEXT: Stage changes for the next commit, then run:")?;
+    ctx.out("\n")?;
+    print_hints_with_remaining_in(ctx, remaining.as_str())?;
+    Ok(())
+}
+
 /// Continues an in-progress factor session.
 #[cfg_attr(
     not(test),
@@ -1300,34 +1355,14 @@ fn cmd_continue_in(ctx: &Ctx<'_>, messages: &NonEmpty<NonEmptyString>) -> Result
         };
     }
 
-    restore_staged_and_worktree_from_commit(ctx, &original_commit)?;
-    let restored_tree = TreeHash::new(&git_output(ctx, &["write-tree"])?)?;
-    if restored_tree != expected_tree {
-        return Err(FactorError::TreeHashMismatch {
-            actual: restored_tree,
-            expected: expected_tree,
-        });
-    }
-    run_git(ctx, &["reset", "--quiet"])?;
-    let stat_output = git_output(ctx, &["diff", "--stat"])?;
-    let untracked_output = git_output(ctx, &["ls-files", "--others", "--exclude-standard"])?;
-    let remaining = stat_output.lines().last().unwrap_or_default().to_owned();
-    ctx.outln(&format!("FACTOR: Split {split_count} committed."))?;
-    ctx.outln("STATE: Remaining changes are unstaged.")?;
-    ctx.outln("UNSTAGED:")?;
-    for line in stat_output.lines() {
-        ctx.outln(&format!("  {line}"))?;
-    }
-    if !untracked_output.is_empty() {
-        ctx.outln("UNTRACKED:")?;
-        for line in untracked_output.lines() {
-            ctx.outln(&format!("  {line}"))?;
-        }
-    }
-    ctx.out("\n")?;
-    print_continue_command(ctx, "NEXT: Stage changes for the next commit, then run:")?;
-    ctx.out("\n")?;
-    print_hints_with_remaining_in(ctx, remaining.as_str())?;
+    let (stat_output, untracked_output) =
+        restore_remaining_pool(ctx, &original_commit, &expected_tree)?;
+    print_remaining_pool_state(
+        ctx,
+        format!("FACTOR: Split {split_count} committed.").as_str(),
+        stat_output.as_str(),
+        untracked_output.as_str(),
+    )?;
     Ok(EXIT_OK)
 }
 
