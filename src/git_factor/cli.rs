@@ -40,7 +40,7 @@ struct SessionProgressFlags {
     /// Restores the green baseline commit into the index and working tree,
     /// then unstages everything so the session returns to the normal
     /// "remaining changes are unstaged" state.
-    #[arg(long = "retry", help_heading = "Session Control", hide = true)]
+    #[arg(long = "retry", help_heading = "Session Control")]
     retry: bool,
 }
 

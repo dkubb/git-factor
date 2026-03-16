@@ -537,6 +537,11 @@ Session Control:
           
           Cherry-picks the original commit to restore all remaining changes, verifies the tree hash matches the recorded green baseline, and commits the final split. When no --message is given, reuses the original commit message.
 
+      --retry
+          Discard the current split attempt and restore the remaining pool.
+          
+          Restores the green baseline commit into the index and working tree, then unstages everything so the session returns to the normal \"remaining changes are unstaged\" state.
+
       --abort
           Abort the current factor session and restore the repository
 
