@@ -164,13 +164,16 @@ pub(in crate::git_factor) fn resolve_commit_refs(
     Commits::try_from(set)
 }
 
-/// Resolves CLI commit arguments into one oldest-first ancestry span.
+/// Resolves CLI commit arguments into one contiguous, oldest-first ancestry
+/// span.
 ///
 /// Supported forms are:
 /// - `<rev>`
 /// - `<start> <end>` (inclusive)
 /// - `<start>..<end>` (exclusive start)
 /// - `<start>^..<end>` (inclusive start using git-native syntax)
+///
+/// The resolved commits must form one contiguous, merge-free ancestry path.
 #[cfg_attr(
     not(test),
     expect(
@@ -219,6 +222,7 @@ pub(in crate::git_factor) fn resolve_commit_span(
         }
     };
 
+    validate_contiguous_span(ctx, &commits)?;
     Ok(commits)
 }
 
@@ -354,6 +358,49 @@ fn parse_commit_lines(output: &str) -> Vec<CommitSha> {
         .collect()
 }
 
+#[cfg_attr(
+    not(test),
+    expect(
+        clippy::single_call_fn,
+        reason = "span validation stays isolated while start flow still uses per-target logic"
+    )
+)]
+/// Validates that one resolved span is contiguous and contains no merge commits.
+fn validate_contiguous_span(
+    ctx: &Ctx<'_>,
+    commits: &NonEmpty<CommitSha>,
+) -> Result<(), FactorError> {
+    for commit in commits {
+        validate_not_merge(ctx, commit)?;
+    }
+
+    let ordered: Vec<&CommitSha> = commits.iter().collect();
+    for window in ordered.windows(2) {
+        let &[parent, child] = window else {
+            continue;
+        };
+        let first_parent = match git_output(ctx, &["rev-parse", "--verify", &format!("{child}^")]) {
+            Ok(parent_sha) => match CommitSha::new(parent_sha) {
+                Ok(parsed_parent_sha) => parsed_parent_sha,
+                Err(_err) => return Err(FactorError::InvalidCommit(child.to_string())),
+            },
+            Err(_err) => {
+                return Err(FactorError::InvalidCommit(format!(
+                    "{parent} {child} (selected commits must form a contiguous ancestry span)"
+                )));
+            }
+        };
+
+        if first_parent != *parent {
+            return Err(FactorError::InvalidCommit(format!(
+                "{parent} {child} (selected commits must form a contiguous ancestry span)"
+            )));
+        }
+    }
+
+    Ok(())
+}
+
 /// Validates that a commit is an ancestor of HEAD.
 #[cfg(test)]
 pub(in crate::git_factor) fn validate_ancestor(
@@ -412,8 +459,14 @@ pub(in crate::git_factor) fn validate_exec_syntax(
     }
 }
 
+#[cfg_attr(
+    not(test),
+    expect(
+        clippy::single_call_fn,
+        reason = "merge validation stays isolated for targeted testing and span checks"
+    )
+)]
 /// Validates that a commit is not a merge commit.
-#[cfg(test)]
 pub(in crate::git_factor) fn validate_not_merge(
     ctx: &Ctx<'_>,
     sha: &CommitSha,
@@ -1037,6 +1090,72 @@ mod tests {
         let err = resolve_commit_span(&ctx, &refs).err_or_abort("empty dotted range should fail");
         let message = invalid_commit_message(&err).or_abort("expected InvalidCommit");
         assert_eq!(message, format!("{third}..{third}"));
+    }
+
+    #[test]
+    fn resolve_commit_span_rejects_non_ancestry_two_ref_span() {
+        let dir = TempDir::new().or_abort("tempdir");
+        init_git_repo(dir.path());
+        let ctx = ctx_for(dir.path());
+        let branch =
+            git_output(&ctx, &["rev-parse", "--abbrev-ref", "HEAD"]).or_abort("current branch");
+        run_git(&ctx, &["checkout", "--quiet", "-b", "topic"]).or_abort("create topic");
+        let topic = commit_file(dir.path(), "topic.txt", "topic\n", "topic");
+        run_git(&ctx, &["checkout", "--quiet", branch.as_str()]).or_abort("checkout branch");
+        let main = commit_file(dir.path(), "main.txt", "main\n", "main");
+        let refs = NonEmpty {
+            head: NonEmptyString::try_from(topic).or_abort("topic"),
+            tail: vec![NonEmptyString::try_from(main).or_abort("main")],
+        };
+
+        let err = resolve_commit_span(&ctx, &refs).err_or_abort("non-ancestry span should reject");
+        let message = invalid_commit_message(&err).or_abort("expected InvalidCommit");
+        assert!(
+            message.contains("contiguous ancestry span"),
+            "unexpected message: {message}"
+        );
+    }
+
+    #[test]
+    fn resolve_commit_span_rejects_merge_commits() {
+        let dir = TempDir::new().or_abort("tempdir");
+        init_git_repo(dir.path());
+        let ctx = ctx_for(dir.path());
+        let branch =
+            git_output(&ctx, &["rev-parse", "--abbrev-ref", "HEAD"]).or_abort("current branch");
+        run_git(&ctx, &["checkout", "--quiet", "-b", "topic"]).or_abort("create topic");
+        let _topic = commit_file(dir.path(), "topic.txt", "topic\n", "topic");
+        run_git(&ctx, &["checkout", "--quiet", branch.as_str()]).or_abort("checkout branch");
+        let _main = commit_file(dir.path(), "main.txt", "main\n", "main");
+        run_git(&ctx, &["merge", "--quiet", "--no-ff", "--no-edit", "topic"])
+            .or_abort("merge topic");
+        let merge = head_sha(dir.path());
+        let refs = NonEmpty::singleton(NonEmptyString::try_from(merge).or_abort("merge"));
+
+        let err = resolve_commit_span(&ctx, &refs).err_or_abort("merge commit should reject");
+        assert!(
+            err.to_string().contains("is a merge commit"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_contiguous_span_rejects_skipped_parent() {
+        let dir = TempDir::new().or_abort("tempdir");
+        let [first, _second, third] = init_linear_repo(dir.path());
+        let ctx = ctx_for(dir.path());
+        let commits = NonEmpty {
+            head: CommitSha::new(first).or_abort("first"),
+            tail: vec![CommitSha::new(third).or_abort("third")],
+        };
+
+        let err =
+            validate_contiguous_span(&ctx, &commits).err_or_abort("skipped parent should reject");
+        let message = invalid_commit_message(&err).or_abort("expected InvalidCommit");
+        assert!(
+            message.contains("contiguous ancestry span"),
+            "unexpected message: {message}"
+        );
     }
 
     #[test]
