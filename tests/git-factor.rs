@@ -444,16 +444,20 @@ HINTS:
         )
     }
 
-    fn expected_multi_commit_start_suffix(first_short_sha: &str) -> String {
+    fn expected_multi_commit_start_suffix(
+        tip_short_sha: &str,
+        untracked_section: Option<&str>,
+    ) -> String {
+        let after_unstaged =
+            untracked_section.map_or_else(|| "\n".to_owned(), |section| format!("{section}\n"));
         format!(
             "\
-FACTOR: Split session started for 2 commits (first: {first_short_sha}).
-ORIGINAL MESSAGE: feat: a
+FACTOR: Split session started for 2 commits (tip: {tip_short_sha}).
+ORIGINAL MESSAGE: feat: b
 UNSTAGED:
-  base.txt | 1 +
-   1 file changed, 1 insertion(+)
-
-NEXT: Stage changes for the first atomic commit, then run:
+  base.txt | 2 ++
+   1 file changed, 2 insertions(+)
+{after_unstaged}NEXT: Stage changes for the first atomic commit, then run:
   git factor --continue --message \"type: description\"
 
 Run git factor --help for the full workflow guide.
@@ -464,35 +468,7 @@ HINTS:
   - Message: single concrete action, no \"and\"/\"or\"
   - Verify: git log --oneline | wc -l
   - NEVER use git commit. ONLY use git factor --continue.
-  REMAINING:  1 file changed, 1 insertion(+)
-  RECOVERY: git factor --abort
-"
-        )
-    }
-
-    fn expected_now_splitting_suffix_with_remaining(
-        short_sha: &str,
-        original_message: &str,
-        unstaged_summary: &str,
-    ) -> String {
-        format!(
-            "\
-FACTOR: Previous commit split into 1 commits.
-FACTOR: Now splitting {short_sha}.
-ORIGINAL MESSAGE: {original_message}
-UNSTAGED:
-{unstaged_summary}
-
-NEXT: Stage changes for the next commit, then run:
-  git factor --continue --message \"type: description\"
-
-HINTS:
-  - Find the ONE smallest addition nothing depends on
-  - Target 15-30 lines (50 max)
-  - Message: single concrete action, no \"and\"/\"or\"
-  - Verify: git log --oneline | wc -l
-  - NEVER use git commit. ONLY use git factor --continue.
-  REMAINING:  1 file changed, 1 insertion(+)
+  REMAINING:  1 file changed, 2 insertions(+)
   RECOVERY: git factor --abort
 "
         )
@@ -1009,11 +985,11 @@ fi
         commit_file(repo, "file.txt", "one\n", "chore: base");
         commit_file(repo, "file.txt", "one\ntwo\n", "feat: change");
 
-        // Intercept rev-list and return success with no output so the commit set
-        // is empty before topological sorting.
+        // Intercept range expansion and return success with no output so the
+        // ancestry span resolver sees an empty dotted range.
         let (wrap_dir, wrap_bin) = make_git_wrapper_named(
             "git",
-            r#"if [ "${1-}" = "rev-list" ] && [ "${2-}" = "HEAD~1..HEAD" ]; then
+            r#"if [ "${1-}" = "rev-list" ] && [ "${2-}" = "--reverse" ] && [ "${3-}" = "--ancestry-path" ] && [ "${4-}" = "HEAD~1..HEAD" ]; then
   exit 0
 fi
 "#,
@@ -1033,8 +1009,8 @@ fi
             repo,
             &["--exec", "true", "HEAD~1..HEAD"],
             GitFactorExpectation::default()
-                .code(EXIT_SOFTWARE)
-                .stderr("git command failed: no commits resolved from the given refs\n"),
+                .code(EXIT_DATAERR)
+                .stderr("invalid commit: HEAD~1..HEAD\n"),
             prefixed_path,
         );
     }
@@ -1051,8 +1027,8 @@ fi
             repo,
             &["--exec", "true", "HEAD..HEAD"],
             GitFactorExpectation::default()
-                .code(EXIT_SOFTWARE)
-                .stderr("git command failed: no commits resolved from the given refs\n"),
+                .code(EXIT_DATAERR)
+                .stderr("invalid commit: HEAD..HEAD\n"),
         );
     }
 
@@ -2700,6 +2676,7 @@ fi
 
         commit_file(repo, "file.txt", "root\n", "feat: root");
         commit_file(repo, "file.txt", "root\nnext\n", "feat: next");
+        commit_file(repo, "file.txt", "root\nnext\ntail\n", "feat: tail");
         let root_sha = git(repo, &["rev-list", "--max-parents=0", "HEAD"]);
 
         let (wrap_dir, wrap_bin) = make_git_wrapper_named(
@@ -2723,7 +2700,7 @@ fi
 
         run_git_factor_with_env(
             repo,
-            &["--exec", "true", root_sha.as_str(), "HEAD"],
+            &["--exec", "true", root_sha.as_str(), "HEAD~1"],
             GitFactorExpectation::default()
                 .code(EXIT_SOFTWARE)
                 .stderr("git command failed: git rebase failed (exit 42)\n"),
@@ -2740,6 +2717,7 @@ fi
         commit_file(repo, "file.txt", "one\n", "feat: one");
         commit_file(repo, "file.txt", "one\ntwo\n", "feat: two");
         commit_file(repo, "file.txt", "one\ntwo\nthree\n", "feat: three");
+        commit_file(repo, "file.txt", "one\ntwo\nthree\nfour\n", "feat: four");
 
         let (wrap_dir, wrap_bin) = make_git_wrapper_named(
             "git",
@@ -2762,7 +2740,7 @@ fi
 
         run_git_factor_with_env(
             repo,
-            &["--exec", "true", "HEAD~1", "HEAD"],
+            &["--exec", "true", "HEAD~2", "HEAD~1"],
             GitFactorExpectation::default()
                 .code(EXIT_SOFTWARE)
                 .stderr("git command failed: git rebase failed (exit 43)\n"),
@@ -2959,7 +2937,7 @@ fi
     }
 
     #[test]
-    fn continue_advances_to_next_commit_for_multi_commit_range() {
+    fn continue_splits_combined_span_for_multi_commit_range() {
         let dir = init_repo();
         let repo = dir.path();
 
@@ -2971,41 +2949,55 @@ fi
         write_file(repo, "new.txt", "new\n");
         git(repo, &["add", "--all"]);
         git(repo, &["commit", "--message", "feat: b"]);
-        let first_short_sha = git(repo, &["rev-parse", "--short", "HEAD~1"]);
         let second_short_sha = git(repo, &["rev-parse", "--short", "HEAD"]);
 
         run_git_factor(
             repo,
             &["--exec", "true", "HEAD~2..HEAD"],
-            GitFactorExpectation::default()
-                .stdout_suffix(expected_multi_commit_start_suffix(first_short_sha.as_str())),
+            GitFactorExpectation::default().stdout_suffix(expected_multi_commit_start_suffix(
+                second_short_sha.as_str(),
+                Some("UNTRACKED:\n  new.txt\n"),
+            )),
         );
 
-        // First commit: stage everything and continue. This should advance to the next commit.
-        git(repo, &["add", "--all"]);
+        // First split: stage the tracked span portion, leaving the new file for later.
+        git(repo, &["add", "base.txt"]);
         run_git_factor(
             repo,
             &["--continue", "--message", "test: split a"],
-            GitFactorExpectation::default().stdout_suffix(
-                expected_now_splitting_suffix_with_remaining(
-                    second_short_sha.as_str(),
-                    "feat: b",
-                    "  base.txt | 1 +\n   1 file changed, 1 insertion(+)\nUNTRACKED:\n  new.txt",
-                ),
+            GitFactorExpectation::default().stdout(
+                "\
+FACTOR: Split 1 committed.
+STATE: Remaining changes are unstaged.
+UNSTAGED:
+UNTRACKED:
+  new.txt
+
+NEXT: Stage changes for the next commit, then run:
+  git factor --continue --message \"type: description\"
+
+HINTS:
+  - Find the ONE smallest addition nothing depends on
+  - Target 15-30 lines (50 max)
+  - Message: single concrete action, no \"and\"/\"or\"
+  - Verify: git log --oneline | wc -l
+  - NEVER use git commit. ONLY use git factor --continue.
+  RECOVERY: git factor --abort
+",
             ),
         );
 
-        // Second commit: finish quickly.
-        git(repo, &["add", "--all"]);
+        // Final split: add the remaining untracked file to converge to the tip tree.
+        git(repo, &["add", "new.txt"]);
         run_git_factor(
             repo,
             &["--continue", "--message", "test: split b"],
-            GitFactorExpectation::default().stdout_suffix(expected_completion_stdout_suffix(1)),
+            GitFactorExpectation::default().stdout_suffix(expected_completion_stdout_suffix(2)),
         );
     }
 
     #[test]
-    fn continue_advances_to_next_commit_for_multiple_explicit_refs() {
+    fn continue_completes_combined_span_for_multiple_explicit_refs() {
         let dir = init_repo();
         let repo = dir.path();
 
@@ -3014,39 +3006,27 @@ fi
         write_file(repo, "base.txt", "base\na\nb\n");
         git(repo, &["add", "--all"]);
         git(repo, &["commit", "--message", "feat: b"]);
-        let first_short_sha = git(repo, &["rev-parse", "--short", "HEAD~1"]);
         let second_short_sha = git(repo, &["rev-parse", "--short", "HEAD"]);
 
         run_git_factor(
             repo,
             &["--exec", "true", "HEAD~1", "HEAD"],
-            GitFactorExpectation::default()
-                .stdout_suffix(expected_multi_commit_start_suffix(first_short_sha.as_str())),
+            GitFactorExpectation::default().stdout_suffix(expected_multi_commit_start_suffix(
+                second_short_sha.as_str(),
+                None,
+            )),
         );
 
         git(repo, &["add", "--all"]);
         run_git_factor(
             repo,
             &["--continue", "--message", "test: split a"],
-            GitFactorExpectation::default().stdout_suffix(
-                expected_now_splitting_suffix_with_remaining(
-                    second_short_sha.as_str(),
-                    "feat: b",
-                    "  base.txt | 1 +\n   1 file changed, 1 insertion(+)",
-                ),
-            ),
-        );
-
-        git(repo, &["add", "--all"]);
-        run_git_factor(
-            repo,
-            &["--continue", "--message", "test: split b"],
             GitFactorExpectation::default().stdout_suffix(expected_completion_stdout_suffix(1)),
         );
     }
 
     #[test]
-    fn continue_completes_rebase_when_last_commit_has_no_next_edit_stop() {
+    fn continue_completes_fully_staged_span_in_one_step() {
         let dir = init_repo();
         let repo = dir.path();
 
@@ -3064,13 +3044,6 @@ fi
         run_git_factor(
             repo,
             &["--continue", "--message", "test: split a"],
-            GitFactorExpectation::default(),
-        );
-
-        git(repo, &["add", "--all"]);
-        run_git_factor(
-            repo,
-            &["--continue", "--message", "test: split b"],
             GitFactorExpectation::default()
                 .stdout_suffix(expected_completion_stdout_suffix(1))
                 .rebase_merge_exists(false),
@@ -3092,8 +3065,6 @@ fi
         write_file(repo, "new.txt", "new\n");
         git(repo, &["add", "new.txt"]);
         git(repo, &["commit", "--message", "chore: add new"]);
-        let second_short_sha = git(repo, &["rev-parse", "--short", "HEAD"]);
-
         // Start factoring both commits.
         run_git_factor(
             repo,
@@ -3107,11 +3078,10 @@ fi
         run_git_factor(
             repo,
             &["--continue", "--message", "test: first"],
-            GitFactorExpectation::default().stdout_suffix(format!(
+            GitFactorExpectation::default().stdout_suffix(
                 "\
-FACTOR: Previous commit split into 1 commits.
-FACTOR: Now splitting {}.
-ORIGINAL MESSAGE: chore: add new
+FACTOR: Split 1 committed.
+STATE: Remaining changes are unstaged.
 UNSTAGED:
 UNTRACKED:
   new.txt
@@ -3126,9 +3096,9 @@ HINTS:
   - Verify: git log --oneline | wc -l
   - NEVER use git commit. ONLY use git factor --continue.
   RECOVERY: git factor --abort
-",
-                second_short_sha.as_str()
-            )),
+"
+                .to_owned(),
+            ),
         );
     }
 
@@ -4534,21 +4504,14 @@ fi
         commit_file(repo, "base.txt", "base\n", "chore: base");
         commit_file(repo, "base.txt", "base\na\n", "feat: a");
         commit_file(repo, "base.txt", "base\na\nb\n", "feat: b");
+        commit_file(repo, "base.txt", "base\na\nb\nc\n", "feat: c");
 
         run_git_factor(
             repo,
-            &["--exec", "true", "HEAD~1", "HEAD"],
+            &["--exec", "true", "HEAD~2", "HEAD~1"],
             GitFactorExpectation::default(),
         );
 
-        git(repo, &["add", "--all"]);
-        run_git_factor(
-            repo,
-            &["--continue", "--message", "test: first"],
-            GitFactorExpectation::default().stdout_suffix("RECOVERY: git factor --abort\n"),
-        );
-
-        git(repo, &["add", "--all"]);
         let (wrap_dir, wrap_bin) = make_git_wrapper_named(
             "git",
             r#"if [ "${1-}" = "rebase" ] && [ "${2-}" = "--continue" ]; then
@@ -4559,9 +4522,10 @@ fi
         );
         let _keep_alive = wrap_dir;
 
+        git(repo, &["add", "--all"]);
         run_git_factor_with_env(
             repo,
-            &["--continue", "--message", "test: second"],
+            &["--continue", "--message", "test: first"],
             GitFactorExpectation::default()
                 .stdout_suffix(expected_completion_stdout_suffix(1))
                 .factor_state_exists(false)
@@ -4579,21 +4543,14 @@ fi
         commit_file(repo, "base.txt", "base\n", "chore: base");
         commit_file(repo, "base.txt", "base\na\n", "feat: a");
         commit_file(repo, "base.txt", "base\na\nb\n", "feat: b");
+        commit_file(repo, "base.txt", "base\na\nb\nc\n", "feat: c");
 
         run_git_factor(
             repo,
-            &["--exec", "true", "HEAD~1", "HEAD"],
+            &["--exec", "true", "HEAD~2", "HEAD~1"],
             GitFactorExpectation::default(),
         );
 
-        git(repo, &["add", "--all"]);
-        run_git_factor(
-            repo,
-            &["--continue", "--message", "test: first"],
-            GitFactorExpectation::default().stdout_suffix("RECOVERY: git factor --abort\n"),
-        );
-
-        git(repo, &["add", "--all"]);
         let (wrap_dir, wrap_bin) = make_git_wrapper_named(
             "git",
             r#"if [ "${1-}" = "rebase" ] && [ "${2-}" = "--continue" ]; then
@@ -4603,9 +4560,10 @@ fi
         );
         let _keep_alive = wrap_dir;
 
+        git(repo, &["add", "--all"]);
         run_git_factor_with_env(
             repo,
-            &["--continue", "--message", "test: second"],
+            &["--continue", "--message", "test: first"],
             GitFactorExpectation::default().code(EXIT_SOFTWARE).stderr(
                 "git command failed: git command failed: git rebase failed (exit 1)\n\nResolve the rebase issue, then rerun 'git rebase --continue'.\nTo abandon the factor session, run 'git factor --abort'\n",
             ),
@@ -4952,8 +4910,8 @@ fi
                 start_cleans_state_when_git_rebase_fails();
                 continue_completes_single_commit_split_and_preserves_tree();
                 rejects_continue_without_message();
-                continue_advances_to_next_commit_for_multi_commit_range();
-                continue_advances_to_next_commit_for_multiple_explicit_refs();
+                continue_splits_combined_span_for_multi_commit_range();
+                continue_completes_combined_span_for_multiple_explicit_refs();
                 continue_preserves_index_and_rehydrates_pool_when_exec_gate_fails();
                 continue_materializes_staged_deletions_into_worktree();
                 continue_reports_rehydrate_read_tree_failure();

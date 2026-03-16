@@ -88,16 +88,15 @@ use self::helpers::{editor_path, error_to_exit, factor_dir_in, shell_quote, stat
 use self::state::{read_state, read_state_bool_or_default, read_state_parsed, write_state};
 #[cfg(test)]
 use self::types::COMMIT_SHA_HEX_LEN;
-use self::types::{BaseParent, CommitSha, CommitSpan, Commits, StateDir, TreeHash};
+use self::types::{BaseParent, CommitSha, CommitSpan, StateDir, TreeHash};
 use self::ui::{
     is_factor_active_in, is_mid_rebase_in, print_hints_with_remaining_in, print_session_started,
 };
 use self::validation::{
-    remove_empty_root_in, resolve_commit, resolve_commit_refs, sort_topologically,
-    validate_exec_syntax,
+    remove_empty_root_in, resolve_commit, resolve_commit_span, validate_exec_syntax,
 };
 #[cfg(test)]
-use self::validation::{resolve_head_commit, validate_ancestor};
+use self::validation::{resolve_commit_refs, resolve_head_commit, validate_ancestor};
 
 #[cfg(test)]
 use crate::test_support::{OrAbort as _, ResultOrAbort as _};
@@ -216,6 +215,16 @@ impl CurrentIndex {
     /// Returns the underlying index value.
     const fn as_usize(self) -> usize {
         self.0
+    }
+
+    /// Returns the last valid index for a non-empty commit span.
+    fn from_commit_count(commit_count: usize) -> Result<Self, FactorError> {
+        let Some(value) = commit_count.checked_sub(1) else {
+            return Err(FactorError::GitCommand(non_empty_msg(
+                "commit span must be non-empty".to_owned(),
+            )));
+        };
+        Ok(Self(value))
     }
 
     /// Returns the next index, failing on overflow.
@@ -547,9 +556,9 @@ impl<'ctx> Session<'ctx> {
         CurrentIndex::read(self.ctx, &self.state_dir)
     }
 
-    /// Returns whether the active target commit is the root commit.
+    /// Returns whether the selected span begins at the root commit.
     fn current_target_is_root(&self) -> Result<bool, FactorError> {
-        Ok(self.current_index()?.as_usize() == 0 && self.is_root(StateBool::False)?.as_bool())
+        Ok(self.is_root(StateBool::False)?.as_bool())
     }
 
     /// Reads the exec command from persisted state.
@@ -561,6 +570,13 @@ impl<'ctx> Session<'ctx> {
     fn expected_tree(&self) -> Result<TreeHash, FactorError> {
         let original_commit = self.current_commit()?;
         expected_tree_for_current_step(self.ctx, &self.state_dir, &original_commit)
+    }
+
+    /// Returns the first commit in the selected factor span.
+    fn first_commit(&self) -> Result<CommitSha, FactorError> {
+        self.commits.first().cloned().ok_or_else(|| {
+            FactorError::GitCommand(non_empty_msg("commit list is empty".to_owned()))
+        })
     }
 
     /// Creates a session from the active factor state directory.
@@ -1182,7 +1198,7 @@ fn enter_pending_split_session(
             ],
         )?
     } else {
-        "HEAD~1".to_owned()
+        format!("{}^", session.first_commit()?)
     };
     run_git(ctx, &["reset", "--quiet", reset_target.as_str()])?;
     write_session_phase(ctx, &session.state_dir, SessionPhase::Splitting)?;
@@ -1302,12 +1318,6 @@ fn cmd_rebase_exec_begin_in(
             session
         }
         Err(FactorError::StateRead(err)) if err.kind() == io::ErrorKind::NotFound => {
-            if current_index != CurrentIndex(0) {
-                return Err(FactorError::GitCommand(non_empty_msg(format!(
-                    "missing factor state before begin for current_index {}",
-                    current_index.as_usize()
-                ))));
-            }
             let state_dir = factor_dir_in(ctx)?;
             write_initial_session_state(
                 ctx,
@@ -1779,7 +1789,7 @@ fn cmd_finish_in(ctx: &Ctx<'_>, messages: &[NonEmptyString]) -> Result<i32, Fact
 fn split_started_line(short_sha: &str, total_commits: Option<usize>) -> String {
     match total_commits {
         Some(total) if total > 1 => {
-            format!("FACTOR: Split session started for {total} commits (first: {short_sha}).")
+            format!("FACTOR: Split session started for {total} commits (tip: {short_sha}).")
         }
         Some(_) => format!("FACTOR: Split session started for {short_sha}."),
         None => format!("FACTOR: Now splitting {short_sha}."),
@@ -1818,15 +1828,6 @@ fn cmd_start_with_resolved_in(
     for sha in resolved_commits {
         validate_split_target_in(ctx, sha)?;
     }
-    let span_start = resolved_commits.first();
-    let short_sha = NonEmptyString::try_from(git_output(
-        ctx,
-        &["rev-parse", "--short", span_start.as_str()],
-    )?)
-    .map_err(|_err| FactorError::GitCommand(non_empty_msg("empty short SHA".to_owned())))?;
-    let message = commit_message(ctx, span_start)?;
-    let exec_command = joined_exec_command(exec);
-    validate_exec_syntax(ctx, exec_command.as_str())?;
     let parent_status = command_status_with(
         ctx,
         "git",
@@ -1834,7 +1835,7 @@ fn cmd_start_with_resolved_in(
             "rev-parse",
             "--quiet",
             "--verify",
-            &format!("{span_start}^"),
+            &format!("{}^", resolved_commits.first()),
         ],
         &[],
         true,
@@ -1847,14 +1848,19 @@ fn cmd_start_with_resolved_in(
             BaseParent::Root
         },
     );
-    let single_head_session = match span.len() {
-        1 => span.tip_commit() == &head_commit,
-        _ => false,
-    };
-    let first_commit = span.first_commit();
+    let span_tip = span.tip_commit();
+    let short_sha = NonEmptyString::try_from(git_output(
+        ctx,
+        &["rev-parse", "--short", span_tip.as_str()],
+    )?)
+    .map_err(|_err| FactorError::GitCommand(non_empty_msg("empty short SHA".to_owned())))?;
+    let message = commit_message(ctx, span_tip)?;
+    let exec_command = joined_exec_command(exec);
+    validate_exec_syntax(ctx, exec_command.as_str())?;
+    let single_head_session = span.tip_commit() == &head_commit;
     let requires_rebase = StateBool::from_bool(!single_head_session);
     let is_root_state = StateBool::from_bool(span.is_root());
-    let current_index = CurrentIndex(0);
+    let current_index = CurrentIndex::from_commit_count(span.len())?;
     if single_head_session {
         let output = command_output_with(ctx, "bash", &["-c", exec_command.as_str()])?;
         let (stdout, stderr) = output_text(&output);
@@ -1904,7 +1910,7 @@ fn cmd_start_with_resolved_in(
                 ],
             )?
         } else {
-            "HEAD~1".to_owned()
+            format!("{}^", span.first_commit())
         };
         run_git(ctx, &["reset", "--quiet", reset_target.as_str()])?;
 
@@ -1913,15 +1919,7 @@ fn cmd_start_with_resolved_in(
         return Ok(EXIT_OK);
     }
 
-    match run_start_rebase_in(
-        ctx,
-        span.commits(),
-        first_commit,
-        span.is_root(),
-        state_dir,
-        &head_commit,
-        &exec_command,
-    )? {
+    match run_start_rebase_in(ctx, &span, state_dir, &head_commit, &exec_command)? {
         StartRebaseOutcome::PausedAtBreak => {
             let session = Session::from_active(ctx)?;
             let (next_short_sha, next_message) = enter_pending_split_session(ctx, &session)?;
@@ -1941,9 +1939,8 @@ fn cmd_start_in(
 ) -> Result<i32, FactorError> {
     trace_note(ctx, "factor_cmd_start", &[]);
     let state_dir = cmd_start_prep_in(ctx)?;
-    let commits = resolve_commit_refs(ctx, commit_refs)?;
-    let resolved_commits = sort_topologically(ctx, &commits)?;
-    cmd_start_with_resolved_in(ctx, exec, &state_dir, &resolved_commits)
+    let span = resolve_commit_span(ctx, commit_refs)?;
+    cmd_start_with_resolved_in(ctx, exec, &state_dir, &span)
 }
 
 /// Validates that a split target commit is reachable from `HEAD` and non-merge.
@@ -1995,9 +1992,7 @@ fn validate_split_target_in(ctx: &Ctx<'_>, sha: &CommitSha) -> Result<(), Factor
 )]
 fn run_start_rebase_in(
     ctx: &Ctx<'_>,
-    resolved_commits: &NonEmpty<CommitSha>,
-    base_sha: &CommitSha,
-    is_root: bool,
+    span: &CommitSpan,
     state_dir: &StateDir,
     start_head: &CommitSha,
     exec_command: &NonEmptyString,
@@ -2012,25 +2007,23 @@ fn run_start_rebase_in(
         }
     };
     let mut seq_parts: Vec<String> = vec![editor_str.to_owned()];
-    for (index, sha) in resolved_commits.iter().enumerate() {
-        let short = git_output(ctx, &["rev-parse", "--short", sha.as_str()])?;
-        let current_index = CurrentIndex(index);
-        let preflight = rebase_exec_preflight_command(ctx, current_index, exec_command)?;
-        let begin = rebase_exec_begin_command(
-            ctx,
-            current_index,
-            start_head,
-            is_root,
-            exec_command,
-            resolved_commits,
-        )?;
-        seq_parts.push("--factor-target".to_owned());
-        seq_parts.push(short);
-        seq_parts.push("--factor-preflight".to_owned());
-        seq_parts.push(preflight);
-        seq_parts.push("--factor-begin".to_owned());
-        seq_parts.push(begin);
-    }
+    let short = git_output(ctx, &["rev-parse", "--short", span.tip_commit().as_str()])?;
+    let current_index = CurrentIndex::from_commit_count(span.len())?;
+    let preflight = rebase_exec_preflight_command(ctx, current_index, exec_command)?;
+    let begin = rebase_exec_begin_command(
+        ctx,
+        current_index,
+        start_head,
+        span.is_root(),
+        exec_command,
+        span.commits(),
+    )?;
+    seq_parts.push("--factor-target".to_owned());
+    seq_parts.push(short);
+    seq_parts.push("--factor-preflight".to_owned());
+    seq_parts.push(preflight);
+    seq_parts.push("--factor-begin".to_owned());
+    seq_parts.push(begin);
     let seq_editor = seq_parts
         .iter()
         .map(String::as_str)
@@ -2038,7 +2031,7 @@ fn run_start_rebase_in(
         .collect::<Vec<String>>()
         .join(" ");
 
-    let parent = format!("{base_sha}^");
+    let parent = format!("{}^", span.first_commit());
     let mut rebase_args = vec![
         "rebase",
         "--empty",
@@ -2051,7 +2044,7 @@ fn run_start_rebase_in(
         "--quiet",
         "--reschedule-failed-exec",
     ];
-    if is_root {
+    if span.is_root() {
         rebase_args.push("--root");
     } else {
         rebase_args.push(parent.as_str());
@@ -2547,9 +2540,8 @@ fn run_with_args_vec(ctx: &Ctx<'_>, args: Vec<OsString>) -> Result<i32, FactorEr
     trace_note(ctx, "factor_cmd_start", &[]);
     if let Some(commits) = NonEmpty::from_vec(cli.commits().to_vec()) {
         let state_dir = cmd_start_prep_in(ctx)?;
-        let resolved_refs = resolve_commit_refs(ctx, &commits)?;
-        let resolved_commits = sort_topologically(ctx, &resolved_refs)?;
-        return cmd_start_with_resolved_in(ctx, &exec, &state_dir, &resolved_commits);
+        let span = resolve_commit_span(ctx, &commits)?;
+        return cmd_start_with_resolved_in(ctx, &exec, &state_dir, &span);
     }
     let state_dir = cmd_start_prep_in(ctx)?;
     let resolved_commits = NonEmpty::new(resolve_commit(ctx, "HEAD")?);
@@ -3856,7 +3848,7 @@ mod proptests {
     }
 
     #[test]
-    fn cmd_start_in_propagates_commit_resolution_error_after_prep() {
+    fn cmd_start_in_propagates_invalid_range_error_after_prep() {
         let dir = TempDir::new().or_abort("tempdir");
         let repo = dir.path();
 
@@ -3903,14 +3895,11 @@ mod proptests {
 
         let err = cmd_start_in(&ctx, &exec, &commit_refs)
             .err_or_abort("commit resolution should fail after prep");
-        assert_eq!(
-            err.to_string(),
-            "git command failed: no commits resolved from the given refs"
-        );
+        assert_eq!(err.to_string(), "invalid commit: HEAD~1..HEAD");
     }
 
     #[test]
-    fn cmd_start_in_propagates_sort_error_after_resolution() {
+    fn cmd_start_in_propagates_invalid_inclusive_span_after_resolution() {
         let dir = TempDir::new().or_abort("tempdir");
         let repo = dir.path();
         let resolved = "a".repeat(COMMIT_SHA_HEX_LEN);
@@ -3946,6 +3935,11 @@ mod proptests {
                     stdout: format!("{other}\n").into_bytes(),
                     stderr: Vec::new(),
                 }),
+                Ok(Output {
+                    status: success_status(),
+                    stdout: Vec::new(),
+                    stderr: Vec::new(),
+                }),
             ],
             Vec::new(),
         )));
@@ -3958,14 +3952,16 @@ mod proptests {
         };
         let exec =
             NonEmpty::new(NonEmptyString::try_from("true".to_owned()).or_abort("non-empty exec"));
-        let commit_refs =
-            NonEmpty::new(NonEmptyString::try_from("HEAD".to_owned()).or_abort("non-empty ref"));
+        let commit_refs = NonEmpty {
+            head: NonEmptyString::try_from("HEAD~1".to_owned()).or_abort("non-empty ref"),
+            tail: vec![NonEmptyString::try_from("HEAD".to_owned()).or_abort("non-empty ref")],
+        };
 
         let err =
-            cmd_start_in(&ctx, &exec, &commit_refs).err_or_abort("sorting should fail after prep");
+            cmd_start_in(&ctx, &exec, &commit_refs).err_or_abort("inclusive span should fail");
         assert_eq!(
             err.to_string(),
-            "git command failed: no commits after sorting"
+            "invalid commit: HEAD~1 HEAD (range must resolve to a contiguous ancestry span)"
         );
     }
 
@@ -4208,17 +4204,14 @@ mod proptests {
             CommitSha::new("1111111111111111111111111111111111111111".to_owned())
                 .or_abort("valid sha"),
         );
-        let base_sha = CommitSha::new("2222222222222222222222222222222222222222".to_owned())
-            .or_abort("valid sha");
+        let span = CommitSpan::new(resolved, BaseParent::Commit);
         let start_head = CommitSha::new("3333333333333333333333333333333333333333".to_owned())
             .or_abort("valid sha");
         let exec_command = NonEmptyString::try_from("true".to_owned()).or_abort("non-empty");
 
         run_start_rebase_in(
             &ctx,
-            &resolved,
-            &base_sha,
-            false,
+            &span,
             &StateDir::new(PathBuf::from(".git/factor")),
             &start_head,
             &exec_command,
@@ -4230,7 +4223,7 @@ mod proptests {
         assert!(!args.iter().any(|arg| arg == "--root"));
         assert!(
             args.iter()
-                .any(|arg| arg == "2222222222222222222222222222222222222222^")
+                .any(|arg| arg == "1111111111111111111111111111111111111111^")
         );
     }
 
@@ -4265,17 +4258,14 @@ mod proptests {
             CommitSha::new("1111111111111111111111111111111111111111".to_owned())
                 .or_abort("valid sha"),
         );
-        let base_sha = CommitSha::new("2222222222222222222222222222222222222222".to_owned())
-            .or_abort("valid sha");
+        let span = CommitSpan::new(resolved, BaseParent::Root);
         let start_head = CommitSha::new("3333333333333333333333333333333333333333".to_owned())
             .or_abort("valid sha");
         let exec_command = NonEmptyString::try_from("true".to_owned()).or_abort("non-empty");
 
         run_start_rebase_in(
             &ctx,
-            &resolved,
-            &base_sha,
-            true,
+            &span,
             &StateDir::new(PathBuf::from(".git/factor")),
             &start_head,
             &exec_command,
@@ -4288,7 +4278,7 @@ mod proptests {
         assert!(
             !args
                 .iter()
-                .any(|arg| arg == "2222222222222222222222222222222222222222^")
+                .any(|arg| arg == "1111111111111111111111111111111111111111^")
         );
     }
 
@@ -4316,17 +4306,14 @@ mod proptests {
             CommitSha::new("1111111111111111111111111111111111111111".to_owned())
                 .or_abort("valid sha"),
         );
-        let base_sha = CommitSha::new("2222222222222222222222222222222222222222".to_owned())
-            .or_abort("valid sha");
+        let span = CommitSpan::new(resolved, BaseParent::Commit);
         let start_head = CommitSha::new("3333333333333333333333333333333333333333".to_owned())
             .or_abort("valid sha");
         let exec_command = NonEmptyString::try_from("true".to_owned()).or_abort("non-empty");
 
         let err = run_start_rebase_in(
             &ctx,
-            &resolved,
-            &base_sha,
-            false,
+            &span,
             &StateDir::new(PathBuf::from(".git/factor")),
             &start_head,
             &exec_command,
@@ -4356,17 +4343,14 @@ mod proptests {
             CommitSha::new("1111111111111111111111111111111111111111".to_owned())
                 .or_abort("valid sha"),
         );
-        let base_sha = CommitSha::new("2222222222222222222222222222222222222222".to_owned())
-            .or_abort("valid sha");
+        let span = CommitSpan::new(resolved, BaseParent::Commit);
         let start_head = CommitSha::new("3333333333333333333333333333333333333333".to_owned())
             .or_abort("valid sha");
         let exec_command = NonEmptyString::try_from("true".to_owned()).or_abort("non-empty");
 
         let err = run_start_rebase_in(
             &ctx,
-            &resolved,
-            &base_sha,
-            false,
+            &span,
             &StateDir::new(PathBuf::from(".git/factor")),
             &start_head,
             &exec_command,
@@ -4413,8 +4397,8 @@ mod proptests {
         advance_to_next_commit_reports_current_index_overflow();
         cmd_abort_propagates_current_commit_error_when_start_head_is_missing();
         cmd_abort_uses_current_commit_when_start_head_is_missing();
-        cmd_start_in_propagates_commit_resolution_error_after_prep();
-        cmd_start_in_propagates_sort_error_after_resolution();
+        cmd_start_in_propagates_invalid_range_error_after_prep();
+        cmd_start_in_propagates_invalid_inclusive_span_after_resolution();
         commit_message_try_from_rejects_invalid_values();
         failure_status_reports_failure();
         increment_split_count_reports_overflow();

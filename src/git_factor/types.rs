@@ -1,3 +1,4 @@
+#[cfg(test)]
 use alloc::collections::BTreeSet;
 use core::fmt;
 use std::path::{Path, PathBuf};
@@ -103,9 +104,11 @@ impl fmt::Display for TreeHash {
 }
 
 /// A non-empty set of unique commit SHAs.
+#[cfg(test)]
 #[derive(Debug)]
 pub(in crate::git_factor) struct Commits(BTreeSet<CommitSha>);
 
+#[cfg(test)]
 impl Commits {
     /// Returns an iterator over the commit SHAs in lexicographic order.
     pub(in crate::git_factor) fn iter(&self) -> impl Iterator<Item = &CommitSha> {
@@ -113,6 +116,7 @@ impl Commits {
     }
 }
 
+#[cfg(test)]
 impl TryFrom<BTreeSet<CommitSha>> for Commits {
     type Error = FactorError;
 

@@ -67,6 +67,7 @@ const TEST_COMMIT_ENVS: [(&str, &str); 6] = [
     ("GIT_COMMITTER_DATE", "f"),
 ];
 const SHA_LEN: usize = COMMIT_SHA_HEX_LEN;
+const HEAD_TREEISH: &str = "HEAD^{tree}";
 
 /// Valid 40-char hex tree hash for the "expected" / "same" tree in tests.
 const TREE_EXPECTED: &str = "dddddddddddddddddddddddddddddddddddddddd";
@@ -438,91 +439,6 @@ impl Runner for RebaseContinueCompletesRunner {
             }
         }
         self.inner.status(bin, args, envs, quiet, cwd)
-    }
-}
-
-struct RebaseStartPausesRunner {
-    inner: ScriptedRunner,
-    pending_start_state: Option<PendingStartState>,
-    rebase_dir: PathBuf,
-}
-
-struct PendingStartState {
-    commits: Vec<String>,
-    is_root: bool,
-    start_head: String,
-    state_dir: PathBuf,
-}
-
-impl RebaseStartPausesRunner {
-    fn with_pending_start_state(
-        inner: ScriptedRunner,
-        rebase_dir: PathBuf,
-        state_dir: PathBuf,
-        commits: Vec<String>,
-        start_head: String,
-        is_root: bool,
-    ) -> Self {
-        Self {
-            inner,
-            rebase_dir,
-            pending_start_state: Some(PendingStartState {
-                commits,
-                is_root,
-                start_head,
-                state_dir,
-            }),
-        }
-    }
-}
-
-impl Runner for RebaseStartPausesRunner {
-    fn output(&self, bin: &str, args: &[&str], cwd: &Path) -> io::Result<Output> {
-        self.inner.output(bin, args, cwd)
-    }
-
-    fn status(
-        &self,
-        bin: &str,
-        args: &[&str],
-        envs: &[(&str, &str)],
-        quiet: bool,
-        cwd: &Path,
-    ) -> io::Result<ExitStatus> {
-        let status = self.inner.status(bin, args, envs, quiet, cwd)?;
-        if bin == "git"
-            && args.first() == Some(&"rebase")
-            && args.contains(&"--interactive")
-            && status.success()
-        {
-            fs::create_dir_all(&self.rebase_dir).or_abort("create rebase-merge");
-            if let Some(state) = self.pending_start_state.as_ref() {
-                fs::create_dir_all(&state.state_dir).or_abort("create factor state dir");
-                fs::write(state.state_dir.join("commits"), state.commits.join("\n"))
-                    .or_abort("write commits");
-                fs::write(state.state_dir.join("current_index"), "0")
-                    .or_abort("write current_index");
-                fs::write(
-                    state.state_dir.join("phase"),
-                    SessionPhase::PendingStart.as_str(),
-                )
-                .or_abort("write phase");
-                fs::write(state.state_dir.join("split_count"), "0").or_abort("write split_count");
-                fs::write(state.state_dir.join("requires_rebase"), "true")
-                    .or_abort("write requires_rebase");
-                fs::write(state.state_dir.join("started_rebase"), "true")
-                    .or_abort("write started_rebase");
-                fs::write(state.state_dir.join("start_head"), &state.start_head)
-                    .or_abort("write start_head");
-                fs::write(
-                    state.state_dir.join("is_root"),
-                    if state.is_root { "true" } else { "false" },
-                )
-                .or_abort("write is_root");
-                fs::write(state.state_dir.join("exec"), "true").or_abort("write exec");
-            }
-        }
-        Ok(status)
     }
 }
 
@@ -982,6 +898,14 @@ fn start_single_head_validation_runner(repo: &Path, sha: &str) -> ScriptedRunner
         )
         .with_status(
             "git",
+            &["rev-parse", "--quiet", "--verify", &format!("{sha}^")],
+            &[],
+            true,
+            repo,
+            0,
+        )
+        .with_status(
+            "git",
             &["rev-parse", "--quiet", "--verify", &format!("{sha}^2")],
             &[],
             true,
@@ -1159,6 +1083,10 @@ fn continue_runner_with_remaining_output(
         .with_status("git", &["read-tree", TREE_REHYDRATE], &[], false, repo, 0)
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "shared finish-to-next-step runner encodes the full scripted transcript in one helper"
+)]
 fn finish_advance_runner(repo: &Path, original: &str, next: &str) -> ScriptedRunner {
     with_git_dir_outputs(ScriptedRunner::default(), repo, 6)
         .with_status(
@@ -1223,7 +1151,14 @@ fn finish_advance_runner(repo: &Path, original: &str, next: &str) -> ScriptedRun
             0,
         )
         .with_output("git", &["status", "--porcelain=v1"], repo, "")
-        .with_status("git", &["reset", "--quiet", "HEAD~1"], &[], false, repo, 0)
+        .with_status(
+            "git",
+            &["reset", "--quiet", &format!("{original}^")],
+            &[],
+            false,
+            repo,
+            0,
+        )
         .with_output(
             "git",
             &["show", "--format=%B", "--no-patch", next],
@@ -1257,7 +1192,14 @@ fn finish_advance_runner(repo: &Path, original: &str, next: &str) -> ScriptedRun
         )
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "scripted runner encodes the multi-commit start interactions explicitly"
+)]
 fn start_multi_commit_runner_base(repo: &Path, sha_a: &str, sha_b: &str) -> ScriptedRunner {
+    let head = "c".repeat(SHA_LEN);
+    let span_expr = format!("{sha_a}..{sha_b}");
+
     ScriptedRunner::default()
         .with_output("git", &["rev-parse", "--git-dir"], repo, ".git\n")
         .with_output("git", &["status", "--porcelain=v1"], repo, "")
@@ -1275,19 +1217,55 @@ fn start_multi_commit_runner_base(repo: &Path, sha_a: &str, sha_b: &str) -> Scri
         )
         .with_output(
             "git",
-            &["rev-list", "--reverse", "--topo-order", sha_a, sha_b],
+            &[
+                "rev-list",
+                "--reverse",
+                "--ancestry-path",
+                span_expr.as_str(),
+            ],
             repo,
-            &format!("{sha_a}\n{sha_b}\n"),
+            &format!("{sha_b}\n"),
         )
         .with_output(
             "git",
             &["rev-parse", "--verify", "HEAD"],
             repo,
-            &format!("{sha_b}\n"),
+            &format!("{head}\n"),
+        )
+        .with_status(
+            "git",
+            &["rev-parse", "--quiet", "--verify", &format!("{sha_a}^2")],
+            &[],
+            true,
+            repo,
+            1,
+        )
+        .with_status(
+            "git",
+            &["rev-parse", "--quiet", "--verify", &format!("{sha_b}^2")],
+            &[],
+            true,
+            repo,
+            1,
+        )
+        .with_output(
+            "git",
+            &["rev-parse", "--verify", &format!("{sha_b}^")],
+            repo,
+            &format!("{sha_a}\n"),
         )
         .with_status(
             "git",
             &["merge-base", "--is-ancestor", sha_a, "HEAD"],
+            &[],
+            true,
+            repo,
+            0,
+        )
+        .with_output("git", &["rev-parse", "--short", sha_a], repo, "aaaaaaa\n")
+        .with_status(
+            "bash",
+            &["--norc", "--noprofile", "-n", "-c", "true"],
             &[],
             true,
             repo,
@@ -1317,21 +1295,6 @@ fn start_multi_commit_runner_base(repo: &Path, sha_a: &str, sha_b: &str) -> Scri
             repo,
             1,
         )
-        .with_output("git", &["rev-parse", "--short", sha_a], repo, "aaaaaaa\n")
-        .with_output(
-            "git",
-            &["show", "--format=%B", "--no-patch", sha_a],
-            repo,
-            "subject\n",
-        )
-        .with_status(
-            "bash",
-            &["--norc", "--noprofile", "-n", "-c", "true"],
-            &[],
-            true,
-            repo,
-            0,
-        )
         .with_status(
             "git",
             &["rev-parse", "--quiet", "--verify", &format!("{sha_a}^")],
@@ -1339,6 +1302,13 @@ fn start_multi_commit_runner_base(repo: &Path, sha_a: &str, sha_b: &str) -> Scri
             true,
             repo,
             0,
+        )
+        .with_output("git", &["rev-parse", "--short", sha_b], repo, "bbbbbbb\n")
+        .with_output(
+            "git",
+            &["show", "--format=%B", "--no-patch", sha_b],
+            repo,
+            "subject\n",
         )
 }
 
@@ -1403,7 +1373,14 @@ fn start_single_head_runner(repo: &Path, sha: &str, tree: &str, diff_stat: &str)
         repo,
         &format!("{tree}\n"),
     )
-    .with_status("git", &["reset", "--quiet", "HEAD~1"], &[], false, repo, 0)
+    .with_status(
+        "git",
+        &["reset", "--quiet", &format!("{sha}^")],
+        &[],
+        false,
+        repo,
+        0,
+    )
     .with_output("git", &["diff", "--stat"], repo, diff_stat)
     .with_output(
         "git",
@@ -1429,7 +1406,31 @@ fn start_single_head_root_runner(
     reset_code: i32,
 ) -> ScriptedRunner {
     with_start_gate_result(
-        start_single_head_validation_runner(repo, sha)
+        start_single_head_resolution_runner(repo, sha)
+            .with_status(
+                "git",
+                &["merge-base", "--is-ancestor", sha, "HEAD"],
+                &[],
+                true,
+                repo,
+                0,
+            )
+            .with_status(
+                "git",
+                &["rev-parse", "--quiet", "--verify", &format!("{sha}^")],
+                &[],
+                true,
+                repo,
+                1,
+            )
+            .with_status(
+                "git",
+                &["rev-parse", "--quiet", "--verify", &format!("{sha}^2")],
+                &[],
+                true,
+                repo,
+                1,
+            )
             .with_output("git", &["rev-parse", "--short", sha], repo, "aaaaaaa\n")
             .with_output(
                 "git",
@@ -1442,14 +1443,6 @@ fn start_single_head_root_runner(
         0,
         "",
         "",
-    )
-    .with_status(
-        "git",
-        &["rev-parse", "--quiet", "--verify", &format!("{sha}^")],
-        &[],
-        true,
-        repo,
-        1,
     )
     .with_output(
         "git",
@@ -1505,43 +1498,26 @@ fn run_start_two_shas(ctx: &Ctx<'_>, sha_a: &str, sha_b: &str) -> Result<i32, Fa
     )
 }
 
-fn build_sequence_editor(repo: &Path, sha_a: &str, sha_b: &str) -> String {
+fn build_sequence_editor(repo: &Path, sha_a: &str, sha_b: &str, start_head: &str) -> String {
     let canon_repo = fs::canonicalize(repo).or_abort("canonicalize repo");
     let editor = canon_repo.join("git-sequence-editor");
     let factor = repo.join("git-factor");
     let editor_str = editor.to_str().or_abort("editor path is UTF-8");
     let factor_str = factor.to_str().or_abort("factor path is UTF-8");
     let commits = format!("{sha_a},{sha_b}");
-    let preflight_zero = format!(
-        "{} {} {} {}",
-        shell_quote(factor_str),
-        shell_quote("rebase-exec-preflight"),
-        shell_quote("0"),
-        shell_quote("true")
-    );
-    let begin_zero = format!(
-        "{} {} {} {} {} {} {}",
-        shell_quote(factor_str),
-        shell_quote("rebase-exec-begin"),
-        shell_quote("0"),
-        shell_quote(sha_b),
-        shell_quote("false"),
-        shell_quote("true"),
-        shell_quote(commits.as_str())
-    );
-    let preflight_one = format!(
+    let preflight = format!(
         "{} {} {} {}",
         shell_quote(factor_str),
         shell_quote("rebase-exec-preflight"),
         shell_quote("1"),
         shell_quote("true")
     );
-    let begin_one = format!(
+    let begin = format!(
         "{} {} {} {} {} {} {}",
         shell_quote(factor_str),
         shell_quote("rebase-exec-begin"),
         shell_quote("1"),
-        shell_quote(sha_b),
+        shell_quote(start_head),
         shell_quote("false"),
         shell_quote("true"),
         shell_quote(commits.as_str())
@@ -1549,17 +1525,11 @@ fn build_sequence_editor(repo: &Path, sha_a: &str, sha_b: &str) -> String {
     [
         shell_quote(editor_str),
         shell_quote("--factor-target"),
-        shell_quote("aaaaaaa"),
-        shell_quote("--factor-preflight"),
-        shell_quote(preflight_zero.as_str()),
-        shell_quote("--factor-begin"),
-        shell_quote(begin_zero.as_str()),
-        shell_quote("--factor-target"),
         shell_quote("bbbbbbb"),
         shell_quote("--factor-preflight"),
-        shell_quote(preflight_one.as_str()),
+        shell_quote(preflight.as_str()),
         shell_quote("--factor-begin"),
-        shell_quote(begin_one.as_str()),
+        shell_quote(begin.as_str()),
     ]
     .join(" ")
 }
@@ -1569,129 +1539,108 @@ fn build_sequence_editor(repo: &Path, sha_a: &str, sha_b: &str) -> String {
     reason = "range start fixture scripts the entire preflight, sequence-editor, and rebase setup flow"
 )]
 fn start_range_ref_runner(repo: &Path, sha_a: &str, sha_b: &str) -> ScriptedRunner {
-    let seq_editor = build_sequence_editor(repo, sha_a, sha_b);
-    with_git_dir_outputs(ScriptedRunner::default(), repo, 2)
-        .with_output("git", &["status", "--porcelain=v1"], repo, "")
-        .with_output(
-            "git",
-            &["rev-list", "a..b"],
-            repo,
-            &format!("{sha_a}\n{sha_b}\n"),
-        )
-        .with_output(
-            "git",
-            &["rev-list", "--reverse", "--topo-order", sha_a, sha_b],
-            repo,
-            &format!("{sha_a}\n{sha_b}\n"),
-        )
-        .with_output(
-            "git",
-            &["rev-parse", "--verify", "HEAD"],
-            repo,
-            &format!("{sha_b}\n"),
-        )
-        .with_status(
-            "git",
-            &["merge-base", "--is-ancestor", sha_a, "HEAD"],
-            &[],
-            true,
-            repo,
-            0,
-        )
-        .with_status(
-            "git",
-            &["merge-base", "--is-ancestor", sha_b, "HEAD"],
-            &[],
-            true,
-            repo,
-            0,
-        )
-        .with_status(
-            "git",
-            &["rev-parse", "--quiet", "--verify", &format!("{sha_a}^2")],
-            &[],
-            true,
-            repo,
-            1,
-        )
-        .with_status(
-            "git",
-            &["rev-parse", "--quiet", "--verify", &format!("{sha_b}^2")],
-            &[],
-            true,
-            repo,
-            1,
-        )
-        .with_output("git", &["rev-parse", "--short", sha_a], repo, "aaaaaaa\n")
-        .with_output(
-            "git",
-            &["show", "--format=%B", "--no-patch", sha_a],
-            repo,
-            "msg\n",
-        )
-        .with_status(
-            "bash",
-            &["--norc", "--noprofile", "-n", "-c", "true"],
-            &[],
-            true,
-            repo,
-            0,
-        )
-        .with_status(
-            "git",
-            &["rev-parse", "--quiet", "--verify", &format!("{sha_a}^")],
-            &[],
-            true,
-            repo,
-            0,
-        )
-        .with_output("git", &["rev-parse", "--short", sha_a], repo, "aaaaaaa\n")
-        .with_output("git", &["rev-parse", "--short", sha_b], repo, "bbbbbbb\n")
-        .with_status(
-            "git",
-            &[
-                "rebase",
-                "--empty",
-                "drop",
-                "--interactive",
-                "--no-autosquash",
-                "--no-autostash",
-                "--no-rebase-merges",
-                "--no-stat",
-                "--quiet",
-                "--reschedule-failed-exec",
-                &format!("{sha_a}^"),
-            ],
-            &[
-                ("GIT_EDITOR", "false"),
-                ("GIT_SEQUENCE_EDITOR", seq_editor.as_str()),
-            ],
-            false,
-            repo,
-            0,
-        )
-        .with_output("git", &["status", "--porcelain=v1"], repo, "")
-        .with_status("git", &["reset", "--quiet", "HEAD~1"], &[], false, repo, 0)
-        .with_output(
-            "git",
-            &["show", "--format=%B", "--no-patch", sha_a],
-            repo,
-            "msg\n",
-        )
-        .with_output("git", &["rev-parse", "--short", sha_a], repo, "aaaaaaa\n")
-        .with_output("git", &["diff", "--stat"], repo, "")
-        .with_output(
-            "git",
-            &["ls-files", "--others", "--exclude-standard"],
-            repo,
-            "",
-        )
-        .with_output(
-            "git",
-            &["rev-parse", "--show-toplevel"],
-            repo,
-            &format!("{}\n", repo.display()),
-        )
+    let tree = "0123456789abcdef0123456789abcdef01234567";
+    with_start_gate_result(
+        with_git_dir_outputs(ScriptedRunner::default(), repo, 1)
+            .with_output("git", &["status", "--porcelain=v1"], repo, "")
+            .with_output(
+                "git",
+                &["rev-list", "--reverse", "--ancestry-path", "a^..b"],
+                repo,
+                &format!("{sha_a}\n{sha_b}\n"),
+            )
+            .with_status(
+                "git",
+                &["merge-base", "--is-ancestor", sha_a, "HEAD"],
+                &[],
+                true,
+                repo,
+                0,
+            )
+            .with_status(
+                "git",
+                &["merge-base", "--is-ancestor", sha_b, "HEAD"],
+                &[],
+                true,
+                repo,
+                0,
+            )
+            .with_status(
+                "git",
+                &["rev-parse", "--quiet", "--verify", &format!("{sha_a}^2")],
+                &[],
+                true,
+                repo,
+                1,
+            )
+            .with_status(
+                "git",
+                &["rev-parse", "--quiet", "--verify", &format!("{sha_b}^2")],
+                &[],
+                true,
+                repo,
+                1,
+            )
+            .with_output(
+                "git",
+                &["rev-parse", "--verify", &format!("{sha_b}^")],
+                repo,
+                &format!("{sha_a}\n"),
+            )
+            .with_output(
+                "git",
+                &["rev-parse", "--verify", "HEAD"],
+                repo,
+                &format!("{sha_b}\n"),
+            )
+            .with_status(
+                "git",
+                &["rev-parse", "--quiet", "--verify", &format!("{sha_a}^")],
+                &[],
+                true,
+                repo,
+                0,
+            )
+            .with_output("git", &["rev-parse", "--short", sha_b], repo, "bbbbbbb\n")
+            .with_output(
+                "git",
+                &["show", "--format=%B", "--no-patch", sha_b],
+                repo,
+                "msg\n",
+            ),
+        repo,
+        "true",
+        0,
+        "",
+        "",
+    )
+    .with_output(
+        "git",
+        &["rev-parse", HEAD_TREEISH],
+        repo,
+        &format!("{tree}\n"),
+    )
+    .with_status(
+        "git",
+        &["reset", "--quiet", &format!("{sha_a}^")],
+        &[],
+        false,
+        repo,
+        0,
+    )
+    .with_output("git", &["diff", "--stat"], repo, "")
+    .with_output(
+        "git",
+        &["ls-files", "--others", "--exclude-standard"],
+        repo,
+        "",
+    )
+    .with_output(
+        "git",
+        &["rev-parse", "--show-toplevel"],
+        repo,
+        &format!("{}\n", repo.display()),
+    )
 }
 
 #[cfg(unix)]
@@ -2769,32 +2718,12 @@ fn resolve_commit_refs_ignores_invalid_rev_list_lines() {
 }
 
 #[test]
-fn cmd_start_errors_when_no_commits_remain_after_sorting() {
+fn cmd_start_errors_when_symmetric_diff_range_is_requested() {
     let dir = TempDir::new().or_abort("tempdir");
     let repo = dir.path();
-    let sha_a = "a".repeat(SHA_LEN);
-    let sha_b = "b".repeat(SHA_LEN);
     let runner = ScriptedRunner::default()
         .with_output("git", &["rev-parse", "--git-dir"], repo, ".git\n")
-        .with_output("git", &["status", "--porcelain=v1"], repo, "")
-        .with_output(
-            "git",
-            &["rev-parse", "--verify", "HEAD"],
-            repo,
-            &format!("{sha_a}\n"),
-        )
-        .with_output(
-            "git",
-            &["rev-list", "--reverse", "--topo-order", &sha_a],
-            repo,
-            &format!("{sha_b}\n"),
-        )
-        .with_output(
-            "git",
-            &["rev-parse", "--verify", "HEAD"],
-            repo,
-            &format!("{sha_a}\n"),
-        );
+        .with_output("git", &["status", "--porcelain=v1"], repo, "");
     let io = TestIo::default();
     let env = TestEnv {
         cwd: repo.to_path_buf(),
@@ -2813,13 +2742,13 @@ fn cmd_start_errors_when_no_commits_remain_after_sorting() {
             OsString::from("git-factor"),
             OsString::from("--exec"),
             OsString::from("true"),
-            OsString::from("HEAD"),
+            OsString::from("HEAD...HEAD"),
         ],
     )
-    .err_or_abort("expected sorting to error");
+    .err_or_abort("expected symmetric diff range to be rejected");
     assert_eq!(
         err.to_string(),
-        "git command failed: no commits after sorting"
+        "invalid commit: HEAD...HEAD (symmetric diff '...' is not supported, use '..')"
     );
 }
 
@@ -2934,14 +2863,14 @@ fn print_session_started_multi_commit_with_untracked_and_claude_hints() {
     };
     print_session_started(
         &ctx,
-        "FACTOR: Split session started for 2 commits (first: aaaaaaa).",
+        "FACTOR: Split session started for 2 commits (tip: aaaaaaa).",
         "subject",
     )
     .or_abort("print should succeed");
 
     let expected = format!(
         concat!(
-            "FACTOR: Split session started for 2 commits (first: aaaaaaa).\n",
+            "FACTOR: Split session started for 2 commits (tip: aaaaaaa).\n",
             "ORIGINAL MESSAGE: subject\n",
             "UNSTAGED:\n",
             "  a.txt | 1 +\n",
@@ -3305,14 +3234,7 @@ fn cmd_start_range_ref_inserts_shas_and_propagates_io_error_on_multi_commit_bann
 
     let sha_a = "a".repeat(SHA_LEN);
     let sha_b = "b".repeat(SHA_LEN);
-    let runner = RebaseStartPausesRunner::with_pending_start_state(
-        start_range_ref_runner(repo, &sha_a, &sha_b),
-        repo.join(".git").join("rebase-merge"),
-        repo.join(".git").join("factor"),
-        vec![sha_a.clone(), sha_b.clone()],
-        sha_b.clone(),
-        false,
-    );
+    let runner = start_range_ref_runner(repo, &sha_a, &sha_b);
     let io = FailingIo;
     let env = TestEnv {
         cwd: repo.to_path_buf(),
@@ -3331,7 +3253,7 @@ fn cmd_start_range_ref_inserts_shas_and_propagates_io_error_on_multi_commit_bann
             OsString::from("git-factor"),
             OsString::from("--exec"),
             OsString::from("true"),
-            OsString::from("a..b"),
+            OsString::from("a^..b"),
         ],
     )
     .err_or_abort("expected io failure");
@@ -3350,14 +3272,7 @@ fn cmd_start_range_ref_inserts_shas_and_starts_multi_commit_session() {
 
     let sha_a = "a".repeat(SHA_LEN);
     let sha_b = "b".repeat(SHA_LEN);
-    let runner = RebaseStartPausesRunner::with_pending_start_state(
-        start_range_ref_runner(repo, &sha_a, &sha_b),
-        repo.join(".git").join("rebase-merge"),
-        repo.join(".git").join("factor"),
-        vec![sha_a.clone(), sha_b.clone()],
-        sha_b.clone(),
-        false,
-    );
+    let runner = start_range_ref_runner(repo, &sha_a, &sha_b);
     let io = TestIo::default();
     let env = TestEnv {
         cwd: repo.to_path_buf(),
@@ -3376,7 +3291,7 @@ fn cmd_start_range_ref_inserts_shas_and_starts_multi_commit_session() {
             OsString::from("git-factor"),
             OsString::from("--exec"),
             OsString::from("true"),
-            OsString::from("a..b"),
+            OsString::from("a^..b"),
         ],
     )
     .or_abort("expected multi-commit start to succeed");
@@ -3384,11 +3299,17 @@ fn cmd_start_range_ref_inserts_shas_and_starts_multi_commit_session() {
     assert_eq!(code, EXIT_OK);
     assert!(
         io.stdout()
-            .contains("FACTOR: Split session started for 2 commits (first: aaaaaaa)."),
+            .contains("FACTOR: Split session started for 2 commits (tip: bbbbbbb)."),
         "stdout was: {}",
         io.stdout()
     );
     assert!(io.stderr().is_empty(), "stderr should be empty");
+    let state_dir = repo.join(".git").join("factor");
+    assert!(state_dir.is_dir(), "factor state dir should exist");
+    assert_eq!(
+        fs::read_to_string(state_dir.join("requires_rebase")).or_abort("read requires_rebase"),
+        "false\n"
+    );
 }
 
 #[test]
@@ -3573,7 +3494,14 @@ fn advance_to_next_commit_prints_untracked_changes_when_present() {
             0,
         )
         .with_output("git", &["status", "--porcelain=v1"], repo, "")
-        .with_status("git", &["reset", "--quiet", "HEAD~1"], &[], false, repo, 0)
+        .with_status(
+            "git",
+            &["reset", "--quiet", &format!("{}^", "a".repeat(SHA_LEN))],
+            &[],
+            false,
+            repo,
+            0,
+        )
         .with_output("git", &["rev-parse", "--git-dir"], repo, ".git\n")
         .with_output(
             "git",
@@ -3672,7 +3600,14 @@ fn advance_to_next_commit_propagates_io_error_when_outln_fails_mid_rebase() {
             0,
         )
         .with_output("git", &["status", "--porcelain=v1"], repo, "")
-        .with_status("git", &["reset", "--quiet", "HEAD~1"], &[], false, repo, 0)
+        .with_status(
+            "git",
+            &["reset", "--quiet", &format!("{}^", "a".repeat(SHA_LEN))],
+            &[],
+            false,
+            repo,
+            0,
+        )
         .with_output("git", &["rev-parse", "--git-dir"], repo, ".git\n")
         .with_output(
             "git",
@@ -3918,7 +3853,14 @@ fn advance_to_next_commit_omits_untracked_section_when_empty() {
             0,
         )
         .with_output("git", &["status", "--porcelain=v1"], repo, "")
-        .with_status("git", &["reset", "--quiet", "HEAD~1"], &[], false, repo, 0)
+        .with_status(
+            "git",
+            &["reset", "--quiet", &format!("{}^", "a".repeat(SHA_LEN))],
+            &[],
+            false,
+            repo,
+            0,
+        )
         .with_output(
             "git",
             &["show", "--format=%B", "--no-patch", &"b".repeat(SHA_LEN)],
@@ -7221,7 +7163,14 @@ fn advance_to_next_commit_runner_failures_cover_command_error_paths() {
             0,
         )
         .with_output("git", &["status", "--porcelain=v1"], repo, "")
-        .with_status("git", &["reset", "--quiet", "HEAD~1"], &[], false, repo, 0)
+        .with_status(
+            "git",
+            &["reset", "--quiet", &format!("{}^", "a".repeat(SHA_LEN))],
+            &[],
+            false,
+            repo,
+            0,
+        )
         .with_output(
             "git",
             &["show", "--format=%B", "--no-patch", &"b".repeat(SHA_LEN)],
@@ -7290,7 +7239,14 @@ fn advance_to_next_commit_io_failures_cover_output_paths() {
             0,
         )
         .with_output("git", &["status", "--porcelain=v1"], repo, "")
-        .with_status("git", &["reset", "--quiet", "HEAD~1"], &[], false, repo, 0)
+        .with_status(
+            "git",
+            &["reset", "--quiet", &format!("{}^", "a".repeat(SHA_LEN))],
+            &[],
+            false,
+            repo,
+            0,
+        )
         .with_output(
             "git",
             &["show", "--format=%B", "--no-patch", &"b".repeat(SHA_LEN)],
@@ -8573,7 +8529,14 @@ fn cmd_continue_pending_start_opens_split_session() {
 
     let runner = with_git_dir_outputs(ScriptedRunner::default(), repo, 2)
         .with_output("git", &["status", "--porcelain=v1"], repo, "")
-        .with_status("git", &["reset", "--quiet", "HEAD~1"], &[], false, repo, 0)
+        .with_status(
+            "git",
+            &["reset", "--quiet", &format!("{original}^")],
+            &[],
+            false,
+            repo,
+            0,
+        )
         .with_output(
             "git",
             &["show", "--format=%B", "--no-patch", original.as_str()],
@@ -8944,7 +8907,14 @@ fn cmd_continue_advances_to_next_commit_and_prints_next_guidance() {
             repo,
             0,
         )
-        .with_status("git", &["reset", "--quiet", "HEAD~1"], &[], false, repo, 0)
+        .with_status(
+            "git",
+            &["reset", "--quiet", &format!("{original}^")],
+            &[],
+            false,
+            repo,
+            0,
+        )
         .with_output(
             "git",
             &["show", "--format=%B", "--no-patch", next.as_str()],
@@ -9059,7 +9029,14 @@ fn cmd_continue_propagates_io_error_when_advanced_summary_write_fails() {
             repo,
             0,
         )
-        .with_status("git", &["reset", "--quiet", "HEAD~1"], &[], false, repo, 0)
+        .with_status(
+            "git",
+            &["reset", "--quiet", &format!("{original}^")],
+            &[],
+            false,
+            repo,
+            0,
+        )
         .with_output(
             "git",
             &["show", "--format=%B", "--no-patch", next.as_str()],
@@ -10013,7 +9990,14 @@ fn advance_to_next_commit_propagates_current_commit_lookup_failure_after_reset()
             0,
         )
         .with_output("git", &["status", "--porcelain=v1"], repo, "")
-        .with_status("git", &["reset", "--quiet", "HEAD~1"], &[], false, repo, 0);
+        .with_status(
+            "git",
+            &["reset", "--quiet", &format!("{}^", "a".repeat(SHA_LEN))],
+            &[],
+            false,
+            repo,
+            0,
+        );
     let io = TestIo::default();
     let env = TestEnv {
         cwd: repo.to_path_buf(),
@@ -10722,7 +10706,31 @@ fn cmd_start_root_session_propagates_mixed_reset_error() {
     let repo = dir.path();
     let sha = "a".repeat(SHA_LEN);
     let runner = with_start_gate_result(
-        start_single_head_validation_runner(repo, &sha)
+        start_single_head_resolution_runner(repo, &sha)
+            .with_status(
+                "git",
+                &["merge-base", "--is-ancestor", &sha, "HEAD"],
+                &[],
+                true,
+                repo,
+                0,
+            )
+            .with_status(
+                "git",
+                &["rev-parse", "--quiet", "--verify", &format!("{sha}^")],
+                &[],
+                true,
+                repo,
+                1,
+            )
+            .with_status(
+                "git",
+                &["rev-parse", "--quiet", "--verify", &format!("{sha}^2")],
+                &[],
+                true,
+                repo,
+                1,
+            )
             .with_output("git", &["rev-parse", "--short", &sha], repo, "aaaaaaa\n")
             .with_output(
                 "git",
@@ -10735,14 +10743,6 @@ fn cmd_start_root_session_propagates_mixed_reset_error() {
         0,
         "",
         "",
-    )
-    .with_status(
-        "git",
-        &["rev-parse", "--quiet", "--verify", &format!("{sha}^")],
-        &[],
-        true,
-        repo,
-        1,
     )
     .with_output(
         "git",
@@ -10935,7 +10935,8 @@ fn cmd_start_rebase_failure_does_not_warn_when_state_was_never_created() {
     fs::write(repo.join("git-factor"), "").or_abort("create git-factor");
     let sha_a = "a".repeat(SHA_LEN);
     let sha_b = "b".repeat(SHA_LEN);
-    let seq_editor = build_sequence_editor(repo, &sha_a, &sha_b);
+    let start_head = "c".repeat(SHA_LEN);
+    let seq_editor = build_sequence_editor(repo, &sha_a, &sha_b, &start_head);
     let runner = start_rebase_failure_runner(repo, &sha_a, &sha_b, &seq_editor);
     let io = TestIo::default();
     let env = TestEnv {
@@ -11179,7 +11180,8 @@ fn cmd_start_rebase_failure_skips_cleanup_warning_io_when_state_was_never_create
     fs::write(repo.join("git-factor"), "").or_abort("create git-factor");
     let sha_a = "a".repeat(SHA_LEN);
     let sha_b = "b".repeat(SHA_LEN);
-    let seq_editor = build_sequence_editor(repo, &sha_a, &sha_b);
+    let start_head = "c".repeat(SHA_LEN);
+    let seq_editor = build_sequence_editor(repo, &sha_a, &sha_b, &start_head);
     let runner = start_rebase_failure_runner(repo, &sha_a, &sha_b, &seq_editor);
     let io = FailingIo;
     let env = TestEnv {
@@ -11262,7 +11264,8 @@ fn cmd_start_reports_rebase_failure_without_cleanup_warning_when_state_removal_s
     fs::write(repo.join("git-factor"), "").or_abort("create git-factor");
     let sha_a = "a".repeat(SHA_LEN);
     let sha_b = "b".repeat(SHA_LEN);
-    let seq_editor = build_sequence_editor(repo, &sha_a, &sha_b);
+    let start_head = "c".repeat(SHA_LEN);
+    let seq_editor = build_sequence_editor(repo, &sha_a, &sha_b, &start_head);
     let runner = start_rebase_failure_runner(repo, &sha_a, &sha_b, &seq_editor);
     let io = TestIo::default();
     let env = TestEnv {
@@ -12453,7 +12456,7 @@ fn proptest_run_unit_suite_part_1() {
 fn proptest_run_unit_suite_part_2() {
     cmd_start_errors_when_factor_session_is_already_active();
     cmd_start_errors_when_merge_base_spawn_fails();
-    cmd_start_errors_when_no_commits_remain_after_sorting();
+    cmd_start_errors_when_symmetric_diff_range_is_requested();
     cmd_start_errors_when_rebase_is_already_active();
     cmd_start_errors_when_short_sha_is_empty();
     cmd_start_errors_when_worktree_is_dirty();

@@ -1,3 +1,5 @@
+#[cfg(test)]
+use super::types::Commits;
 #[cfg_attr(
     not(test),
     expect(
@@ -6,7 +8,9 @@
     )
 )]
 use super::*;
+#[cfg(test)]
 use alloc::collections::BTreeSet;
+#[cfg(test)]
 use std::collections::HashSet;
 
 /// Removes the empty root commit left by `mixed_reset_to_empty()`.
@@ -132,6 +136,7 @@ pub(in crate::git_factor) fn resolve_head_commit(ctx: &Ctx<'_>) -> Result<Commit
         reason = "ref resolution is extracted for clarity and targeted tests"
     )
 )]
+#[cfg(test)]
 pub(in crate::git_factor) fn resolve_commit_refs(
     ctx: &Ctx<'_>,
     refs: &NonEmpty<NonEmptyString>,
@@ -177,48 +182,41 @@ pub(in crate::git_factor) fn resolve_commit_refs(
 #[cfg_attr(
     not(test),
     expect(
-        dead_code,
-        reason = "span resolution lands before the full session engine is rewired to use it"
+        clippy::single_call_fn,
+        reason = "Production start flow uses a dedicated span resolver while tests still exercise the lower-level helpers directly"
     )
 )]
 pub(in crate::git_factor) fn resolve_commit_span(
     ctx: &Ctx<'_>,
     refs: &NonEmpty<NonEmptyString>,
 ) -> Result<NonEmpty<CommitSha>, FactorError> {
-    let commits = match refs.len() {
-        1 => {
-            let ref_str = refs.first().as_str();
-            if ref_str.contains("...") {
-                return Err(FactorError::InvalidCommit(format!(
-                    "{ref_str} (symmetric diff '...' is not supported, use '..')"
-                )));
-            }
-            if ref_str.contains("..") {
-                resolve_span_from_range_expr(ctx, ref_str)?
-            } else {
-                NonEmpty::singleton(resolve_commit(ctx, ref_str)?)
-            }
-        }
-        2 => {
-            let start = refs.first().as_str();
-            let mut tail = refs.tail.iter();
-            let Some(end_ref) = tail.next() else {
-                return Err(FactorError::InvalidCommit(
-                    "commit arguments must resolve to a single contiguous span".to_owned(),
-                ));
-            };
-            let end = end_ref.as_str();
-            if start.contains("..") || end.contains("..") {
-                return Err(FactorError::InvalidCommit(format!(
-                    "{start} {end} (use either a single dotted range or two plain commit refs)"
-                )));
-            }
-            resolve_inclusive_span(ctx, start, end)?
-        }
-        _ => {
+    let mut tail = refs.tail.iter();
+    let commits = if let Some(end_ref) = tail.next() {
+        if tail.next().is_some() {
             return Err(FactorError::InvalidCommit(
                 "commit arguments must resolve to a single contiguous span".to_owned(),
             ));
+        }
+
+        let start = refs.first().as_str();
+        let end = end_ref.as_str();
+        if start.contains("..") || end.contains("..") {
+            return Err(FactorError::InvalidCommit(format!(
+                "{start} {end} (use either a single dotted range or two plain commit refs)"
+            )));
+        }
+        resolve_inclusive_span(ctx, start, end)?
+    } else {
+        let ref_str = refs.first().as_str();
+        if ref_str.contains("...") {
+            return Err(FactorError::InvalidCommit(format!(
+                "{ref_str} (symmetric diff '...' is not supported, use '..')"
+            )));
+        }
+        if ref_str.contains("..") {
+            resolve_span_from_range_expr(ctx, ref_str)?
+        } else {
+            NonEmpty::singleton(resolve_commit(ctx, ref_str)?)
         }
     };
 
@@ -238,6 +236,7 @@ pub(in crate::git_factor) fn resolve_commit_span(
         reason = "topological sorting is extracted for clarity and targeted tests"
     )
 )]
+#[cfg(test)]
 pub(in crate::git_factor) fn sort_topologically(
     ctx: &Ctx<'_>,
     commits: &Commits,
@@ -375,10 +374,7 @@ fn validate_contiguous_span(
     }
 
     let ordered: Vec<&CommitSha> = commits.iter().collect();
-    for window in ordered.windows(2) {
-        let &[parent, child] = window else {
-            continue;
-        };
+    for &[parent, child] in ordered.array_windows::<2>() {
         let first_parent = match git_output(ctx, &["rev-parse", "--verify", &format!("{child}^")]) {
             Ok(parent_sha) => match CommitSha::new(parent_sha) {
                 Ok(parsed_parent_sha) => parsed_parent_sha,

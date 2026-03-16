@@ -416,7 +416,7 @@ fi
     }
 
     #[test]
-    fn continue_advances_to_next_commit_during_rebase_in_binary_path() {
+    fn continue_completes_fully_staged_span_in_one_step_during_rebase() {
         let dir = init_repo();
         let repo = dir.path();
         commit_file(repo, "base.txt", "base\n", "feat: base");
@@ -435,11 +435,10 @@ fi
             .args(["--continue", "--message", "feat: split first"])
             .assert()
             .code(EXIT_OK)
-            .stdout(
-                predicate::str::contains("FACTOR: Previous commit split into 1 commits.")
-                    .and(predicate::str::contains("FACTOR: Now splitting")),
-            )
-            .stderr(predicate::str::contains("Stopped at"));
+            .stdout(predicate::str::contains(
+                "FACTOR: Complete. Final commit split into 1 commits.",
+            ))
+            .stderr(predicate::str::is_empty());
     }
 
     #[test]
@@ -498,7 +497,7 @@ fi
     }
 
     #[test]
-    fn continue_propagates_print_hints_failure_after_advancing_to_next_commit() {
+    fn continue_propagates_print_hints_failure_with_remaining_span_changes() {
         let dir = init_repo();
         let repo = dir.path();
         commit_file(repo, "base.txt", "base\n", "feat: base");
@@ -511,7 +510,7 @@ fi
             .assert()
             .success();
 
-        git(repo, &["add", "--all"]);
+        git(repo, &["add", "a.txt"]);
 
         let (_wrapper_dir, wrapper_bin) = make_git_wrapper_named(
             "git",
@@ -529,9 +528,7 @@ fi
             .args(["--continue", "--message", "feat: split first"])
             .assert()
             .code(EXIT_SOFTWARE)
-            .stdout(predicate::str::contains(
-                "FACTOR: Previous commit split into 1 commits.",
-            ))
+            .stdout(predicate::str::contains("FACTOR: Split 1 committed."))
             .stderr(predicate::str::contains("forced show-toplevel failure"));
     }
 
@@ -586,7 +583,7 @@ fi
     }
 
     #[test]
-    fn continue_completes_rebase_after_last_edit_stop_in_binary_path() {
+    fn continue_completes_rebase_after_final_span_step_in_binary_path() {
         let dir = init_repo();
         let repo = dir.path();
         commit_file(repo, "base.txt", "base\n", "feat: base");
@@ -599,16 +596,15 @@ fi
             .assert()
             .success();
 
-        git(repo, &["add", "--all"]);
+        git(repo, &["add", "a.txt"]);
         Command::new(git_factor_bin())
             .current_dir(repo)
             .args(["--continue", "--message", "feat: split first"])
             .assert()
             .code(EXIT_OK)
-            .stdout(
-                predicate::str::contains("FACTOR: Previous commit split into 1 commits.")
-                    .and(predicate::str::contains("FACTOR: Now splitting")),
-            );
+            .stdout(predicate::str::contains("FACTOR: Split 1 committed.").and(
+                predicate::str::contains("STATE: Remaining changes are unstaged."),
+            ));
 
         git(repo, &["add", "--all"]);
         Command::new(git_factor_bin())
@@ -617,7 +613,7 @@ fi
             .assert()
             .code(EXIT_OK)
             .stdout(predicate::str::contains(
-                "FACTOR: Complete. Final commit split into 1 commits.",
+                "FACTOR: Complete. Final commit split into 2 commits.",
             ))
             .stderr(predicate::str::is_empty());
     }
@@ -626,13 +622,17 @@ fi
     fn continue_reports_tracked_remaining_without_untracked_during_rebase() {
         let dir = init_repo();
         let repo = dir.path();
-        commit_file(repo, "a.txt", "a0\n", "feat: base a");
-        commit_file(repo, "b.txt", "b0\n", "feat: base b");
+        assert_ok!(fs::write(repo.join("a.txt"), "a0\n"), "write base a");
+        assert_ok!(fs::write(repo.join("b.txt"), "b0\n"), "write base b");
+        git(repo, &["add", "a.txt", "b.txt"]);
+        git(repo, &["commit", "--message", "feat: base files"]);
         assert_ok!(fs::write(repo.join("a.txt"), "a1\n"), "update a");
         assert_ok!(fs::write(repo.join("b.txt"), "b1\n"), "update b");
         git(repo, &["add", "a.txt", "b.txt"]);
         git(repo, &["commit", "--message", "feat: update a and b"]);
-        commit_file(repo, "c.txt", "c1\n", "feat: add c");
+        assert_ok!(fs::write(repo.join("b.txt"), "b2\n"), "refine b");
+        git(repo, &["add", "b.txt"]);
+        git(repo, &["commit", "--message", "feat: refine b"]);
 
         Command::new(git_factor_bin())
             .current_dir(repo)
@@ -727,7 +727,10 @@ fi
             .args(["--finish", "--message", "feat: finish remaining"])
             .assert()
             .code(EXIT_OK)
-            .stdout(predicate::str::contains("FACTOR: Now splitting"));
+            .stdout(predicate::str::contains(
+                "FACTOR: Complete. Final commit split into 1 commits.",
+            ))
+            .stderr(predicate::str::is_empty());
     }
 
     #[test]
@@ -765,10 +768,10 @@ fi
             let result = catch_unwind(AssertUnwindSafe(|| {
                 abort_propagates_start_head_state_read_error_in_binary_path();
                 abort_skips_rebase_abort_when_started_rebase_true_but_not_mid_rebase();
-                continue_advances_to_next_commit_during_rebase_in_binary_path();
-                continue_completes_rebase_after_last_edit_stop_in_binary_path();
+                continue_completes_fully_staged_span_in_one_step_during_rebase();
+                continue_completes_rebase_after_final_span_step_in_binary_path();
                 continue_propagates_advance_error_after_converged_tree_in_binary_path();
-                continue_propagates_print_hints_failure_after_advancing_to_next_commit();
+                continue_propagates_print_hints_failure_with_remaining_span_changes();
                 continue_reports_remaining_tracked_changes_without_untracked_section();
                 continue_reports_tracked_remaining_without_untracked_during_rebase();
                 continue_reports_untracked_section_when_remaining_pool_has_untracked_files();
