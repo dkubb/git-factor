@@ -551,9 +551,12 @@ pub(in crate::git_sequence_editor) fn build_requested_actions(
 }
 
 /// Builds factor-session insertions keyed by the todo SHA to modify.
-#[expect(
-    clippy::single_call_fn,
-    reason = "factor insertion validation stays centralized in one rewrite pre-pass"
+#[cfg_attr(
+    not(test),
+    expect(
+        clippy::single_call_fn,
+        reason = "factor insertion validation stays centralized in one rewrite pre-pass"
+    )
 )]
 pub(in crate::git_sequence_editor) fn build_factor_insertions(
     cli: &Cli,
@@ -583,7 +586,7 @@ pub(in crate::git_sequence_editor) fn build_factor_insertions(
     }
     match validate_no_duplicates(RequestedActionKind::Edit, cli.factor_target()) {
         Ok(()) => {}
-        Err(err) => return Err(err),
+        Err(error) => return Err(error),
     }
 
     let mut out = BTreeMap::<TodoSha, FactorInsertion>::new();
@@ -651,13 +654,10 @@ pub(in crate::git_sequence_editor) fn rewrite_todo_with_factor(
         let requested_action = requested.get(sha);
         let factor_insertion_for_sha = factor_insertions.get(sha);
 
-        if requested_action.is_none() {
+        let Some(requested_action_for_sha) = requested_action else {
             output.push_str(line);
             output.push('\n');
             append_factor_insertion(&mut output, factor_insertion_for_sha);
-            continue;
-        }
-        let Some(requested_action_for_sha) = requested_action else {
             continue;
         };
 
@@ -1015,9 +1015,65 @@ pick ccccccc third\n\
 
         assert_eq!(err.to_string(), "sha not present in todo: deadbeef");
     }
+
+    #[test]
+    fn build_factor_insertions_rejects_duplicate_factor_targets() {
+        let todo_shas = BTreeSet::from([TodoSha::new("aaaaaaa").or_abort("")]);
+        let cli = Cli::for_tests_with_factor(
+            vec![
+                NonEmptyString::try_from("echo begin 1".to_owned()).or_abort(""),
+                NonEmptyString::try_from("echo begin 2".to_owned()).or_abort(""),
+            ],
+            vec![
+                NonEmptyString::try_from("echo preflight 1".to_owned()).or_abort(""),
+                NonEmptyString::try_from("echo preflight 2".to_owned()).or_abort(""),
+            ],
+            vec![todo_sha("aaaaaaa"), todo_sha("aaaaaaa")],
+            vec![],
+            vec![],
+            Path::new("todo").to_path_buf(),
+            vec![],
+        );
+
+        let err = build_factor_insertions(&cli, &todo_shas).err_or_abort("");
+
+        assert_eq!(err.to_string(), "duplicate edit sha: aaaaaaa");
+    }
+
+    #[test]
+    fn build_factor_insertions_rejects_targets_that_resolve_to_the_same_todo_sha() {
+        let full = head_commit_sha();
+        let short = full.get(..12).or_abort("");
+        let todo_shas = BTreeSet::from([TodoSha::new(short).or_abort("")]);
+        let cli = Cli::for_tests_with_factor(
+            vec![
+                NonEmptyString::try_from("echo begin 1".to_owned()).or_abort(""),
+                NonEmptyString::try_from("echo begin 2".to_owned()).or_abort(""),
+            ],
+            vec![
+                NonEmptyString::try_from("echo preflight 1".to_owned()).or_abort(""),
+                NonEmptyString::try_from("echo preflight 2".to_owned()).or_abort(""),
+            ],
+            vec![todo_sha(full.as_str()), todo_sha(short)],
+            vec![],
+            vec![],
+            Path::new("todo").to_path_buf(),
+            vec![],
+        );
+
+        let err = build_factor_insertions(&cli, &todo_shas).err_or_abort("");
+
+        assert_eq!(
+            err.to_string(),
+            format!("sha specified multiple times: {short}")
+        );
+    }
+
     #[test]
     fn proptest_run_coverage_extra_suite() {
         action_as_str_supports_drop();
+        build_factor_insertions_rejects_duplicate_factor_targets();
+        build_factor_insertions_rejects_targets_that_resolve_to_the_same_todo_sha();
         build_requested_actions_propagates_drop_resolution_error();
         build_requested_actions_propagates_edit_resolution_error();
         build_requested_actions_propagates_pick_resolution_error();

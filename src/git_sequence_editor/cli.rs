@@ -90,7 +90,6 @@ impl Cli {
 
     /// Constructs a `Cli` value with factor-mode fields for unit tests.
     #[cfg(test)]
-    #[expect(dead_code, reason = "factor-mode tests use this helper selectively")]
     pub(in crate::git_sequence_editor) const fn for_tests_with_factor(
         factor_begin: Vec<NonEmptyString>,
         factor_preflight: Vec<NonEmptyString>,

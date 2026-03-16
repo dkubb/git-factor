@@ -394,6 +394,8 @@ mod tests {
 
     use tempfile::TempDir;
 
+    use crate::non_empty_string::NonEmptyString;
+
     use super::todo::{
         Action, TodoSha, is_hex40, parse_todo_action, parse_todo_sha, resolve_requested_sha,
         rewrite_todo, validate_todo_format,
@@ -841,6 +843,117 @@ exec echo hi\n\
         let cli = Cli::for_tests(vec![], vec![], todo_path, vec![]);
         let err = run_for(&cli).err_or_abort("").to_string();
         assert_eq!(err, "unsupported todo action: unknown".to_owned());
+    }
+
+    #[test]
+    fn run_for_cli_rewrites_todo_with_factor_insertions() {
+        let _guard = lock_write_fail_point_test();
+        set_write_fail_point(WriteFailPoint::None);
+        let dir = TempDir::new().or_abort("");
+        let todo_path = dir.path().join("git-rebase-todo");
+        fs::write(
+            &todo_path,
+            "\
+pick abc1234 first\n\
+pick def5678 second\n\
+",
+        )
+        .or_abort("");
+        let cli = Cli::for_tests_with_factor(
+            vec![NonEmptyString::try_from("echo begin".to_owned()).or_abort("")],
+            vec![NonEmptyString::try_from("echo preflight".to_owned()).or_abort("")],
+            vec![TodoSha::new("abc1234").or_abort("")],
+            vec![],
+            vec![],
+            todo_path.clone(),
+            vec![],
+        );
+
+        run_for(&cli).or_abort("");
+
+        let actual = fs::read_to_string(&todo_path).or_abort("");
+        assert_eq!(
+            actual,
+            "\
+pick abc1234 first\n\
+exec echo preflight\n\
+exec echo begin\n\
+break\n\
+pick def5678 second\n\
+"
+        );
+    }
+
+    #[test]
+    fn run_for_cli_returns_error_for_incomplete_factor_args() {
+        let _guard = lock_write_fail_point_test();
+        set_write_fail_point(WriteFailPoint::None);
+        let dir = TempDir::new().or_abort("");
+        let todo_path = dir.path().join("git-rebase-todo");
+        fs::write(&todo_path, "pick abc1234 first\n").or_abort("");
+        let cli = Cli::for_tests_with_factor(
+            vec![NonEmptyString::try_from("echo begin".to_owned()).or_abort("")],
+            vec![],
+            vec![TodoSha::new("abc1234").or_abort("")],
+            vec![],
+            vec![],
+            todo_path,
+            vec![],
+        );
+
+        let err = run_for(&cli).err_or_abort("").to_string();
+        assert_eq!(
+            err,
+            "invalid factor arguments: factor-target, factor-preflight, and factor-begin must all be provided"
+        );
+    }
+
+    #[test]
+    fn run_for_cli_returns_error_for_mismatched_factor_arg_counts() {
+        let _guard = lock_write_fail_point_test();
+        set_write_fail_point(WriteFailPoint::None);
+        let dir = TempDir::new().or_abort("");
+        let todo_path = dir.path().join("git-rebase-todo");
+        fs::write(&todo_path, "pick abc1234 first\n").or_abort("");
+        let cli = Cli::for_tests_with_factor(
+            vec![
+                NonEmptyString::try_from("echo begin 1".to_owned()).or_abort(""),
+                NonEmptyString::try_from("echo begin 2".to_owned()).or_abort(""),
+            ],
+            vec![NonEmptyString::try_from("echo preflight".to_owned()).or_abort("")],
+            vec![TodoSha::new("abc1234").or_abort("")],
+            vec![],
+            vec![],
+            todo_path,
+            vec![],
+        );
+
+        let err = run_for(&cli).err_or_abort("").to_string();
+        assert_eq!(
+            err,
+            "invalid factor arguments: factor-target, factor-preflight, and factor-begin counts must match"
+        );
+    }
+
+    #[test]
+    fn run_for_cli_returns_error_for_factor_target_missing_from_todo() {
+        let _guard = lock_write_fail_point_test();
+        set_write_fail_point(WriteFailPoint::None);
+        let dir = TempDir::new().or_abort("");
+        let todo_path = dir.path().join("git-rebase-todo");
+        fs::write(&todo_path, "pick abc1234 first\n").or_abort("");
+        let cli = Cli::for_tests_with_factor(
+            vec![NonEmptyString::try_from("echo begin".to_owned()).or_abort("")],
+            vec![NonEmptyString::try_from("echo preflight".to_owned()).or_abort("")],
+            vec![TodoSha::new("def5678").or_abort("")],
+            vec![],
+            vec![],
+            todo_path,
+            vec![],
+        );
+
+        let err = run_for(&cli).err_or_abort("").to_string();
+        assert_eq!(err, "sha not present in todo: def5678");
     }
 
     #[test]
