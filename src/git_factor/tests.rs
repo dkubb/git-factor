@@ -8316,58 +8316,6 @@ fn cmd_abort_omits_rebase_hint_when_rebase_is_not_active() {
 }
 
 #[test]
-fn cmd_abort_warns_on_state_removal_failure() {
-    let dir = TempDir::new().or_abort("tempdir");
-    let repo = dir.path();
-    let git_dir = repo.join(".git");
-    let state_dir = git_dir.join("factor");
-    fs::create_dir_all(&state_dir).or_abort("create factor dir");
-
-    let sha = "a".repeat(SHA_LEN);
-    fs::write(state_dir.join("commits"), format!("{sha}\n")).or_abort("write commits");
-    fs::write(state_dir.join("current_index"), "0\n").or_abort("write current index");
-
-    let runner = ScriptedRunner::default()
-        .with_output("git", &["rev-parse", "--git-dir"], repo, ".git\n")
-        .with_status(
-            "git",
-            &["reset", "--hard", "--quiet", &sha],
-            &[],
-            false,
-            repo,
-            0,
-        )
-        .with_status(
-            "git",
-            &["clean", "--force", "--quiet", "-d"],
-            &[],
-            false,
-            repo,
-            0,
-        );
-    let io = TestIo::default();
-    let env = TestEnv {
-        cwd: repo.to_path_buf(),
-    };
-    let ctx = Ctx {
-        runner: &runner,
-        cwd: repo.to_path_buf(),
-        io: &io,
-        env: &env,
-        fs: &FailingRemoveDirAllFs,
-    };
-
-    let code = cmd_abort_in(&ctx).or_abort("abort should succeed despite removal failure");
-    assert_eq!(code, EXIT_OK);
-
-    assert!(
-        io.stderr().contains("failed to remove factor state path"),
-        "stderr should contain removal warning but was: {}",
-        io.stderr()
-    );
-}
-
-#[test]
 fn cmd_continue_errors_when_rebase_is_required_but_not_active() {
     let dir = TempDir::new().or_abort("tempdir");
     let repo = dir.path();
@@ -10959,7 +10907,7 @@ fn cmd_start_rebase_failure_does_not_warn_when_state_was_never_created() {
 }
 
 #[test]
-fn cmd_abort_propagates_io_error_when_warning_write_fails_on_state_removal() {
+fn cmd_abort_errors_when_state_dir_removal_fails() {
     let dir = TempDir::new().or_abort("tempdir");
     let repo = dir.path();
     let git_dir = repo.join(".git");
@@ -10988,7 +10936,7 @@ fn cmd_abort_propagates_io_error_when_warning_write_fails_on_state_removal() {
             repo,
             0,
         );
-    let io = FailingIo;
+    let io = TestIo::default();
     let env = TestEnv {
         cwd: repo.to_path_buf(),
     };
@@ -11000,10 +10948,16 @@ fn cmd_abort_propagates_io_error_when_warning_write_fails_on_state_removal() {
         fs: &FailingRemoveDirAllFs,
     };
 
-    let err = cmd_abort_in(&ctx).err_or_abort("expected io failure");
+    let err = cmd_abort_in(&ctx).err_or_abort("expected cleanup failure");
     assert!(
-        matches!(&err, FactorError::Io(inner) if inner.to_string().contains("io fail")),
+        matches!(&err, FactorError::GitCommand(msg) if msg.contains("failed to remove factor state path")),
         "err was: {err:?}"
+    );
+    assert!(io.stdout().is_empty(), "stdout should be empty");
+    assert!(io.stderr().is_empty(), "stderr should be empty");
+    assert!(
+        state_dir.exists(),
+        "state dir should remain when cleanup fails"
     );
 }
 
@@ -11089,54 +11043,54 @@ fn remove_state_path_removes_stray_file() {
 }
 
 #[test]
-fn session_remove_state_dir_warning_warns_when_state_path_still_exists_after_cleanup() {
+fn cmd_abort_errors_when_cleanup_leaves_state_path_behind() {
     let dir = TempDir::new().or_abort("tempdir");
     let repo = dir.path();
+    let git_dir = repo.join(".git");
+    let state_dir = git_dir.join("factor");
+    fs::create_dir_all(&state_dir).or_abort("create factor dir");
+
+    let sha = "a".repeat(SHA_LEN);
+    fs::write(state_dir.join("commits"), format!("{sha}\n")).or_abort("write commits");
+    fs::write(state_dir.join("current_index"), "0\n").or_abort("write current index");
+
+    let runner = ScriptedRunner::default()
+        .with_output("git", &["rev-parse", "--git-dir"], repo, ".git\n")
+        .with_status(
+            "git",
+            &["reset", "--hard", "--quiet", &sha],
+            &[],
+            false,
+            repo,
+            0,
+        )
+        .with_status(
+            "git",
+            &["clean", "--force", "--quiet", "-d"],
+            &[],
+            false,
+            repo,
+            0,
+        );
     let io = TestIo::default();
     let env = TestEnv {
         cwd: repo.to_path_buf(),
     };
-    let state_dir = StateDir::new(repo.join(".git").join("factor"));
     let ctx = Ctx {
-        runner: &ScriptedRunner::default(),
+        runner: &runner,
         cwd: repo.to_path_buf(),
         io: &io,
         env: &env,
         fs: &StickyStatePathFs,
     };
 
-    session_remove_state_dir_warning(&ctx, &state_dir)
-        .or_abort("warning helper should tolerate persistent path");
-    assert!(io.stdout().is_empty(), "stdout should be empty");
+    let err = cmd_abort_in(&ctx).err_or_abort("expected persistent-state-path failure");
     assert!(
-        io.stderr().contains("still exists after cleanup"),
-        "stderr should mention persistent state path but was: {}",
-        io.stderr()
-    );
-}
-
-#[test]
-fn session_remove_state_dir_warning_propagates_io_error_for_persistent_state_path_warning() {
-    let dir = TempDir::new().or_abort("tempdir");
-    let repo = dir.path();
-    let io = FailingIo;
-    let env = TestEnv {
-        cwd: repo.to_path_buf(),
-    };
-    let state_dir = StateDir::new(repo.join(".git").join("factor"));
-    let ctx = Ctx {
-        runner: &ScriptedRunner::default(),
-        cwd: repo.to_path_buf(),
-        io: &io,
-        env: &env,
-        fs: &StickyStatePathFs,
-    };
-
-    let err = session_remove_state_dir_warning(&ctx, &state_dir).err_or_abort("expected io error");
-    assert!(
-        matches!(&err, FactorError::Io(inner) if inner.to_string().contains("io fail")),
+        matches!(&err, FactorError::GitCommand(msg) if msg.contains("still exists after cleanup")),
         "err was: {err:?}"
     );
+    assert!(io.stdout().is_empty(), "stdout should be empty");
+    assert!(io.stderr().is_empty(), "stderr should be empty");
 }
 
 #[test]
@@ -12387,7 +12341,8 @@ fn proptest_run_unit_suite_part_1() {
     cmd_abort_errors_when_no_active_session();
     cmd_abort_io_failures_cover_output_paths();
     cmd_abort_omits_rebase_hint_when_rebase_is_not_active();
-    cmd_abort_propagates_io_error_when_warning_write_fails_on_state_removal();
+    cmd_abort_errors_when_cleanup_leaves_state_path_behind();
+    cmd_abort_errors_when_state_dir_removal_fails();
     cmd_abort_propagates_rebase_abort_nonzero_exit();
     cmd_abort_propagates_requires_rebase_state_read_error();
     cmd_abort_propagates_start_head_state_read_error();
@@ -12396,7 +12351,6 @@ fn proptest_run_unit_suite_part_1() {
     cmd_abort_runner_failures_cover_internal_question_mark_paths();
     cmd_abort_runs_rebase_abort_when_started_rebase_is_true();
     cmd_abort_uses_start_head_and_skips_rebase_abort_when_rebase_is_not_active();
-    cmd_abort_warns_on_state_removal_failure();
     cmd_continue_advances_to_next_commit_and_prints_next_guidance();
     cmd_continue_completes_when_rebase_finishes_after_tree_converges();
     cmd_continue_converged_path_propagates_advance_split_count_error();

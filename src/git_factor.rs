@@ -981,7 +981,7 @@ fn cmd_abort_in(ctx: &Ctx<'_>) -> Result<i32, FactorError> {
     };
     run_git(ctx, &["reset", "--hard", "--quiet", reset_target.as_str()])?;
     run_git(ctx, &["clean", "--force", "--quiet", "-d"])?;
-    session_remove_state_dir_warning(ctx, &session.state_dir)?;
+    session.remove_state_strict()?;
 
     ctx.outln("FACTOR: Session aborted for current commit step.")?;
     if is_mid_rebase_in(ctx) {
@@ -1086,6 +1086,13 @@ fn write_initial_session_state(
 }
 
 /// Removes the factor state path, supporting either a directory or a stray file.
+#[cfg_attr(
+    not(test),
+    expect(
+        clippy::single_call_fn,
+        reason = "low-level state-path removal stays isolated for direct cleanup tests"
+    )
+)]
 fn remove_state_path(ctx: &Ctx<'_>, state_dir: &StateDir) -> io::Result<()> {
     let path = state_dir.as_path();
     if !ctx.fs.exists(path) {
@@ -1098,10 +1105,6 @@ fn remove_state_path(ctx: &Ctx<'_>, state_dir: &StateDir) -> io::Result<()> {
 }
 
 /// Removes a state path and fails if cleanup does not succeed.
-#[expect(
-    clippy::single_call_fn,
-    reason = "strict completion cleanup stays isolated from warning-only cleanup paths"
-)]
 fn remove_state_path_required(ctx: &Ctx<'_>, state_dir: &StateDir) -> Result<(), FactorError> {
     let path = state_dir.as_path();
     remove_state_path(ctx, state_dir).map_err(|err| {
@@ -1115,31 +1118,6 @@ fn remove_state_path_required(ctx: &Ctx<'_>, state_dir: &StateDir) -> Result<(),
             "factor state path '{}' still exists after cleanup",
             path.display()
         ))));
-    }
-    Ok(())
-}
-
-/// Removes a state path, warning instead of failing on cleanup problems.
-fn session_remove_state_dir_warning(
-    ctx: &Ctx<'_>,
-    state_dir: &StateDir,
-) -> Result<(), FactorError> {
-    let path = state_dir.as_path();
-    match remove_state_path(ctx, state_dir) {
-        Err(err) => {
-            ctx.errln(&format!(
-                "WARN: failed to remove factor state path '{}': {err}",
-                path.display()
-            ))?;
-        }
-        Ok(()) => {
-            if ctx.fs.exists(path) {
-                ctx.errln(&format!(
-                    "WARN: factor state path '{}' still exists after cleanup",
-                    path.display()
-                ))?;
-            }
-        }
     }
     Ok(())
 }
@@ -2064,7 +2042,7 @@ fn run_start_rebase_in(
         if is_mid_rebase_in(ctx) {
             return Ok(StartRebaseOutcome::PausedAtBreak);
         }
-        session_remove_state_dir_warning(ctx, state_dir)?;
+        remove_state_path_required(ctx, state_dir)?;
         return Err(FactorError::GitCommand(non_empty_msg(
             "git rebase finished without pausing at the factor session break".to_owned(),
         )));
@@ -2072,7 +2050,7 @@ fn run_start_rebase_in(
     if is_mid_rebase_in(ctx) {
         return Ok(StartRebaseOutcome::WaitingForRecovery);
     }
-    session_remove_state_dir_warning(ctx, state_dir)?;
+    remove_state_path_required(ctx, state_dir)?;
     Err(FactorError::GitCommand(non_empty_msg(format!(
         "git rebase failed (exit {})",
         status_code(status)
