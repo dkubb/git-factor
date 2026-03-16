@@ -1711,6 +1711,73 @@ mod tests {
     }
 
     #[test]
+    fn parent_parse_runner_covers_expected_and_unexpected_paths() {
+        let parent_parse_runner = ParentParseRunner;
+        let invalid_parent_output = parent_parse_runner
+            .output(
+                "git",
+                &["rev-parse", "--verify", &format!("{SPAN_END_SHA}^")],
+                Path::new("."),
+            )
+            .or_abort("invalid parent output");
+        assert!(invalid_parent_output.status.success());
+        assert_eq!(invalid_parent_output.stdout, b"not-a-commit\n");
+        assert!(invalid_parent_output.stderr.is_empty());
+
+        let parse_start_merge = parent_parse_runner
+            .status(
+                "git",
+                &[
+                    "rev-parse",
+                    "--quiet",
+                    "--verify",
+                    &format!("{SPAN_START_SHA}^2"),
+                ],
+                &[],
+                false,
+                Path::new("."),
+            )
+            .or_abort("parse start merge check");
+        assert!(!parse_start_merge.success());
+
+        let parse_end_merge = parent_parse_runner
+            .status(
+                "git",
+                &[
+                    "rev-parse",
+                    "--quiet",
+                    "--verify",
+                    &format!("{SPAN_END_SHA}^2"),
+                ],
+                &[],
+                false,
+                Path::new("."),
+            )
+            .or_abort("parse end merge check");
+        assert!(!parse_end_merge.success());
+
+        let unexpected_parse_output = parent_parse_runner
+            .output("git", &["status"], Path::new("."))
+            .err_or_abort("unexpected parse output args should fail");
+        assert!(
+            unexpected_parse_output
+                .to_string()
+                .contains("unexpected output args"),
+            "unexpected error: {unexpected_parse_output:?}"
+        );
+
+        let unexpected_parse_status = parent_parse_runner
+            .status("git", &["status"], &[], false, Path::new("."))
+            .err_or_abort("unexpected parse status args should fail");
+        assert!(
+            unexpected_parse_status
+                .to_string()
+                .contains("unexpected status args"),
+            "unexpected error: {unexpected_parse_status:?}"
+        );
+    }
+
+    #[test]
     fn env_and_fs_helpers_cover_delegated_paths() {
         let dir = TempDir::new().or_abort("tempdir");
         let env = TestEnv {
@@ -1939,73 +2006,6 @@ mod tests {
         assert!(
             message.contains("no commits after sorting"),
             "unexpected error: {err:?}"
-        );
-    }
-
-    #[test]
-    fn parent_parse_runner_covers_expected_and_unexpected_paths() {
-        let parent_parse_runner = ParentParseRunner;
-        let invalid_parent_output = parent_parse_runner
-            .output(
-                "git",
-                &["rev-parse", "--verify", &format!("{SPAN_END_SHA}^")],
-                Path::new("."),
-            )
-            .or_abort("invalid parent output");
-        assert!(invalid_parent_output.status.success());
-        assert_eq!(invalid_parent_output.stdout, b"not-a-commit\n");
-        assert!(invalid_parent_output.stderr.is_empty());
-
-        let parse_start_merge = parent_parse_runner
-            .status(
-                "git",
-                &[
-                    "rev-parse",
-                    "--quiet",
-                    "--verify",
-                    &format!("{SPAN_START_SHA}^2"),
-                ],
-                &[],
-                false,
-                Path::new("."),
-            )
-            .or_abort("parse start merge check");
-        assert!(!parse_start_merge.success());
-
-        let parse_end_merge = parent_parse_runner
-            .status(
-                "git",
-                &[
-                    "rev-parse",
-                    "--quiet",
-                    "--verify",
-                    &format!("{SPAN_END_SHA}^2"),
-                ],
-                &[],
-                false,
-                Path::new("."),
-            )
-            .or_abort("parse end merge check");
-        assert!(!parse_end_merge.success());
-
-        let unexpected_parse_output = parent_parse_runner
-            .output("git", &["status"], Path::new("."))
-            .err_or_abort("unexpected parse output args should fail");
-        assert!(
-            unexpected_parse_output
-                .to_string()
-                .contains("unexpected output args"),
-            "unexpected error: {unexpected_parse_output:?}"
-        );
-
-        let unexpected_parse_status = parent_parse_runner
-            .status("git", &["status"], &[], false, Path::new("."))
-            .err_or_abort("unexpected parse status args should fail");
-        assert!(
-            unexpected_parse_status
-                .to_string()
-                .contains("unexpected status args"),
-            "unexpected error: {unexpected_parse_status:?}"
         );
     }
 
