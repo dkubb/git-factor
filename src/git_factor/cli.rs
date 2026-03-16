@@ -22,16 +22,15 @@ struct SessionProgressFlags {
     ///
     /// Staged changes must contain the next atomic split and the exec gate
     /// must pass. After committing, remaining changes are restored as
-    /// unstaged changes from the green baseline commit.
+    /// unstaged changes from the green baseline state.
     #[arg(long = "continue", help_heading = "Session Control")]
     r#continue: bool,
 
-    /// Commit all remaining changes and finish the current commit.
+    /// Commit all remaining changes and finish the current factor session.
     ///
-    /// Cherry-picks the original commit to restore all remaining changes,
-    /// verifies the tree hash matches the recorded green baseline, and
-    /// commits the final split. When no --message is given, reuses the
-    /// original commit message.
+    /// Restores all remaining changes, verifies the tree hash matches the
+    /// recorded green baseline, and commits the final split. When no
+    /// --message is given, reuses the original tip commit message.
     #[arg(long = "finish", help_heading = "Session Control")]
     finish: bool,
 
@@ -44,7 +43,7 @@ struct SessionProgressFlags {
     retry: bool,
 }
 
-/// Split a large git commit into smaller atomic commits.
+/// Split one git commit or contiguous commit span into smaller atomic commits.
 #[derive(Parser)]
 #[command(
     bin_name = "git-factor",
@@ -62,17 +61,21 @@ WORKFLOW:
 
   The start gate must pass on a clean repository state.
   Each split commit must pass the exec gate independently.
+  Ranges refactor one contiguous, merge-free ancestry span into a new series.
   Use --finish without --message to reuse the original commit message.
 
 EXAMPLES:
   Split the latest commit, first proving the full commit is green:
     git factor --exec 'cargo test' HEAD
 
-  Split three commits in a range, pausing before each factor session:
-    git factor --exec 'make check' HEAD~3..HEAD
+  Refactor an inclusive span into a new commit series:
+    git factor --exec 'make check' HEAD~2 HEAD
 
-  Split two specific commits:
-    git factor --exec 'npm test' abc1234 def5678
+  Use git-native exclusive-start range syntax:
+    git factor --exec 'npm test' HEAD~3..HEAD
+
+  Use git-native inclusive-start range syntax:
+    git factor --exec 'npm test' HEAD~3^..HEAD
 
   Continue with a multi-paragraph commit message:
     git factor --continue --message 'feat: add login' --message 'Implements OAuth2 flow.'
@@ -90,19 +93,21 @@ EXAMPLES:
     git factor --status"
 )]
 pub(in crate::git_factor) struct Cli {
-    /// Commit(s) or ranges to split (e.g. SHA, A..B, main..HEAD).
+    /// Commit or span to split (e.g. SHA, A B, A..B, A^..B).
     ///
-    /// Accepts full or short SHAs, branch names, and revision ranges.
-    /// Ranges are expanded via git rev-list in chronological order.
-    /// Multiple refs can be specified and are deduplicated automatically.
+    /// Accepts full or short SHAs, branch names, and git revision syntax.
+    /// `<rev>` splits one commit. `<start> <end>` splits one inclusive span.
+    /// `<start>..<end>` uses git's exclusive-start range semantics, and
+    /// `<start>^..<end>` is the git-native inclusive form. Symmetric diff
+    /// (`...`) is not supported.
     #[arg(value_name = "COMMIT")]
     commits: Vec<NonEmptyString>,
 
     /// Shell command(s) to run as the deterministic validation gate.
     ///
     /// Multiple --exec flags are joined with &&. Git-factor runs the combined
-    /// gate when a target commit becomes active and before each split commit.
-    /// The command must have valid bash syntax and must leave the repository
+    /// gate before the session starts and before each split commit. The
+    /// command must have valid bash syntax and must leave the repository
     /// clean.
     #[arg(long = "exec", value_name = "COMMAND", help_heading = "Start Options")]
     exec: Vec<NonEmptyString>,

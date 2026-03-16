@@ -5,13 +5,13 @@ description: >-
   "factor a commit", "break up a large commit", "split into atomic
   commits", "re-split commits", or mentions "git factor". It provides
   the step-by-step workflow for using the git-factor tool to split
-  a single large commit into smaller, atomic commits with
+  one commit or one contiguous commit span into smaller, atomic commits with
   rebase.
 compatibility: Unified agent skills CLI
-version: 16
+version: 17
 metadata:
   author: dkubb
-  updated: "2026-03-14"
+  updated: "2026-03-16"
 triggers:
   - "split a commit"
   - "factor a commit"
@@ -23,7 +23,7 @@ triggers:
 
 # Splitting Commits with git-factor
 
-Use this skill to split one large commit into small, reviewable,
+Use this skill to split one commit or one contiguous commit span into small, reviewable,
 atomic commits with `git factor`.
 
 Keep steps short. Keep each commit small.
@@ -57,7 +57,8 @@ Keep steps short. Keep each commit small.
 
 | Command | Purpose |
 |---|---|
-| `git factor --exec 'CMD' COMMIT` | Start a factor session |
+| `git factor --exec 'CMD' COMMIT` | Start a one-commit factor session |
+| `git factor --exec 'CMD' START END` | Start an inclusive span factor session |
 | `git factor --continue -m 'msg'` | Commit currently staged atom |
 | `git factor --retry` | Discard current split attempt and restore the pool |
 | `git factor --finish -m 'msg'` | Commit remaining atom with message |
@@ -71,13 +72,13 @@ Fallback only when subcommand wiring is unavailable:
 
 ## Inputs
 
-- Target commit SHA, range, or `HEAD`.
+- Target commit-ish or contiguous commit span.
 - Validation gate command for `--exec`.
 - Planned sequence of atomic commit messages.
 
 ## Outputs
 
-1. A sequence of atomic commits preserving original metadata.
+1. A sequence of atomic commits preserving the gated tip tree.
 2. A clean working state between `--continue` steps, excluding
    explicitly
    allowed gate artifacts.
@@ -90,6 +91,18 @@ Fallback only when subcommand wiring is unavailable:
 
 - Identify atomic units and dependencies before running `git factor`.
 - Choose commit order with dependencies before dependents.
+- Decide whether you are preserving or replacing seams.
+  - A single commit input preserves that seam and splits just that commit.
+  - A range input replaces the old seams and refactors the whole span into a
+    new commit story.
+- Range semantics:
+  - Documented forms are `<rev>` and `<start> <end>`.
+  - Git-native dotted ranges are also accepted.
+    - `<start>..<end>` uses git's exclusive-start range semantics.
+    - `<start>^..<end>` is the git-native inclusive form.
+  - Symmetric diff (`...`) is intentionally unsupported.
+  - The selected commits must resolve to one contiguous ancestry span and
+    must not include merge commits.
 - Start coarse, then refine.
   - First peel off the largest unit on the dependency frontier.
   - Prefer a whole file or module before method-level slicing when both are
@@ -111,9 +124,11 @@ git factor --exec 'VALIDATION_CMD' HEAD
 ```
 
 - Multiple `--exec` flags are joined with `&&`.
-- The combined gate runs when a target commit becomes active and before each
-  split commit.
+- The combined gate runs before the session starts and before each split
+  commit.
 - The start gate establishes a green baseline commit for the session.
+- For range inputs, the baseline is the gated tip state of the selected span.
+  Old seams inside the span are discarded.
 - The start gate must begin on a fully clean repository state and must leave
   the repository fully clean.
 - Gate commands should be read-only relative to the repo.
@@ -142,13 +157,14 @@ If the start gate fails for a single-commit `HEAD` session:
 - amend the commit
 - rerun `git factor --exec 'VALIDATION_CMD' HEAD`
 
-If the start gate fails for a range or multi-commit session:
+If the start gate fails for a range session:
 
-- fix the current commit
+- fix the current tip commit
 - stage the intended changes
 - amend the commit
 - run `git rebase --continue`
-- when rebase pauses again at the factor break, run `git factor --continue`
+- when rebase pauses again at the factor break, stage the first atom and run
+  `git factor --continue`
 
 ### 3) Stage one atom and continue
 
@@ -195,6 +211,8 @@ git factor --finish
 
 - `--finish` restores the remaining pool, verifies the tree hash matches the
   recorded green baseline, and commits the final split.
+- For range sessions, a successful finish preserves the gated tip tree, not
+  the original internal seams.
 - When no `--message` is given, the original commit message is reused.
 - Successful completion should remove `.git/factor`.
 
@@ -238,8 +256,9 @@ staging plan:
 If `git factor --exec ...` fails before the split session opens:
 
 - for single-commit sessions, fix, stage, amend, and rerun `git factor`
-- for range sessions, fix, stage, amend, run `git rebase --continue`, then
-  rerun `git factor --continue` when rebase pauses again
+- for range sessions, fix the tip commit, stage, amend, run
+  `git rebase --continue`, then stage the first atom and run
+  `git factor --continue` when rebase pauses again
 
 If `git factor` reports the repository is not clean before a start gate:
 
