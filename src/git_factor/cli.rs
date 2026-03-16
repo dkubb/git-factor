@@ -56,8 +56,9 @@ WORKFLOW:
   3. When paused at the factor break: git factor --continue
   4. Stage changes:      git add --patch -- <path>
   5. Commit a slice:     git factor --continue --message 'type: description'
-  6. Repeat steps 4-5 for each atomic commit.
-  7. Finish remaining:   git factor --finish
+  6. Discard bad staging: git factor --retry
+  7. Repeat steps 4-6 for each atomic commit.
+  8. Finish remaining:   git factor --finish
 
   The start gate must pass on a clean repository state.
   Each split commit must pass the exec gate independently.
@@ -75,6 +76,9 @@ EXAMPLES:
 
   Continue with a multi-paragraph commit message:
     git factor --continue --message 'feat: add login' --message 'Implements OAuth2 flow.'
+
+  Discard the current split attempt and restore the remaining pool:
+    git factor --retry
 
   Finish with the original commit message:
     git factor --finish
