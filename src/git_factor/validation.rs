@@ -164,6 +164,47 @@ pub(in crate::git_factor) fn resolve_commit_refs(
     Commits::try_from(set)
 }
 
+/// Resolves CLI commit arguments into one oldest-first ancestry span.
+///
+/// Supported forms are:
+/// - `<rev>`
+/// - `<start>..<end>` (exclusive start)
+/// - `<start>^..<end>` (inclusive start using git-native syntax)
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "span resolution lands before the full session engine is rewired to use it"
+    )
+)]
+pub(in crate::git_factor) fn resolve_commit_span(
+    ctx: &Ctx<'_>,
+    refs: &NonEmpty<NonEmptyString>,
+) -> Result<NonEmpty<CommitSha>, FactorError> {
+    let commits = match refs.len() {
+        1 => {
+            let ref_str = refs.first().as_str();
+            if ref_str.contains("...") {
+                return Err(FactorError::InvalidCommit(format!(
+                    "{ref_str} (symmetric diff '...' is not supported, use '..')"
+                )));
+            }
+            if ref_str.contains("..") {
+                resolve_span_from_range_expr(ctx, ref_str)?
+            } else {
+                NonEmpty::singleton(resolve_commit(ctx, ref_str)?)
+            }
+        }
+        _ => {
+            return Err(FactorError::InvalidCommit(
+                "commit arguments must resolve to a single contiguous span".to_owned(),
+            ));
+        }
+    };
+
+    Ok(commits)
+}
+
 /// Sorts commits topologically (parent before child) to match rebase stop order.
 ///
 /// Uses a single `git rev-list --topo-order --reverse` call with all target
@@ -198,6 +239,48 @@ pub(in crate::git_factor) fn sort_topologically(
     };
 
     Ok(sorted_commits)
+}
+
+#[expect(
+    clippy::single_call_fn,
+    reason = "range-expression expansion stays isolated for testing and future reuse"
+)]
+/// Resolves one dotted revision range into an oldest-first ancestry span.
+fn resolve_span_from_range_expr(
+    ctx: &Ctx<'_>,
+    range_expr: &str,
+) -> Result<NonEmpty<CommitSha>, FactorError> {
+    let output = match git_output(
+        ctx,
+        &["rev-list", "--reverse", "--ancestry-path", range_expr],
+    ) {
+        Ok(output) => output,
+        Err(_err) => return Err(FactorError::InvalidCommit(range_expr.to_owned())),
+    };
+
+    parse_non_empty_commit_lines(&output, range_expr)
+}
+
+#[expect(
+    clippy::single_call_fn,
+    reason = "line parsing stays extracted for dotted range helper coverage"
+)]
+/// Parses one non-empty newline-separated list of commit SHAs.
+fn parse_non_empty_commit_lines(
+    output: &str,
+    input: &str,
+) -> Result<NonEmpty<CommitSha>, FactorError> {
+    let mut commits = output
+        .lines()
+        .filter_map(|line| CommitSha::new(line.to_owned()).ok());
+    let Some(head) = commits.next() else {
+        return Err(FactorError::InvalidCommit(input.to_owned()));
+    };
+
+    Ok(NonEmpty {
+        head,
+        tail: commits.collect(),
+    })
 }
 
 /// Validates that a commit is an ancestor of HEAD.
@@ -615,6 +698,56 @@ mod tests {
         assert!(commit.success(), "git commit --allow-empty failed");
     }
 
+    fn head_sha(path: &Path) -> String {
+        let output = Command::new("git")
+            .args(["rev-parse", "--verify", "HEAD"])
+            .current_dir(path)
+            .output()
+            .or_abort("read HEAD");
+        assert!(output.status.success(), "git rev-parse HEAD failed");
+        String::from_utf8(output.stdout)
+            .or_abort("decode HEAD")
+            .trim()
+            .to_owned()
+    }
+
+    fn commit_file(path: &Path, file: &str, content: &str, message: &str) -> String {
+        fs::write(path.join(file), content).or_abort("write file");
+        let add = Command::new("git")
+            .args(["add", file])
+            .current_dir(path)
+            .status()
+            .or_abort("run git add");
+        assert!(add.success(), "git add failed");
+
+        let commit = Command::new("git")
+            .args([
+                "-c",
+                "commit.template=",
+                "-c",
+                "core.hooksPath=.git/hooks",
+                "commit",
+                "--no-verify",
+                "--quiet",
+                "-m",
+                message,
+            ])
+            .current_dir(path)
+            .status()
+            .or_abort("run git commit");
+        assert!(commit.success(), "git commit failed");
+
+        head_sha(path)
+    }
+
+    fn init_linear_repo(path: &Path) -> [String; 3] {
+        init_git_repo(path);
+        let first = head_sha(path);
+        let second = commit_file(path, "two.txt", "two\n", "second");
+        let third = commit_file(path, "three.txt", "three\n", "third");
+        [first, second, third]
+    }
+
     #[test]
     fn resolve_commit_refs_rejects_symmetric_diff_ranges() {
         let dir = TempDir::new().or_abort("tempdir");
@@ -681,6 +814,136 @@ mod tests {
             resolve_commit_refs(&ctx, &refs).err_or_abort("unknown range ref must be rejected");
         let message = invalid_commit_message(&err).or_abort("expected InvalidCommit");
         assert_eq!(message, "deadbeef..HEAD");
+    }
+
+    #[test]
+    fn resolve_commit_span_accepts_known_single_ref() {
+        let dir = TempDir::new().or_abort("tempdir");
+        init_git_repo(dir.path());
+        let ctx = ctx_for(dir.path());
+        let refs = NonEmpty::singleton(NonEmptyString::try_from("HEAD".to_owned()).or_abort("ref"));
+
+        let commits = resolve_commit_span(&ctx, &refs).or_abort("HEAD span should resolve");
+
+        assert_eq!(commits.len(), 1);
+        assert_eq!(
+            commits.first(),
+            &resolve_head_commit(&ctx).or_abort("resolve HEAD")
+        );
+    }
+
+    #[test]
+    fn resolve_commit_span_accepts_exclusive_dotted_range() {
+        let dir = TempDir::new().or_abort("tempdir");
+        let [first, second, third] = init_linear_repo(dir.path());
+        let ctx = ctx_for(dir.path());
+        let refs = NonEmpty::singleton(
+            NonEmptyString::try_from(format!("{first}..{third}")).or_abort("range"),
+        );
+
+        let commits = resolve_commit_span(&ctx, &refs).or_abort("exclusive span should resolve");
+        let actual: Vec<&str> = commits.iter().map(CommitSha::as_str).collect();
+
+        assert_eq!(actual, vec![second.as_str(), third.as_str()]);
+    }
+
+    #[test]
+    fn resolve_commit_span_accepts_inclusive_git_native_range() {
+        let dir = TempDir::new().or_abort("tempdir");
+        let [_first, second, third] = init_linear_repo(dir.path());
+        let ctx = ctx_for(dir.path());
+        let refs = NonEmpty::singleton(
+            NonEmptyString::try_from(format!("{second}^..{third}")).or_abort("range"),
+        );
+
+        let commits = resolve_commit_span(&ctx, &refs).or_abort("inclusive git range");
+        let actual: Vec<&str> = commits.iter().map(CommitSha::as_str).collect();
+
+        assert_eq!(actual, vec![second.as_str(), third.as_str()]);
+    }
+
+    #[test]
+    fn resolve_commit_span_rejects_unknown_dotted_range_ref() {
+        let dir = TempDir::new().or_abort("tempdir");
+        init_git_repo(dir.path());
+        let ctx = ctx_for(dir.path());
+        let refs = NonEmpty::singleton(
+            NonEmptyString::try_from("deadbeef..HEAD".to_owned()).or_abort("range"),
+        );
+
+        let err = resolve_commit_span(&ctx, &refs).err_or_abort("unknown dotted ref should reject");
+        let message = invalid_commit_message(&err).or_abort("expected InvalidCommit");
+        assert_eq!(message, "deadbeef..HEAD");
+    }
+
+    #[test]
+    fn resolve_commit_span_rejects_two_ref_form() {
+        let dir = TempDir::new().or_abort("tempdir");
+        let [first, _second, third] = init_linear_repo(dir.path());
+        let ctx = ctx_for(dir.path());
+        let refs = NonEmpty {
+            head: NonEmptyString::try_from(first).or_abort("first"),
+            tail: vec![NonEmptyString::try_from(third).or_abort("third")],
+        };
+
+        let err = resolve_commit_span(&ctx, &refs).err_or_abort("two refs should reject");
+        let message = invalid_commit_message(&err).or_abort("expected InvalidCommit");
+        assert_eq!(
+            message,
+            "commit arguments must resolve to a single contiguous span"
+        );
+    }
+
+    #[test]
+    fn resolve_commit_span_rejects_more_than_two_commit_args() {
+        let dir = TempDir::new().or_abort("tempdir");
+        let [first, second, third] = init_linear_repo(dir.path());
+        let ctx = ctx_for(dir.path());
+        let refs = NonEmpty {
+            head: NonEmptyString::try_from(first).or_abort("first"),
+            tail: vec![
+                NonEmptyString::try_from(second).or_abort("second"),
+                NonEmptyString::try_from(third).or_abort("third"),
+            ],
+        };
+
+        let err = resolve_commit_span(&ctx, &refs).err_or_abort("too many args should be rejected");
+        let message = invalid_commit_message(&err).or_abort("expected InvalidCommit");
+        assert_eq!(
+            message,
+            "commit arguments must resolve to a single contiguous span"
+        );
+    }
+
+    #[test]
+    fn resolve_commit_span_rejects_symmetric_diff_range() {
+        let dir = TempDir::new().or_abort("tempdir");
+        let [first, _second, third] = init_linear_repo(dir.path());
+        let ctx = ctx_for(dir.path());
+        let refs = NonEmpty::singleton(
+            NonEmptyString::try_from(format!("{first}...{third}")).or_abort("range"),
+        );
+
+        let err = resolve_commit_span(&ctx, &refs).err_or_abort("symmetric diff should reject");
+        let message = invalid_commit_message(&err).or_abort("expected InvalidCommit");
+        assert!(
+            message.contains("symmetric diff"),
+            "unexpected message: {message}"
+        );
+    }
+
+    #[test]
+    fn resolve_commit_span_rejects_empty_dotted_range() {
+        let dir = TempDir::new().or_abort("tempdir");
+        let [_first, _second, third] = init_linear_repo(dir.path());
+        let ctx = ctx_for(dir.path());
+        let refs = NonEmpty::singleton(
+            NonEmptyString::try_from(format!("{third}..{third}")).or_abort("range"),
+        );
+
+        let err = resolve_commit_span(&ctx, &refs).err_or_abort("empty dotted range should fail");
+        let message = invalid_commit_message(&err).or_abort("expected InvalidCommit");
+        assert_eq!(message, format!("{third}..{third}"));
     }
 
     #[test]
