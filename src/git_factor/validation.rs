@@ -773,6 +773,48 @@ mod tests {
         }
     }
 
+    struct ParentLookupRunner;
+
+    impl Runner for ParentLookupRunner {
+        fn output(&self, _bin: &str, args: &[&str], _cwd: &Path) -> io::Result<Output> {
+            let end_parent_ref = format!("{SPAN_END_SHA}^");
+            if args == ["rev-parse", "--verify", end_parent_ref.as_str()] {
+                Ok(Output {
+                    status: ExitStatus::from_raw(256),
+                    stdout: Vec::new(),
+                    stderr: b"forced parent lookup failure\n".to_vec(),
+                })
+            } else {
+                Err(io::Error::other(format!(
+                    "unexpected output args: {}",
+                    args.join(" ")
+                )))
+            }
+        }
+
+        fn status(
+            &self,
+            _bin: &str,
+            args: &[&str],
+            _envs: &[(&str, &str)],
+            _quiet: bool,
+            _cwd: &Path,
+        ) -> io::Result<ExitStatus> {
+            let start_merge_ref = format!("{SPAN_START_SHA}^2");
+            let end_merge_ref = format!("{SPAN_END_SHA}^2");
+            if args == ["rev-parse", "--quiet", "--verify", start_merge_ref.as_str()]
+                || args == ["rev-parse", "--quiet", "--verify", end_merge_ref.as_str()]
+            {
+                Ok(ExitStatus::from_raw(256))
+            } else {
+                Err(io::Error::other(format!(
+                    "unexpected status args: {}",
+                    args.join(" ")
+                )))
+            }
+        }
+    }
+
     fn ctx_for(path: &Path) -> Ctx<'static> {
         Ctx {
             runner: &REAL_RUNNER,
@@ -1256,6 +1298,36 @@ mod tests {
     }
 
     #[test]
+    fn validate_contiguous_span_rejects_missing_parent_lookup() {
+        let dir = TempDir::new().or_abort("tempdir");
+        let runner = ParentLookupRunner;
+        let env = TestEnv {
+            cwd: dir.path().to_path_buf(),
+        };
+        let ctx = Ctx {
+            runner: &runner,
+            cwd: dir.path().to_path_buf(),
+            io: &REAL_IO,
+            env: &env,
+            fs: &REAL_FS,
+        };
+        let commits = NonEmpty {
+            head: CommitSha::new(SPAN_START_SHA.to_owned()).or_abort("start"),
+            tail: vec![CommitSha::new(SPAN_END_SHA.to_owned()).or_abort("end")],
+        };
+
+        let err =
+            validate_contiguous_span(&ctx, &commits).err_or_abort("parent lookup should fail");
+
+        assert_eq!(
+            invalid_commit_message(&err).or_abort("expected InvalidCommit"),
+            format!(
+                "{SPAN_START_SHA} {SPAN_END_SHA} (selected commits must form a contiguous ancestry span)"
+            )
+        );
+    }
+
+    #[test]
     fn validate_not_merge_rejects_merge_commit() {
         let dir = TempDir::new().or_abort("tempdir");
         init_git_repo(dir.path());
@@ -1731,6 +1803,76 @@ mod tests {
                 .to_string()
                 .contains("unexpected status args"),
             "unexpected error: {unexpected_range_status:?}"
+        );
+    }
+
+    #[test]
+    fn parent_lookup_runner_covers_expected_and_unexpected_paths() {
+        let parent_lookup_runner = ParentLookupRunner;
+        let missing_parent_output = parent_lookup_runner
+            .output(
+                "git",
+                &["rev-parse", "--verify", &format!("{SPAN_END_SHA}^")],
+                Path::new("."),
+            )
+            .or_abort("missing parent output");
+        assert!(!missing_parent_output.status.success());
+        assert!(missing_parent_output.stdout.is_empty());
+        assert_eq!(
+            missing_parent_output.stderr,
+            b"forced parent lookup failure\n"
+        );
+
+        let lookup_start_merge = parent_lookup_runner
+            .status(
+                "git",
+                &[
+                    "rev-parse",
+                    "--quiet",
+                    "--verify",
+                    &format!("{SPAN_START_SHA}^2"),
+                ],
+                &[],
+                false,
+                Path::new("."),
+            )
+            .or_abort("lookup start merge check");
+        assert!(!lookup_start_merge.success());
+
+        let lookup_end_merge = parent_lookup_runner
+            .status(
+                "git",
+                &[
+                    "rev-parse",
+                    "--quiet",
+                    "--verify",
+                    &format!("{SPAN_END_SHA}^2"),
+                ],
+                &[],
+                false,
+                Path::new("."),
+            )
+            .or_abort("lookup end merge check");
+        assert!(!lookup_end_merge.success());
+
+        let unexpected_lookup_output = parent_lookup_runner
+            .output("git", &["status"], Path::new("."))
+            .err_or_abort("unexpected lookup output args should fail");
+        assert!(
+            unexpected_lookup_output
+                .to_string()
+                .contains("unexpected output args"),
+            "unexpected error: {unexpected_lookup_output:?}"
+        );
+
+        let unexpected_lookup_status = parent_lookup_runner
+            .status("git", &["status"], &[], false, Path::new("."))
+            .err_or_abort("unexpected lookup status args should fail");
+        assert!(
+            unexpected_lookup_status
+                .to_string()
+                .contains("unexpected status args"),
+            "unexpected error: {unexpected_lookup_status:?}"
         );
     }
 
