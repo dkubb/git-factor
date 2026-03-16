@@ -501,6 +501,9 @@ mod tests {
     use std::process::Output;
     use tempfile::TempDir;
 
+    const SPAN_START_SHA: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const SPAN_END_SHA: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
     struct TestEnv {
         cwd: PathBuf,
     }
@@ -700,6 +703,73 @@ mod tests {
             }
 
             Ok(ExitStatus::from_raw(0))
+        }
+    }
+
+    struct RangeLookupRunner;
+
+    impl Runner for RangeLookupRunner {
+        fn output(&self, _bin: &str, args: &[&str], _cwd: &Path) -> io::Result<Output> {
+            let expected_range = format!("{SPAN_START_SHA}..{SPAN_END_SHA}");
+            let (status, stdout, stderr) = if args == ["rev-parse", "--verify", "start"] {
+                (
+                    ExitStatus::from_raw(0),
+                    format!("{SPAN_START_SHA}\n").into_bytes(),
+                    Vec::new(),
+                )
+            } else if args == ["rev-parse", "--verify", "end"] {
+                (
+                    ExitStatus::from_raw(0),
+                    format!("{SPAN_END_SHA}\n").into_bytes(),
+                    Vec::new(),
+                )
+            } else if args
+                == [
+                    "rev-list",
+                    "--reverse",
+                    "--ancestry-path",
+                    expected_range.as_str(),
+                ]
+            {
+                (
+                    ExitStatus::from_raw(256),
+                    Vec::new(),
+                    b"forced range lookup failure\n".to_vec(),
+                )
+            } else {
+                return Err(io::Error::other(format!(
+                    "unexpected output args: {}",
+                    args.join(" ")
+                )));
+            };
+
+            Ok(Output {
+                status,
+                stdout,
+                stderr,
+            })
+        }
+
+        fn status(
+            &self,
+            _bin: &str,
+            args: &[&str],
+            _envs: &[(&str, &str)],
+            _quiet: bool,
+            _cwd: &Path,
+        ) -> io::Result<ExitStatus> {
+            let start_merge_ref = format!("{SPAN_START_SHA}^2");
+            let end_merge_ref = format!("{SPAN_END_SHA}^2");
+            if args == ["rev-parse", "--quiet", "--verify", start_merge_ref.as_str()]
+                || args == ["rev-parse", "--quiet", "--verify", end_merge_ref.as_str()]
+            {
+                Ok(ExitStatus::from_raw(256))
+            } else {
+                Err(io::Error::other(format!(
+                    "unexpected status args: {}",
+                    args.join(" ")
+                )))
+            }
         }
     }
 
@@ -1140,6 +1210,33 @@ mod tests {
     }
 
     #[test]
+    fn resolve_commit_span_rejects_two_ref_span_when_rev_list_lookup_fails() {
+        let dir = TempDir::new().or_abort("tempdir");
+        let runner = RangeLookupRunner;
+        let env = TestEnv {
+            cwd: dir.path().to_path_buf(),
+        };
+        let ctx = Ctx {
+            runner: &runner,
+            cwd: dir.path().to_path_buf(),
+            io: &REAL_IO,
+            env: &env,
+            fs: &REAL_FS,
+        };
+        let refs = NonEmpty {
+            head: NonEmptyString::try_from("start".to_owned()).or_abort("start"),
+            tail: vec![NonEmptyString::try_from("end".to_owned()).or_abort("end")],
+        };
+
+        let err = resolve_commit_span(&ctx, &refs).err_or_abort("range lookup should fail");
+
+        assert_eq!(
+            invalid_commit_message(&err).or_abort("expected InvalidCommit"),
+            "start end (range must resolve to a contiguous ancestry span)"
+        );
+    }
+
+    #[test]
     fn validate_contiguous_span_rejects_skipped_parent() {
         let dir = TempDir::new().or_abort("tempdir");
         let [first, _second, third] = init_linear_repo(dir.path());
@@ -1545,6 +1642,95 @@ mod tests {
         assert!(
             message.contains("no commits after sorting"),
             "unexpected error: {err:?}"
+        );
+    }
+
+    #[test]
+    fn range_lookup_runner_covers_expected_and_unexpected_paths() {
+        let range_runner = RangeLookupRunner;
+        let start_output = range_runner
+            .output("git", &["rev-parse", "--verify", "start"], Path::new("."))
+            .or_abort("resolve start ref");
+        assert!(start_output.status.success());
+        assert_eq!(
+            start_output.stdout,
+            format!("{SPAN_START_SHA}\n").into_bytes()
+        );
+        assert!(start_output.stderr.is_empty());
+
+        let end_output = range_runner
+            .output("git", &["rev-parse", "--verify", "end"], Path::new("."))
+            .or_abort("resolve end ref");
+        assert!(end_output.status.success());
+        assert_eq!(end_output.stdout, format!("{SPAN_END_SHA}\n").into_bytes());
+        assert!(end_output.stderr.is_empty());
+
+        let range_output = range_runner
+            .output(
+                "git",
+                &[
+                    "rev-list",
+                    "--reverse",
+                    "--ancestry-path",
+                    &format!("{SPAN_START_SHA}..{SPAN_END_SHA}"),
+                ],
+                Path::new("."),
+            )
+            .or_abort("range lookup output");
+        assert!(!range_output.status.success());
+        assert!(range_output.stdout.is_empty());
+        assert_eq!(range_output.stderr, b"forced range lookup failure\n");
+
+        let start_merge = range_runner
+            .status(
+                "git",
+                &[
+                    "rev-parse",
+                    "--quiet",
+                    "--verify",
+                    &format!("{SPAN_START_SHA}^2"),
+                ],
+                &[],
+                false,
+                Path::new("."),
+            )
+            .or_abort("start merge check");
+        assert!(!start_merge.success());
+
+        let end_merge = range_runner
+            .status(
+                "git",
+                &[
+                    "rev-parse",
+                    "--quiet",
+                    "--verify",
+                    &format!("{SPAN_END_SHA}^2"),
+                ],
+                &[],
+                false,
+                Path::new("."),
+            )
+            .or_abort("end merge check");
+        assert!(!end_merge.success());
+
+        let unexpected_range_output = range_runner
+            .output("git", &["status"], Path::new("."))
+            .err_or_abort("unexpected range output args should fail");
+        assert!(
+            unexpected_range_output
+                .to_string()
+                .contains("unexpected output args"),
+            "unexpected error: {unexpected_range_output:?}"
+        );
+
+        let unexpected_range_status = range_runner
+            .status("git", &["status"], &[], false, Path::new("."))
+            .err_or_abort("unexpected range status args should fail");
+        assert!(
+            unexpected_range_status
+                .to_string()
+                .contains("unexpected status args"),
+            "unexpected error: {unexpected_range_status:?}"
         );
     }
 
