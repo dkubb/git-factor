@@ -4810,6 +4810,139 @@ fn run_with_args_invalid_flag_writes_to_stderr_and_returns_usage() {
 }
 
 #[test]
+fn write_error_log_includes_trace_path_and_error_sources() {
+    #[derive(Debug)]
+    struct InnerCause;
+
+    impl fmt::Display for InnerCause {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.write_str("root cause")
+        }
+    }
+
+    #[expect(
+        clippy::missing_trait_methods,
+        reason = "test helper only needs a leaf error source"
+    )]
+    impl Error for InnerCause {}
+
+    #[derive(Debug)]
+    struct OuterCause(InnerCause);
+
+    impl fmt::Display for OuterCause {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.write_str("outer cause")
+        }
+    }
+
+    #[expect(
+        clippy::missing_trait_methods,
+        reason = "test helper only needs to expose a single nested source"
+    )]
+    impl Error for OuterCause {
+        fn source(&self) -> Option<&(dyn Error + 'static)> {
+            Some(&self.0)
+        }
+    }
+
+    let dir = TempDir::new().or_abort("tempdir");
+    let repo = dir.path();
+    let git_dir = repo.join(".git");
+    let state_dir = git_dir.join("factor");
+    fs::create_dir_all(&state_dir).or_abort("create factor dir");
+
+    let sha = "a".repeat(SHA_LEN);
+    let tree = "b".repeat(SHA_LEN);
+    fs::write(state_dir.join("commits"), format!("{sha}\n")).or_abort("write commits");
+    fs::write(state_dir.join("current_index"), "0\n").or_abort("write current index");
+    fs::write(state_dir.join("split_count"), "2\n").or_abort("write split_count");
+    fs::write(state_dir.join("requires_rebase"), "true\n").or_abort("write requires_rebase");
+    fs::write(state_dir.join("expected_tree"), format!("{tree}\n")).or_abort("write expected tree");
+
+    let trace_log = repo.join("tmp").join("factor-trace.jsonl");
+    let runner = with_git_dir_outputs(ScriptedRunner::default(), repo, 1)
+        .with_output(
+            "git",
+            &["rev-parse", "--verify", "HEAD"],
+            repo,
+            &format!("{sha}\n"),
+        )
+        .with_output(
+            "git",
+            &["rev-parse", "--verify", HEAD_TREEISH],
+            repo,
+            &format!("{tree}\n"),
+        )
+        .with_output(
+            "git",
+            &["rev-parse", "--show-toplevel"],
+            repo,
+            &format!("{}\n", repo.display()),
+        )
+        .with_output(
+            "git",
+            &["status", "--porcelain=v1", "--untracked-files=all"],
+            repo,
+            "M  staged.txt\n M unstaged.txt\n?? new.txt\n",
+        );
+    let io = TestIo::default();
+    let env = TraceLogEnv {
+        cwd: repo.to_path_buf(),
+        trace_log: trace_log.clone(),
+    };
+    let ctx = Ctx {
+        runner: &runner,
+        cwd: repo.to_path_buf(),
+        io: &io,
+        env: &env,
+        fs: &REAL_FS,
+    };
+    let args = [OsString::from("git-factor"), OsString::from("--abort")];
+    let error = FactorError::StateWrite(io::Error::other(OuterCause(InnerCause)));
+
+    write_error_log(&ctx, &args, &error).or_abort("write error log should succeed");
+
+    let error_log =
+        fs::read_to_string(state_dir.join(ERROR_LOG_FILE)).or_abort("error log should exist");
+    assert!(error_log.contains(format!("trace_log={}", trace_log.display()).as_str()));
+    assert!(error_log.contains("source_0=outer cause"));
+    assert!(error_log.contains("source_1=root cause"));
+    assert!(error_log.contains("factor_split_count=2"));
+    assert!(error_log.contains("factor_requires_rebase=true"));
+    assert!(error_log.contains("staged_paths=staged.txt"));
+    assert!(error_log.contains("unstaged_paths=unstaged.txt"));
+    assert!(error_log.contains("untracked_paths=new.txt"));
+}
+
+#[test]
+fn write_error_log_returns_git_dir_error_when_factor_dir_lookup_fails() {
+    let dir = TempDir::new().or_abort("tempdir");
+    let repo = dir.path();
+    let io = TestIo::default();
+    let runner = ScriptedRunner::default().with_output_status(
+        "git",
+        &["rev-parse", "--git-dir"],
+        repo,
+        128,
+        "",
+        "fatal: not a git repository\n",
+    );
+    let ctx = Ctx {
+        runner: &runner,
+        cwd: repo.to_path_buf(),
+        io: &io,
+        env: &REAL_ENV,
+        fs: &REAL_FS,
+    };
+    let args = [OsString::from("git-factor"), OsString::from("--finish")];
+    let error = FactorError::StateWrite(io::Error::other("lookup failure"));
+
+    let err = write_error_log(&ctx, &args, &error).err_or_abort("git-dir lookup should fail first");
+
+    assert!(matches!(&err, FactorError::NotGitRepo), "err was: {err:?}");
+}
+
+#[test]
 fn run_with_args_rejects_abort_when_combined_with_status() {
     let dir = TempDir::new().or_abort("tempdir");
     let io = TestIo::default();
@@ -5093,111 +5226,6 @@ fn run_with_args_rejects_status_when_combined_with_commit() {
 }
 
 #[test]
-fn write_error_log_includes_trace_path_and_error_sources() {
-    #[derive(Debug)]
-    struct InnerCause;
-
-    impl fmt::Display for InnerCause {
-        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-            f.write_str("root cause")
-        }
-    }
-
-    #[expect(
-        clippy::missing_trait_methods,
-        reason = "test helper only needs a leaf error source"
-    )]
-    impl Error for InnerCause {}
-
-    #[derive(Debug)]
-    struct OuterCause(InnerCause);
-
-    impl fmt::Display for OuterCause {
-        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-            f.write_str("outer cause")
-        }
-    }
-
-    #[expect(
-        clippy::missing_trait_methods,
-        reason = "test helper only needs to expose a single nested source"
-    )]
-    impl Error for OuterCause {
-        fn source(&self) -> Option<&(dyn Error + 'static)> {
-            Some(&self.0)
-        }
-    }
-
-    let dir = TempDir::new().or_abort("tempdir");
-    let repo = dir.path();
-    let git_dir = repo.join(".git");
-    let state_dir = git_dir.join("factor");
-    fs::create_dir_all(&state_dir).or_abort("create factor dir");
-
-    let sha = "a".repeat(SHA_LEN);
-    let tree = "b".repeat(SHA_LEN);
-    fs::write(state_dir.join("commits"), format!("{sha}\n")).or_abort("write commits");
-    fs::write(state_dir.join("current_index"), "0\n").or_abort("write current index");
-    fs::write(state_dir.join("split_count"), "2\n").or_abort("write split_count");
-    fs::write(state_dir.join("requires_rebase"), "true\n").or_abort("write requires_rebase");
-    fs::write(state_dir.join("expected_tree"), format!("{tree}\n")).or_abort("write expected tree");
-
-    let trace_log = repo.join("tmp").join("factor-trace.jsonl");
-    let runner = with_git_dir_outputs(ScriptedRunner::default(), repo, 1)
-        .with_output(
-            "git",
-            &["rev-parse", "--verify", "HEAD"],
-            repo,
-            &format!("{sha}\n"),
-        )
-        .with_output(
-            "git",
-            &["rev-parse", "--verify", HEAD_TREEISH],
-            repo,
-            &format!("{tree}\n"),
-        )
-        .with_output(
-            "git",
-            &["rev-parse", "--show-toplevel"],
-            repo,
-            &format!("{}\n", repo.display()),
-        )
-        .with_output(
-            "git",
-            &["status", "--porcelain=v1", "--untracked-files=all"],
-            repo,
-            "M  staged.txt\n M unstaged.txt\n?? new.txt\n",
-        );
-    let io = TestIo::default();
-    let env = TraceLogEnv {
-        cwd: repo.to_path_buf(),
-        trace_log: trace_log.clone(),
-    };
-    let ctx = Ctx {
-        runner: &runner,
-        cwd: repo.to_path_buf(),
-        io: &io,
-        env: &env,
-        fs: &REAL_FS,
-    };
-    let args = [OsString::from("git-factor"), OsString::from("--abort")];
-    let error = FactorError::StateWrite(io::Error::other(OuterCause(InnerCause)));
-
-    write_error_log(&ctx, &args, &error).or_abort("write error log should succeed");
-
-    let error_log =
-        fs::read_to_string(state_dir.join(ERROR_LOG_FILE)).or_abort("error log should exist");
-    assert!(error_log.contains(format!("trace_log={}", trace_log.display()).as_str()));
-    assert!(error_log.contains("source_0=outer cause"));
-    assert!(error_log.contains("source_1=root cause"));
-    assert!(error_log.contains("factor_split_count=2"));
-    assert!(error_log.contains("factor_requires_rebase=true"));
-    assert!(error_log.contains("staged_paths=staged.txt"));
-    assert!(error_log.contains("unstaged_paths=unstaged.txt"));
-    assert!(error_log.contains("untracked_paths=new.txt"));
-}
-
-#[test]
 fn write_error_log_includes_false_requires_rebase_and_apply_state() {
     let dir = TempDir::new().or_abort("tempdir");
     let repo = dir.path();
@@ -5327,33 +5355,7 @@ fn write_error_log_includes_merge_state_and_done_tail() {
     assert!(error_log.contains("rebase_end=6"));
     assert!(error_log.contains("rebase_done_tail=pick two"));
 }
-#[test]
-fn write_error_log_returns_git_dir_error_when_factor_dir_lookup_fails() {
-    let dir = TempDir::new().or_abort("tempdir");
-    let repo = dir.path();
-    let io = TestIo::default();
-    let runner = ScriptedRunner::default().with_output_status(
-        "git",
-        &["rev-parse", "--git-dir"],
-        repo,
-        128,
-        "",
-        "fatal: not a git repository\n",
-    );
-    let ctx = Ctx {
-        runner: &runner,
-        cwd: repo.to_path_buf(),
-        io: &io,
-        env: &REAL_ENV,
-        fs: &REAL_FS,
-    };
-    let args = [OsString::from("git-factor"), OsString::from("--finish")];
-    let error = FactorError::StateWrite(io::Error::other("lookup failure"));
 
-    let err = write_error_log(&ctx, &args, &error).err_or_abort("git-dir lookup should fail first");
-
-    assert!(matches!(&err, FactorError::NotGitRepo), "err was: {err:?}");
-}
 #[test]
 fn write_error_log_returns_state_write_error_when_log_write_fails() {
     let dir = TempDir::new().or_abort("tempdir");
