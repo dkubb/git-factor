@@ -168,6 +168,7 @@ pub(in crate::git_factor) fn resolve_commit_refs(
 ///
 /// Supported forms are:
 /// - `<rev>`
+/// - `<start> <end>` (inclusive)
 /// - `<start>..<end>` (exclusive start)
 /// - `<start>^..<end>` (inclusive start using git-native syntax)
 #[cfg_attr(
@@ -194,6 +195,22 @@ pub(in crate::git_factor) fn resolve_commit_span(
             } else {
                 NonEmpty::singleton(resolve_commit(ctx, ref_str)?)
             }
+        }
+        2 => {
+            let start = refs.first().as_str();
+            let mut tail = refs.tail.iter();
+            let Some(end_ref) = tail.next() else {
+                return Err(FactorError::InvalidCommit(
+                    "commit arguments must resolve to a single contiguous span".to_owned(),
+                ));
+            };
+            let end = end_ref.as_str();
+            if start.contains("..") || end.contains("..") {
+                return Err(FactorError::InvalidCommit(format!(
+                    "{start} {end} (use either a single dotted range or two plain commit refs)"
+                )));
+            }
+            resolve_inclusive_span(ctx, start, end)?
         }
         _ => {
             return Err(FactorError::InvalidCommit(
@@ -263,16 +280,62 @@ fn resolve_span_from_range_expr(
 
 #[expect(
     clippy::single_call_fn,
-    reason = "line parsing stays extracted for dotted range helper coverage"
+    reason = "inclusive span expansion stays isolated for testing and future reuse"
+)]
+/// Resolves two plain refs into one inclusive oldest-first ancestry span.
+fn resolve_inclusive_span(
+    ctx: &Ctx<'_>,
+    start_ref: &str,
+    end_ref: &str,
+) -> Result<NonEmpty<CommitSha>, FactorError> {
+    let start = resolve_commit(ctx, start_ref)?;
+    let end = resolve_commit(ctx, end_ref)?;
+
+    if start == end {
+        return Ok(NonEmpty::singleton(start));
+    }
+
+    let range_expr = format!("{start}..{end}");
+    let descendant_output = match git_output(
+        ctx,
+        &[
+            "rev-list",
+            "--reverse",
+            "--ancestry-path",
+            range_expr.as_str(),
+        ],
+    ) {
+        Ok(output) => output,
+        Err(_err) => {
+            return Err(FactorError::InvalidCommit(format!(
+                "{start_ref} {end_ref} (range must resolve to a contiguous ancestry span)"
+            )));
+        }
+    };
+
+    let descendants = parse_commit_lines(&descendant_output);
+    if descendants.is_empty() {
+        return Err(FactorError::InvalidCommit(format!(
+            "{start_ref} {end_ref} (range must resolve to a contiguous ancestry span)"
+        )));
+    }
+
+    Ok(NonEmpty {
+        head: start,
+        tail: descendants,
+    })
+}
+
+#[expect(
+    clippy::single_call_fn,
+    reason = "line parsing stays extracted for reuse by dotted and inclusive span helpers"
 )]
 /// Parses one non-empty newline-separated list of commit SHAs.
 fn parse_non_empty_commit_lines(
     output: &str,
     input: &str,
 ) -> Result<NonEmpty<CommitSha>, FactorError> {
-    let mut commits = output
-        .lines()
-        .filter_map(|line| CommitSha::new(line.to_owned()).ok());
+    let mut commits = parse_commit_lines(output).into_iter();
     let Some(head) = commits.next() else {
         return Err(FactorError::InvalidCommit(input.to_owned()));
     };
@@ -281,6 +344,14 @@ fn parse_non_empty_commit_lines(
         head,
         tail: commits.collect(),
     })
+}
+
+/// Parses newline-separated commit SHAs, discarding invalid lines.
+fn parse_commit_lines(output: &str) -> Vec<CommitSha> {
+    output
+        .lines()
+        .filter_map(|line| CommitSha::new(line.to_owned()).ok())
+        .collect()
 }
 
 /// Validates that a commit is an ancestor of HEAD.
@@ -833,6 +904,41 @@ mod tests {
     }
 
     #[test]
+    fn resolve_commit_span_accepts_inclusive_two_ref_span() {
+        let dir = TempDir::new().or_abort("tempdir");
+        let [first, second, third] = init_linear_repo(dir.path());
+        let ctx = ctx_for(dir.path());
+        let refs = NonEmpty {
+            head: NonEmptyString::try_from(first.clone()).or_abort("start"),
+            tail: vec![NonEmptyString::try_from(third.clone()).or_abort("end")],
+        };
+
+        let commits = resolve_commit_span(&ctx, &refs).or_abort("inclusive span should resolve");
+        let actual: Vec<&str> = commits.iter().map(CommitSha::as_str).collect();
+
+        assert_eq!(
+            actual,
+            vec![first.as_str(), second.as_str(), third.as_str()]
+        );
+    }
+
+    #[test]
+    fn resolve_commit_span_accepts_identical_two_ref_span() {
+        let dir = TempDir::new().or_abort("tempdir");
+        let [first, _second, _third] = init_linear_repo(dir.path());
+        let ctx = ctx_for(dir.path());
+        let refs = NonEmpty {
+            head: NonEmptyString::try_from(first.clone()).or_abort("start"),
+            tail: vec![NonEmptyString::try_from(first.clone()).or_abort("end")],
+        };
+
+        let commits = resolve_commit_span(&ctx, &refs).or_abort("identical refs should resolve");
+        let actual: Vec<&str> = commits.iter().map(CommitSha::as_str).collect();
+
+        assert_eq!(actual, vec![first.as_str()]);
+    }
+
+    #[test]
     fn resolve_commit_span_accepts_exclusive_dotted_range() {
         let dir = TempDir::new().or_abort("tempdir");
         let [first, second, third] = init_linear_repo(dir.path());
@@ -860,38 +966,6 @@ mod tests {
         let actual: Vec<&str> = commits.iter().map(CommitSha::as_str).collect();
 
         assert_eq!(actual, vec![second.as_str(), third.as_str()]);
-    }
-
-    #[test]
-    fn resolve_commit_span_rejects_unknown_dotted_range_ref() {
-        let dir = TempDir::new().or_abort("tempdir");
-        init_git_repo(dir.path());
-        let ctx = ctx_for(dir.path());
-        let refs = NonEmpty::singleton(
-            NonEmptyString::try_from("deadbeef..HEAD".to_owned()).or_abort("range"),
-        );
-
-        let err = resolve_commit_span(&ctx, &refs).err_or_abort("unknown dotted ref should reject");
-        let message = invalid_commit_message(&err).or_abort("expected InvalidCommit");
-        assert_eq!(message, "deadbeef..HEAD");
-    }
-
-    #[test]
-    fn resolve_commit_span_rejects_two_ref_form() {
-        let dir = TempDir::new().or_abort("tempdir");
-        let [first, _second, third] = init_linear_repo(dir.path());
-        let ctx = ctx_for(dir.path());
-        let refs = NonEmpty {
-            head: NonEmptyString::try_from(first).or_abort("first"),
-            tail: vec![NonEmptyString::try_from(third).or_abort("third")],
-        };
-
-        let err = resolve_commit_span(&ctx, &refs).err_or_abort("two refs should reject");
-        let message = invalid_commit_message(&err).or_abort("expected InvalidCommit");
-        assert_eq!(
-            message,
-            "commit arguments must resolve to a single contiguous span"
-        );
     }
 
     #[test]
@@ -928,6 +1002,25 @@ mod tests {
         let message = invalid_commit_message(&err).or_abort("expected InvalidCommit");
         assert!(
             message.contains("symmetric diff"),
+            "unexpected message: {message}"
+        );
+    }
+
+    #[test]
+    fn resolve_commit_span_rejects_dotted_two_arg_form() {
+        let dir = TempDir::new().or_abort("tempdir");
+        let [first, _second, third] = init_linear_repo(dir.path());
+        let ctx = ctx_for(dir.path());
+        let refs = NonEmpty {
+            head: NonEmptyString::try_from(format!("{first}..{third}")).or_abort("start"),
+            tail: vec![NonEmptyString::try_from(third).or_abort("end")],
+        };
+
+        let err =
+            resolve_commit_span(&ctx, &refs).err_or_abort("mixed dotted/two-arg form should fail");
+        let message = invalid_commit_message(&err).or_abort("expected InvalidCommit");
+        assert!(
+            message.contains("use either a single dotted range or two plain commit refs"),
             "unexpected message: {message}"
         );
     }
