@@ -1471,6 +1471,66 @@ fi
     }
 
     #[test]
+    fn rejects_non_contiguous_two_ref_spans() {
+        let dir = init_repo();
+        let repo = dir.path();
+
+        commit_file(repo, "file.txt", "one\n", "chore: base");
+        let main_branch = git(repo, &["branch", "--show-current"]);
+        git(repo, &["checkout", "-b", "other"]);
+        commit_file(repo, "other.txt", "other\n", "feat: other");
+        let other_sha = git(repo, &["rev-parse", "HEAD"]);
+        git(repo, &["checkout", main_branch.as_str()]);
+        commit_file(repo, "file.txt", "one\ntwo\n", "feat: on main");
+
+        let output = Command::new(git_factor_bin())
+            .current_dir(repo)
+            .args(["--exec", "true", other_sha.as_str(), "HEAD"])
+            .output()
+            .or_abort();
+        assert_eq!(output.status.code(), Some(EXIT_DATAERR));
+        assert!(
+            output.stdout.is_empty(),
+            "stdout should be empty: {output:?}"
+        );
+        let stderr = String::from_utf8(output.stderr).or_abort();
+        assert!(
+            stderr.contains("contiguous ancestry span"),
+            "unexpected stderr: {stderr}"
+        );
+    }
+
+    #[test]
+    fn rejects_spans_containing_merge_commits() {
+        let dir = init_repo();
+        let repo = dir.path();
+
+        commit_file(repo, "base.txt", "base\n", "feat: base");
+        git(repo, &["checkout", "--quiet", "-b", "side"]);
+        commit_file(repo, "side.txt", "side\n", "feat: side");
+        git(repo, &["checkout", "--quiet", "-"]);
+        commit_file(repo, "main.txt", "main\n", "feat: main");
+        git(repo, &["merge", "--quiet", "--no-ff", "--no-edit", "side"]);
+        commit_file(repo, "after.txt", "after\n", "feat: after");
+
+        let output = Command::new(git_factor_bin())
+            .current_dir(repo)
+            .args(["--exec", "true", "HEAD~1^..HEAD"])
+            .output()
+            .or_abort();
+        assert_eq!(output.status.code(), Some(EXIT_DATAERR));
+        assert!(
+            output.stdout.is_empty(),
+            "stdout should be empty: {output:?}"
+        );
+        let stderr = String::from_utf8(output.stderr).or_abort();
+        assert!(
+            stderr.contains("is a merge commit"),
+            "unexpected stderr: {stderr}"
+        );
+    }
+
+    #[test]
     fn start_accepts_root_commit_ref_in_non_head_mode() {
         let dir = init_repo();
         let repo = dir.path();
@@ -2950,6 +3010,7 @@ fi
         git(repo, &["add", "--all"]);
         git(repo, &["commit", "--message", "feat: b"]);
         let second_short_sha = git(repo, &["rev-parse", "--short", "HEAD"]);
+        let expected_tree = git(repo, &["rev-parse", "HEAD^{tree}"]);
 
         run_git_factor(
             repo,
@@ -2992,7 +3053,9 @@ HINTS:
         run_git_factor(
             repo,
             &["--continue", "--message", "test: split b"],
-            GitFactorExpectation::default().stdout_suffix(expected_completion_stdout_suffix(2)),
+            GitFactorExpectation::default()
+                .stdout_suffix(expected_completion_stdout_suffix(2))
+                .git_output(&["rev-parse", "HEAD^{tree}"], expected_tree),
         );
     }
 
@@ -3022,6 +3085,28 @@ HINTS:
             repo,
             &["--continue", "--message", "test: split a"],
             GitFactorExpectation::default().stdout_suffix(expected_completion_stdout_suffix(1)),
+        );
+    }
+
+    #[test]
+    fn start_accepts_git_native_inclusive_dotted_ranges() {
+        let dir = init_repo();
+        let repo = dir.path();
+
+        commit_file(repo, "base.txt", "base\n", "chore: base");
+        commit_file(repo, "base.txt", "base\na\n", "feat: a");
+        write_file(repo, "base.txt", "base\na\nb\n");
+        git(repo, &["add", "--all"]);
+        git(repo, &["commit", "--message", "feat: b"]);
+        let second_short_sha = git(repo, &["rev-parse", "--short", "HEAD"]);
+
+        run_git_factor(
+            repo,
+            &["--exec", "true", "HEAD~1^..HEAD"],
+            GitFactorExpectation::default().stdout_suffix(expected_multi_commit_start_suffix(
+                second_short_sha.as_str(),
+                None,
+            )),
         );
     }
 
