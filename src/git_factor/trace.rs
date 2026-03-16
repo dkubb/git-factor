@@ -1,5 +1,7 @@
-use core::fmt::Write as _;
+use core::error::Error as _;
+use core::fmt::{Arguments, Write as _};
 use core::str::FromStr;
+use std::ffi::OsString;
 use std::fs::{self, OpenOptions};
 use std::io::Write as _;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -72,6 +74,9 @@ macro_rules! collect_status_paths_inline {
 
 /// Environment variable enabling JSONL trace logging.
 pub(in crate::git_factor) const TRACE_LOG_ENV: &str = "GIT_FACTOR_TRACE_LOG";
+
+/// File name used for persisted unexpected-session failures.
+pub(in crate::git_factor) const ERROR_LOG_FILE: &str = "error.log";
 
 /// Maximum number of path entries captured per status category.
 pub(in crate::git_factor) const TRACE_MAX_PATHS: usize = 200;
@@ -572,4 +577,134 @@ pub(in crate::git_factor) fn trace_note(ctx: &Ctx<'_>, event: &str, fields: &[(&
     }
     line.push('}');
     append_trace_line(ctx, &line);
+}
+
+/// Appends one best-effort line to the error-log buffer.
+fn push_log_line(content: &mut String, args: Arguments<'_>) {
+    let _ignored_write_result = content.write_fmt(args);
+    let _ignored_newline_result = content.write_char('\n');
+}
+
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "used by later error-log persistence wiring in the same factor split"
+    )
+)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "error log intentionally emits a complete session snapshot in one place"
+)]
+/// Overwrites `.git/factor/error.log` with the latest unexpected session failure.
+pub(in crate::git_factor) fn write_error_log(
+    ctx: &Ctx<'_>,
+    args: &[OsString],
+    error: &FactorError,
+) -> Result<(), FactorError> {
+    let state_dir = factor_dir_in(ctx)?;
+    let snapshot = collect_repo_snapshot(ctx);
+    let trace_log = trace_log_path(ctx);
+    let argv_words = args
+        .iter()
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .collect::<Vec<String>>();
+    let mut content = String::new();
+
+    macro_rules! push_opt_line {
+        ($key:literal, $value:expr) => {{
+            if let Some(value) = $value {
+                push_log_line(&mut content, format_args!("{}={value}", $key));
+            }
+        }};
+    }
+
+    push_log_line(&mut content, format_args!("ts_unix_ms={}", now_unix_ms()));
+    push_log_line(&mut content, format_args!("argv={}", argv_words.join(" ")));
+    push_log_line(&mut content, format_args!("cwd={}", ctx.cwd.display()));
+    push_log_line(&mut content, format_args!("error={error}"));
+    if let Some(path) = trace_log.as_ref() {
+        push_log_line(&mut content, format_args!("trace_log={}", path.display()));
+    }
+    let mut maybe_source = error.source();
+    let mut source_text = Vec::new();
+    while let Some(cause) = maybe_source {
+        source_text.push(cause.to_string());
+        maybe_source = cause.source();
+    }
+    for (source_index, cause) in source_text.iter().enumerate() {
+        push_log_line(&mut content, format_args!("source_{source_index}={cause}"));
+    }
+
+    push_opt_line!("head", snapshot.head.as_deref());
+    push_opt_line!("head_tree", snapshot.head_tree.as_deref());
+    push_opt_line!("git_dir", snapshot.git_dir.as_deref());
+    push_opt_line!("toplevel", snapshot.toplevel.as_deref());
+    push_opt_line!(
+        "factor_current_commit",
+        snapshot.factor_current_commit.as_deref()
+    );
+    push_opt_line!(
+        "factor_current_index",
+        snapshot
+            .factor_current_index
+            .map(|value| value.to_string())
+            .as_deref()
+    );
+    push_opt_line!(
+        "factor_split_count",
+        snapshot
+            .factor_split_count
+            .map(|value| value.to_string())
+            .as_deref()
+    );
+    push_opt_line!(
+        "factor_requires_rebase",
+        snapshot
+            .factor_requires_rebase
+            .map(|value| if value.as_bool() { "true" } else { "false" })
+    );
+    push_opt_line!(
+        "factor_expected_tree",
+        snapshot.factor_expected_tree.as_deref()
+    );
+    push_opt_line!(
+        "rebase_state",
+        snapshot.rebase_state.map(|state| match state {
+            RebaseState::Apply => REBASE_APPLY_DIR,
+            RebaseState::Merge => REBASE_MERGE_DIR,
+        })
+    );
+    push_opt_line!(
+        "rebase_msgnum",
+        snapshot
+            .rebase_msgnum
+            .map(|value| value.as_u32().to_string())
+            .as_deref()
+    );
+    push_opt_line!(
+        "rebase_end",
+        snapshot
+            .rebase_end
+            .map(|value| value.as_u32().to_string())
+            .as_deref()
+    );
+    push_opt_line!("rebase_todo_head", snapshot.rebase_todo_head.as_deref());
+    push_opt_line!("rebase_done_tail", snapshot.rebase_done_tail.as_deref());
+    push_log_line(
+        &mut content,
+        format_args!("staged_paths={}", snapshot.staged_paths.join("\t")),
+    );
+    push_log_line(
+        &mut content,
+        format_args!("unstaged_paths={}", snapshot.unstaged_paths.join("\t")),
+    );
+    push_log_line(
+        &mut content,
+        format_args!("untracked_paths={}", snapshot.untracked_paths.join("\t")),
+    );
+
+    ctx.fs
+        .write_string(&state_dir.as_path().join(ERROR_LOG_FILE), &content)
+        .map_err(FactorError::StateWrite)
 }
