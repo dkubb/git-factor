@@ -88,7 +88,7 @@ use self::helpers::{editor_path, error_to_exit, factor_dir_in, shell_quote, stat
 use self::state::{read_state, read_state_bool_or_default, read_state_parsed, write_state};
 #[cfg(test)]
 use self::types::COMMIT_SHA_HEX_LEN;
-use self::types::{CommitSha, Commits, StateDir, TreeHash};
+use self::types::{BaseParent, CommitSha, CommitSpan, Commits, StateDir, TreeHash};
 use self::ui::{
     is_factor_active_in, is_mid_rebase_in, print_hints_with_remaining_in, print_session_started,
 };
@@ -1650,20 +1650,16 @@ fn cmd_start_with_resolved_in(
     resolved_commits: &NonEmpty<CommitSha>,
 ) -> Result<i32, FactorError> {
     let head_commit = resolve_commit(ctx, "HEAD")?;
-    let single_head_session = match resolved_commits.len() {
-        1 => resolved_commits.first() == &head_commit,
-        _ => false,
-    };
     for sha in resolved_commits {
         validate_split_target_in(ctx, sha)?;
     }
-    let base_sha = resolved_commits.first();
+    let span_start = resolved_commits.first();
     let short_sha = NonEmptyString::try_from(git_output(
         ctx,
-        &["rev-parse", "--short", base_sha.as_str()],
+        &["rev-parse", "--short", span_start.as_str()],
     )?)
     .map_err(|_err| FactorError::GitCommand(non_empty_msg("empty short SHA".to_owned())))?;
-    let message = commit_message(ctx, base_sha)?;
+    let message = commit_message(ctx, span_start)?;
     let exec_command = joined_exec_command(exec);
     validate_exec_syntax(ctx, exec_command.as_str())?;
     ctx.fs
@@ -1672,13 +1668,30 @@ fn cmd_start_with_resolved_in(
     let parent_status = command_status_with(
         ctx,
         "git",
-        &["rev-parse", "--quiet", "--verify", &format!("{base_sha}^")],
+        &[
+            "rev-parse",
+            "--quiet",
+            "--verify",
+            &format!("{span_start}^"),
+        ],
         &[],
         true,
     )?;
-    let is_root = !parent_status.success();
+    let span = CommitSpan::new(
+        resolved_commits.clone(),
+        if parent_status.success() {
+            BaseParent::Commit
+        } else {
+            BaseParent::Root
+        },
+    );
+    let single_head_session = match span.len() {
+        1 => span.tip_commit() == &head_commit,
+        _ => false,
+    };
+    let first_commit = span.first_commit();
     let requires_rebase = StateBool::from_bool(!single_head_session);
-    let is_root_state = StateBool::from_bool(is_root);
+    let is_root_state = StateBool::from_bool(span.is_root());
     let phase = if single_head_session {
         SessionPhase::Splitting
     } else {
@@ -1698,7 +1711,7 @@ fn cmd_start_with_resolved_in(
         (StateFileKey::StartHead, head_commit.as_str()),
         (StateFileKey::IsRoot, is_root_state.as_str()),
     ];
-    let commits_content: Vec<&str> = resolved_commits.iter().map(CommitSha::as_str).collect();
+    let commits_content: Vec<&str> = span.commits().iter().map(CommitSha::as_str).collect();
     write_state(
         ctx,
         state_dir.as_path(),
@@ -1733,7 +1746,7 @@ fn cmd_start_with_resolved_in(
             "start gate must not leave tracked, unstaged, or untracked changes behind",
         )?;
         capture_expected_tree_in_state(ctx, state_dir)?;
-        let reset_target = if is_root {
+        let reset_target = if span.is_root() {
             git_output(
                 ctx,
                 &[
@@ -1748,16 +1761,16 @@ fn cmd_start_with_resolved_in(
         };
         run_git(ctx, &["reset", "--quiet", reset_target.as_str()])?;
 
-        let started = split_started_line(short_sha.as_str(), Some(resolved_commits.len()));
+        let started = split_started_line(short_sha.as_str(), Some(span.len()));
         print_session_started(ctx, started.as_str(), &message)?;
         return Ok(EXIT_OK);
     }
 
-    match run_start_rebase_in(ctx, resolved_commits, base_sha, is_root, state_dir)? {
+    match run_start_rebase_in(ctx, span.commits(), first_commit, span.is_root(), state_dir)? {
         StartRebaseOutcome::PausedAtBreak => {
             let session = Session::from_active(ctx)?;
             let (next_short_sha, next_message) = enter_pending_split_session(ctx, &session)?;
-            let started = split_started_line(next_short_sha.as_str(), Some(resolved_commits.len()));
+            let started = split_started_line(next_short_sha.as_str(), Some(span.len()));
             print_session_started(ctx, started.as_str(), next_message.as_str())?;
             Ok(EXIT_OK)
         }

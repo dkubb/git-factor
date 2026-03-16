@@ -3,6 +3,7 @@ use core::fmt;
 use std::path::{Path, PathBuf};
 
 use crate::non_empty_string::NonEmptyString;
+use nonempty::NonEmpty;
 
 use super::{FactorError, non_empty_msg};
 
@@ -126,6 +127,79 @@ impl TryFrom<BTreeSet<CommitSha>> for Commits {
     }
 }
 
+/// Parent boundary for one contiguous factor span.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(in crate::git_factor) enum BaseParent {
+    /// The span starts after some non-root parent commit.
+    Commit,
+    /// The span starts at the repository root.
+    Root,
+}
+
+impl BaseParent {
+    /// Returns `true` when the span begins at the repository root.
+    pub(in crate::git_factor) const fn is_root(&self) -> bool {
+        matches!(self, Self::Root)
+    }
+}
+
+/// One contiguous commit span selected for factoring.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(in crate::git_factor) struct CommitSpan {
+    /// Commit immediately before the span, or root when the span begins history.
+    base_parent: BaseParent,
+    /// Commits included in the span, ordered oldest first.
+    commits: NonEmpty<CommitSha>,
+}
+
+impl CommitSpan {
+    /// Returns the commits in oldest-first order.
+    pub(in crate::git_factor) const fn commits(&self) -> &NonEmpty<CommitSha> {
+        &self.commits
+    }
+
+    /// Returns the first commit in the span.
+    pub(in crate::git_factor) const fn first_commit(&self) -> &CommitSha {
+        self.commits.first()
+    }
+
+    /// Returns `true` when the span begins at the repository root.
+    pub(in crate::git_factor) const fn is_root(&self) -> bool {
+        self.base_parent.is_root()
+    }
+
+    /// Returns the number of commits in the span.
+    pub(in crate::git_factor) fn len(&self) -> usize {
+        self.commits.len()
+    }
+
+    /// Creates a new span from one contiguous commit list and its base parent.
+    #[cfg_attr(
+        not(test),
+        expect(
+            clippy::single_call_fn,
+            reason = "the constructor keeps span fields private while start-path plumbing is introduced"
+        )
+    )]
+    pub(in crate::git_factor) const fn new(
+        commits: NonEmpty<CommitSha>,
+        base_parent: BaseParent,
+    ) -> Self {
+        Self {
+            base_parent,
+            commits,
+        }
+    }
+
+    /// Returns the final commit in the span.
+    pub(in crate::git_factor) fn tip_commit(&self) -> &CommitSha {
+        self.commits
+            .tail
+            .last()
+            .unwrap_or_else(|| self.commits.first())
+    }
+}
+
 /// Path to the `.git/factor` state directory.
 ///
 /// Wraps `PathBuf` so that state-directory paths cannot be confused with
@@ -154,10 +228,13 @@ impl StateDir {
 
 #[cfg(test)]
 mod tests {
-    use super::{COMMIT_SHA_HEX_LEN, CommitSha, Commits, FactorError, Sha, TreeHash};
+    use super::{
+        BaseParent, COMMIT_SHA_HEX_LEN, CommitSha, CommitSpan, Commits, FactorError, Sha, TreeHash,
+    };
     use crate::test_support::OrAbort as _;
     use crate::test_support::ResultOrAbort as _;
     use alloc::collections::BTreeSet;
+    use nonempty::NonEmpty;
     use proptest::collection::vec;
     use proptest::prelude::*;
     use proptest::sample::select;
@@ -232,6 +309,10 @@ mod tests {
         )
     }
 
+    fn sha(hex: char) -> CommitSha {
+        CommitSha::new(hex.to_string().repeat(COMMIT_SHA_HEX_LEN)).or_abort("valid sha")
+    }
+
     #[test]
     fn proptest_commits_new_rejects_empty_set() {
         let err = Commits::try_from(BTreeSet::new()).err_or_abort("empty set should be rejected");
@@ -246,6 +327,34 @@ mod tests {
         let invalid = format!("{}g", "0".repeat(COMMIT_SHA_HEX_LEN - 1));
         let err = CommitSha::new(invalid.clone()).err_or_abort("non-hex sha should be rejected");
         assert_eq!(err.to_string(), format!("invalid commit: {invalid}"));
+    }
+
+    #[test]
+    fn commit_span_tip_commit_returns_last_commit() {
+        let first = sha('1');
+        let second = sha('2');
+        let third = sha('3');
+        let span = CommitSpan::new(
+            NonEmpty {
+                head: first.clone(),
+                tail: vec![second, third.clone()],
+            },
+            BaseParent::Commit,
+        );
+
+        assert_eq!(span.first_commit(), &first);
+        assert_eq!(span.tip_commit(), &third);
+        assert_eq!(span.len(), 3);
+    }
+
+    #[test]
+    fn commit_span_singleton_tip_matches_first_commit() {
+        let first = sha('1');
+        let span = CommitSpan::new(NonEmpty::new(first.clone()), BaseParent::Root);
+
+        assert_eq!(span.first_commit(), &first);
+        assert_eq!(span.tip_commit(), &first);
+        assert!(span.is_root());
     }
 
     #[test]
