@@ -1641,6 +1641,76 @@ mod tests {
     }
 
     #[test]
+    fn parent_lookup_runner_covers_expected_and_unexpected_paths() {
+        let parent_lookup_runner = ParentLookupRunner;
+        let missing_parent_output = parent_lookup_runner
+            .output(
+                "git",
+                &["rev-parse", "--verify", &format!("{SPAN_END_SHA}^")],
+                Path::new("."),
+            )
+            .or_abort("missing parent output");
+        assert!(!missing_parent_output.status.success());
+        assert!(missing_parent_output.stdout.is_empty());
+        assert_eq!(
+            missing_parent_output.stderr,
+            b"forced parent lookup failure\n"
+        );
+
+        let lookup_start_merge = parent_lookup_runner
+            .status(
+                "git",
+                &[
+                    "rev-parse",
+                    "--quiet",
+                    "--verify",
+                    &format!("{SPAN_START_SHA}^2"),
+                ],
+                &[],
+                false,
+                Path::new("."),
+            )
+            .or_abort("lookup start merge check");
+        assert!(!lookup_start_merge.success());
+
+        let lookup_end_merge = parent_lookup_runner
+            .status(
+                "git",
+                &[
+                    "rev-parse",
+                    "--quiet",
+                    "--verify",
+                    &format!("{SPAN_END_SHA}^2"),
+                ],
+                &[],
+                false,
+                Path::new("."),
+            )
+            .or_abort("lookup end merge check");
+        assert!(!lookup_end_merge.success());
+
+        let unexpected_lookup_output = parent_lookup_runner
+            .output("git", &["status"], Path::new("."))
+            .err_or_abort("unexpected lookup output args should fail");
+        assert!(
+            unexpected_lookup_output
+                .to_string()
+                .contains("unexpected output args"),
+            "unexpected error: {unexpected_lookup_output:?}"
+        );
+
+        let unexpected_lookup_status = parent_lookup_runner
+            .status("git", &["status"], &[], false, Path::new("."))
+            .err_or_abort("unexpected lookup status args should fail");
+        assert!(
+            unexpected_lookup_status
+                .to_string()
+                .contains("unexpected status args"),
+            "unexpected error: {unexpected_lookup_status:?}"
+        );
+    }
+
+    #[test]
     fn env_and_fs_helpers_cover_delegated_paths() {
         let dir = TempDir::new().or_abort("tempdir");
         let env = TestEnv {
@@ -1869,76 +1939,6 @@ mod tests {
         assert!(
             message.contains("no commits after sorting"),
             "unexpected error: {err:?}"
-        );
-    }
-
-    #[test]
-    fn parent_lookup_runner_covers_expected_and_unexpected_paths() {
-        let parent_lookup_runner = ParentLookupRunner;
-        let missing_parent_output = parent_lookup_runner
-            .output(
-                "git",
-                &["rev-parse", "--verify", &format!("{SPAN_END_SHA}^")],
-                Path::new("."),
-            )
-            .or_abort("missing parent output");
-        assert!(!missing_parent_output.status.success());
-        assert!(missing_parent_output.stdout.is_empty());
-        assert_eq!(
-            missing_parent_output.stderr,
-            b"forced parent lookup failure\n"
-        );
-
-        let lookup_start_merge = parent_lookup_runner
-            .status(
-                "git",
-                &[
-                    "rev-parse",
-                    "--quiet",
-                    "--verify",
-                    &format!("{SPAN_START_SHA}^2"),
-                ],
-                &[],
-                false,
-                Path::new("."),
-            )
-            .or_abort("lookup start merge check");
-        assert!(!lookup_start_merge.success());
-
-        let lookup_end_merge = parent_lookup_runner
-            .status(
-                "git",
-                &[
-                    "rev-parse",
-                    "--quiet",
-                    "--verify",
-                    &format!("{SPAN_END_SHA}^2"),
-                ],
-                &[],
-                false,
-                Path::new("."),
-            )
-            .or_abort("lookup end merge check");
-        assert!(!lookup_end_merge.success());
-
-        let unexpected_lookup_output = parent_lookup_runner
-            .output("git", &["status"], Path::new("."))
-            .err_or_abort("unexpected lookup output args should fail");
-        assert!(
-            unexpected_lookup_output
-                .to_string()
-                .contains("unexpected output args"),
-            "unexpected error: {unexpected_lookup_output:?}"
-        );
-
-        let unexpected_lookup_status = parent_lookup_runner
-            .status("git", &["status"], &[], false, Path::new("."))
-            .err_or_abort("unexpected lookup status args should fail");
-        assert!(
-            unexpected_lookup_status
-                .to_string()
-                .contains("unexpected status args"),
-            "unexpected error: {unexpected_lookup_status:?}"
         );
     }
 
