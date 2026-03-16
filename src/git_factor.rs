@@ -2194,7 +2194,7 @@ fn git_commit_preserving_metadata(
 pub fn main_entry() -> i32 {
     use std::env;
     let args = env::args_os().collect::<Vec<OsString>>();
-    main_entry_with_vec(&REAL_IO, build_ctx_from_cwd(REAL_ENV.current_dir()), args)
+    main_entry_with_vec(&REAL_IO, build_ctx_from_cwd(REAL_ENV.current_dir()), &args)
 }
 
 /// Builds the real runtime context from a cwd lookup result.
@@ -2231,7 +2231,7 @@ fn build_ctx_from_cwd(cwd_result: io::Result<PathBuf>) -> Result<Ctx<'static>, F
 fn main_entry_with_vec(
     io: &dyn Io,
     ctx_result: Result<Ctx<'_>, FactorError>,
-    args: Vec<OsString>,
+    args: &[OsString],
 ) -> i32 {
     match ctx_result {
         Ok(ctx) => run_and_report_with_args_vec(&ctx, args),
@@ -2254,8 +2254,8 @@ fn main_entry_with_vec(
         reason = "single error-reporting shim avoids duplicating exit mapping logic"
     )
 )]
-fn run_and_report_with_args_vec(ctx: &Ctx<'_>, args: Vec<OsString>) -> i32 {
-    match run_with_args_vec(ctx, args) {
+fn run_and_report_with_args_vec(ctx: &Ctx<'_>, args: &[OsString]) -> i32 {
+    match run_with_args_vec(ctx, args.to_owned()) {
         Ok(code) => code,
         Err(err) => {
             let (code, message) = error_to_exit(&err);
@@ -2976,7 +2976,7 @@ mod proptests {
             OsString::from("--status"),
         ];
 
-        let code = run_and_report_with_args_vec(&ctx, args);
+        let code = run_and_report_with_args_vec(&ctx, &args);
         assert_eq!(code, EXIT_USAGE);
         assert!(!io.err.borrow().is_empty());
     }
@@ -2989,7 +2989,7 @@ mod proptests {
             Err(FactorError::Usage(non_empty_msg(
                 "ctx setup failed".to_owned(),
             ))),
-            vec![OsString::from("git-factor")],
+            &[OsString::from("git-factor")],
         );
         assert_eq!(code, EXIT_USAGE);
         assert!(!io.err.borrow().is_empty());
@@ -2998,7 +2998,7 @@ mod proptests {
     #[test]
     fn proptest_main_entry_with_vec_passes_through_success_path() {
         let (ctx, io) = test_ctx();
-        let code = main_entry_with_vec(io, Ok(ctx), vec![OsString::from("git-factor")]);
+        let code = main_entry_with_vec(io, Ok(ctx), &[OsString::from("git-factor")]);
 
         assert_eq!(code, EXIT_OK);
         assert!(io.out.borrow().contains("Usage:"));
@@ -3007,7 +3007,7 @@ mod proptests {
     #[test]
     fn proptest_main_entry_with_vec_uses_default_program_name_when_args_are_empty() {
         let (ctx, io) = test_ctx();
-        let code = main_entry_with_vec(io, Ok(ctx), Vec::<OsString>::new());
+        let code = main_entry_with_vec(io, Ok(ctx), &[]);
 
         assert_eq!(code, EXIT_OK);
         assert!(io.out.borrow().contains("Usage:"));

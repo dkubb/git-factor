@@ -3318,7 +3318,7 @@ fn main_entry_with_prints_error_when_ctx_cannot_be_built() {
     let env = FailingEnv { message: "no cwd" };
     let ctx = ctx_from_parts(&env, &REAL_RUNNER, &io, &REAL_FS);
 
-    let code = main_entry_with_vec(&io, ctx, vec![OsString::from("git-factor")]);
+    let code = main_entry_with_vec(&io, ctx, &[OsString::from("git-factor")]);
 
     assert_eq!(code, EXIT_SOFTWARE);
     assert_eq!(
@@ -4751,7 +4751,7 @@ fn run_with_args_maps_help_to_exit_ok() {
     };
     let code = run_and_report_with_args_vec(
         &ctx,
-        vec![OsString::from("git-factor"), OsString::from("--help")],
+        &[OsString::from("git-factor"), OsString::from("--help")],
     );
     assert_eq!(code, EXIT_OK);
     assert!(io.stdout().contains("WORKFLOW:"), "help should be printed");
@@ -4772,7 +4772,7 @@ fn run_with_args_invalid_flag_writes_to_stderr_and_returns_usage() {
 
     let code = run_and_report_with_args_vec(
         &ctx,
-        vec![
+        &[
             OsString::from("git-factor"),
             OsString::from("--definitely-not-real"),
         ],
@@ -5338,7 +5338,7 @@ fn run_with_args_errors_when_exec_is_missing() {
     };
     let code = run_and_report_with_args_vec(
         &ctx,
-        vec![OsString::from("git-factor"), OsString::from("HEAD")],
+        &[OsString::from("git-factor"), OsString::from("HEAD")],
     );
     assert_eq!(code, EXIT_USAGE);
     let stderr = io.stderr();
@@ -5358,7 +5358,7 @@ fn run_with_args_defaults_missing_commit_to_head() {
     };
     let code = run_and_report_with_args_vec(
         &ctx,
-        vec![
+        &[
             OsString::from("git-factor"),
             OsString::from("--exec"),
             OsString::from("true"),
@@ -5413,7 +5413,7 @@ fn run_with_args_without_user_args_prints_help() {
         env: &REAL_ENV,
         fs: &REAL_FS,
     };
-    let code = run_and_report_with_args_vec(&ctx, vec![OsString::from("git-factor")]);
+    let code = run_and_report_with_args_vec(&ctx, &[OsString::from("git-factor")]);
     assert_eq!(code, EXIT_OK);
     assert!(io.stdout().contains("WORKFLOW:"), "help should be printed");
     assert!(io.stderr().is_empty(), "stderr should be empty");
@@ -5468,7 +5468,7 @@ fn run_with_args_status_delegates_to_status_handler() {
 
     let code = run_and_report_with_args_vec(
         &ctx,
-        vec![OsString::from("git-factor"), OsString::from("--status")],
+        &[OsString::from("git-factor"), OsString::from("--status")],
     );
     assert_eq!(code, EXIT_OK);
     assert_eq!(io.stdout(), "FACTOR: No active session.\n");
@@ -5584,7 +5584,7 @@ fn run_with_args_start_accepts_explicit_commit_ref() {
     };
     let code = run_and_report_with_args_vec(
         &ctx,
-        vec![
+        &[
             OsString::from("git-factor"),
             OsString::from("--exec"),
             OsString::from("true"),
