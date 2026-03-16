@@ -89,6 +89,38 @@ pub(in crate::git_factor) enum FactorError {
     Usage(NonEmptyString),
 }
 
+impl FactorError {
+    /// Returns true when this error should be persisted to `.git/factor/error.log`.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "used by later error-log persistence wiring in the same factor split"
+        )
+    )]
+    pub(in crate::git_factor) const fn should_persist_error_log(&self) -> bool {
+        match self {
+            &Self::GitCommand(_)
+            | &Self::Io(_)
+            | &Self::StateRead(_)
+            | &Self::StateWrite(_)
+            | &Self::TreeHashMismatch { .. } => true,
+            &Self::ActiveRebase
+            | &Self::ActiveSession
+            | &Self::ExecFailed { .. }
+            | &Self::GitDir(_)
+            | &Self::InvalidCommit(_)
+            | &Self::InvalidExecSyntax(_)
+            | &Self::MergeCommit(_)
+            | &Self::NoActiveSession
+            | &Self::NoStagedChanges
+            | &Self::NotAncestor(_)
+            | &Self::NotGitRepo
+            | &Self::Usage(_) => false,
+        }
+    }
+}
+
 /// Converts a `String` to `NonEmptyString` for error messages that are
 /// trivially non-empty by construction (e.g., `format!` with a literal prefix).
 #[expect(
@@ -97,4 +129,46 @@ pub(in crate::git_factor) enum FactorError {
 )]
 pub(in crate::git_factor) fn non_empty_msg(msg: String) -> NonEmptyString {
     NonEmptyString::try_from(msg).expect("error message was unexpectedly empty")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use crate::git_factor::types::COMMIT_SHA_HEX_LEN;
+    use crate::test_support::OrAbort as _;
+
+    #[test]
+    fn factor_error_flags_unexpected_errors_for_persisted_logs() {
+        let sha = CommitSha::new("a".repeat(COMMIT_SHA_HEX_LEN)).or_abort("valid sha");
+        let tree_expected = TreeHash::new(&"b".repeat(COMMIT_SHA_HEX_LEN)).or_abort("valid tree");
+        let tree_actual = TreeHash::new(&"c".repeat(COMMIT_SHA_HEX_LEN)).or_abort("valid tree");
+        let exec = NonEmptyString::try_from("true".to_owned()).or_abort("non-empty");
+        let exit_code: i32 = 1;
+
+        assert!(
+            FactorError::GitCommand(non_empty_msg("boom".to_owned())).should_persist_error_log()
+        );
+        assert!(FactorError::Io(io::Error::other("boom")).should_persist_error_log());
+        assert!(FactorError::StateRead(io::Error::other("boom")).should_persist_error_log());
+        assert!(FactorError::StateWrite(io::Error::other("boom")).should_persist_error_log());
+        assert!(
+            FactorError::TreeHashMismatch {
+                actual: tree_actual,
+                expected: tree_expected,
+            }
+            .should_persist_error_log()
+        );
+
+        assert!(
+            !FactorError::ExecFailed {
+                code: exit_code,
+                command: exec
+            }
+            .should_persist_error_log()
+        );
+        assert!(!FactorError::NoStagedChanges.should_persist_error_log());
+        assert!(!FactorError::Usage(non_empty_msg("usage".to_owned())).should_persist_error_log());
+        assert!(!FactorError::MergeCommit(sha).should_persist_error_log());
+    }
 }
