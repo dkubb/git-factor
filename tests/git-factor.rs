@@ -1856,6 +1856,33 @@ fi
     }
 
     #[test]
+    fn retry_discards_attempt_and_restores_remaining_pool() {
+        let dir = init_repo();
+        let repo = dir.path();
+
+        commit_file(repo, "file.txt", "one\n", "chore: base");
+        commit_file(repo, "file.txt", "one\ntwo\nthree\n", "feat: change");
+
+        start_session(repo);
+
+        let status_before = git(repo, &["status", "--porcelain=v1"]);
+        let diff_before = git(repo, &["diff", "--stat"]);
+
+        fs::remove_file(repo.join("file.txt")).or_abort();
+        fs::write(repo.join("scratch.tmp"), "temporary\n").or_abort();
+
+        run_git_factor(
+            repo,
+            &["--retry"],
+            GitFactorExpectation::default()
+                .git_output(&["status", "--porcelain=v1"], status_before)
+                .git_output(&["diff", "--stat"], diff_before)
+                .path_exists("scratch.tmp", false)
+                .factor_state_exists(true),
+        );
+    }
+
+    #[test]
     fn start_persists_factor_state_files_in_git_dir() {
         let dir = init_repo();
         let repo = dir.path();
