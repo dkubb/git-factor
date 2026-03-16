@@ -1552,6 +1552,95 @@ mod tests {
     }
 
     #[test]
+    fn range_lookup_runner_covers_expected_and_unexpected_paths() {
+        let range_runner = RangeLookupRunner;
+        let start_output = range_runner
+            .output("git", &["rev-parse", "--verify", "start"], Path::new("."))
+            .or_abort("resolve start ref");
+        assert!(start_output.status.success());
+        assert_eq!(
+            start_output.stdout,
+            format!("{SPAN_START_SHA}\n").into_bytes()
+        );
+        assert!(start_output.stderr.is_empty());
+
+        let end_output = range_runner
+            .output("git", &["rev-parse", "--verify", "end"], Path::new("."))
+            .or_abort("resolve end ref");
+        assert!(end_output.status.success());
+        assert_eq!(end_output.stdout, format!("{SPAN_END_SHA}\n").into_bytes());
+        assert!(end_output.stderr.is_empty());
+
+        let range_output = range_runner
+            .output(
+                "git",
+                &[
+                    "rev-list",
+                    "--reverse",
+                    "--ancestry-path",
+                    &format!("{SPAN_START_SHA}..{SPAN_END_SHA}"),
+                ],
+                Path::new("."),
+            )
+            .or_abort("range lookup output");
+        assert!(!range_output.status.success());
+        assert!(range_output.stdout.is_empty());
+        assert_eq!(range_output.stderr, b"forced range lookup failure\n");
+
+        let start_merge = range_runner
+            .status(
+                "git",
+                &[
+                    "rev-parse",
+                    "--quiet",
+                    "--verify",
+                    &format!("{SPAN_START_SHA}^2"),
+                ],
+                &[],
+                false,
+                Path::new("."),
+            )
+            .or_abort("start merge check");
+        assert!(!start_merge.success());
+
+        let end_merge = range_runner
+            .status(
+                "git",
+                &[
+                    "rev-parse",
+                    "--quiet",
+                    "--verify",
+                    &format!("{SPAN_END_SHA}^2"),
+                ],
+                &[],
+                false,
+                Path::new("."),
+            )
+            .or_abort("end merge check");
+        assert!(!end_merge.success());
+
+        let unexpected_range_output = range_runner
+            .output("git", &["status"], Path::new("."))
+            .err_or_abort("unexpected range output args should fail");
+        assert!(
+            unexpected_range_output
+                .to_string()
+                .contains("unexpected output args"),
+            "unexpected error: {unexpected_range_output:?}"
+        );
+
+        let unexpected_range_status = range_runner
+            .status("git", &["status"], &[], false, Path::new("."))
+            .err_or_abort("unexpected range status args should fail");
+        assert!(
+            unexpected_range_status
+                .to_string()
+                .contains("unexpected status args"),
+            "unexpected error: {unexpected_range_status:?}"
+        );
+    }
+
+    #[test]
     fn env_and_fs_helpers_cover_delegated_paths() {
         let dir = TempDir::new().or_abort("tempdir");
         let env = TestEnv {
@@ -1780,95 +1869,6 @@ mod tests {
         assert!(
             message.contains("no commits after sorting"),
             "unexpected error: {err:?}"
-        );
-    }
-
-    #[test]
-    fn range_lookup_runner_covers_expected_and_unexpected_paths() {
-        let range_runner = RangeLookupRunner;
-        let start_output = range_runner
-            .output("git", &["rev-parse", "--verify", "start"], Path::new("."))
-            .or_abort("resolve start ref");
-        assert!(start_output.status.success());
-        assert_eq!(
-            start_output.stdout,
-            format!("{SPAN_START_SHA}\n").into_bytes()
-        );
-        assert!(start_output.stderr.is_empty());
-
-        let end_output = range_runner
-            .output("git", &["rev-parse", "--verify", "end"], Path::new("."))
-            .or_abort("resolve end ref");
-        assert!(end_output.status.success());
-        assert_eq!(end_output.stdout, format!("{SPAN_END_SHA}\n").into_bytes());
-        assert!(end_output.stderr.is_empty());
-
-        let range_output = range_runner
-            .output(
-                "git",
-                &[
-                    "rev-list",
-                    "--reverse",
-                    "--ancestry-path",
-                    &format!("{SPAN_START_SHA}..{SPAN_END_SHA}"),
-                ],
-                Path::new("."),
-            )
-            .or_abort("range lookup output");
-        assert!(!range_output.status.success());
-        assert!(range_output.stdout.is_empty());
-        assert_eq!(range_output.stderr, b"forced range lookup failure\n");
-
-        let start_merge = range_runner
-            .status(
-                "git",
-                &[
-                    "rev-parse",
-                    "--quiet",
-                    "--verify",
-                    &format!("{SPAN_START_SHA}^2"),
-                ],
-                &[],
-                false,
-                Path::new("."),
-            )
-            .or_abort("start merge check");
-        assert!(!start_merge.success());
-
-        let end_merge = range_runner
-            .status(
-                "git",
-                &[
-                    "rev-parse",
-                    "--quiet",
-                    "--verify",
-                    &format!("{SPAN_END_SHA}^2"),
-                ],
-                &[],
-                false,
-                Path::new("."),
-            )
-            .or_abort("end merge check");
-        assert!(!end_merge.success());
-
-        let unexpected_range_output = range_runner
-            .output("git", &["status"], Path::new("."))
-            .err_or_abort("unexpected range output args should fail");
-        assert!(
-            unexpected_range_output
-                .to_string()
-                .contains("unexpected output args"),
-            "unexpected error: {unexpected_range_output:?}"
-        );
-
-        let unexpected_range_status = range_runner
-            .status("git", &["status"], &[], false, Path::new("."))
-            .err_or_abort("unexpected range status args should fail");
-        assert!(
-            unexpected_range_status
-                .to_string()
-                .contains("unexpected status args"),
-            "unexpected error: {unexpected_range_status:?}"
         );
     }
 
