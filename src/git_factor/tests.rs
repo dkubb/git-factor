@@ -4391,6 +4391,50 @@ fn run_with_args_maps_help_to_exit_ok() {
 }
 
 #[test]
+fn run_with_args_maps_version_to_exit_ok() {
+    let dir = TempDir::new().or_abort("tempdir");
+    let io = TestIo::default();
+    let ctx = Ctx {
+        runner: &REAL_RUNNER,
+        cwd: dir.path().to_path_buf(),
+        io: &io,
+        env: &REAL_ENV,
+        fs: &REAL_FS,
+    };
+    let code = run_and_report_with_args_vec(
+        &ctx,
+        &[OsString::from("git-factor"), OsString::from("--version")],
+    );
+    assert_eq!(code, EXIT_OK);
+    assert!(
+        io.stdout().contains(env!("CARGO_PKG_VERSION")),
+        "version should be printed"
+    );
+    assert!(io.stderr().is_empty(), "version should not print to stderr");
+}
+
+#[test]
+fn run_with_args_maps_short_version_to_exit_ok() {
+    let dir = TempDir::new().or_abort("tempdir");
+    let io = TestIo::default();
+    let ctx = Ctx {
+        runner: &REAL_RUNNER,
+        cwd: dir.path().to_path_buf(),
+        io: &io,
+        env: &REAL_ENV,
+        fs: &REAL_FS,
+    };
+    let code =
+        run_and_report_with_args_vec(&ctx, &[OsString::from("git-factor"), OsString::from("-v")]);
+    assert_eq!(code, EXIT_OK);
+    assert!(
+        io.stdout().contains(env!("CARGO_PKG_VERSION")),
+        "version should be printed"
+    );
+    assert!(io.stderr().is_empty(), "version should not print to stderr");
+}
+
+#[test]
 fn run_with_args_invalid_flag_writes_to_stderr_and_returns_usage() {
     let dir = TempDir::new().or_abort("tempdir");
     let io = TestIo::default();
@@ -11807,6 +11851,8 @@ fn proptest_run_unit_suite_part_3() {
     run_with_args_finish_delegates_to_finish_handler();
     run_with_args_invalid_flag_writes_to_stderr_and_returns_usage();
     run_with_args_maps_help_to_exit_ok();
+    run_with_args_maps_short_version_to_exit_ok();
+    run_with_args_maps_version_to_exit_ok();
     run_with_args_rejects_abort_when_combined_with_commit();
     run_with_args_rejects_abort_when_combined_with_continue();
     run_with_args_rejects_abort_when_combined_with_exec();

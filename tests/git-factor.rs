@@ -487,6 +487,9 @@ Arguments:
           Accepts full or short SHAs, branch names, and git revision syntax. `<rev>` splits one commit. `<start> <end>` splits one inclusive span. `<start>..<end>` uses git's exclusive-start range semantics, and `<start>^..<end>` is the git-native inclusive form. Symmetric diff (`...`) is not supported.
 
 Options:
+  -v, --version
+          Print version information and exit
+
   -h, --help
           Print help (see a summary with '-h')
 
@@ -836,6 +839,24 @@ fi
         run_git_factor_no_repo(
             &["--help"],
             GitFactorExpectation::default().stdout(expected_help_stdout()),
+        );
+    }
+
+    #[test]
+    fn cli_version_flag_prints_version_to_stdout_and_exits_ok() {
+        run_git_factor_no_repo(
+            &["--version"],
+            GitFactorExpectation::default()
+                .stdout(format!("git-factor {}\n", env!("CARGO_PKG_VERSION"))),
+        );
+    }
+
+    #[test]
+    fn cli_short_version_flag_prints_version_to_stdout_and_exits_ok() {
+        run_git_factor_no_repo(
+            &["-v"],
+            GitFactorExpectation::default()
+                .stdout(format!("git-factor {}\n", env!("CARGO_PKG_VERSION"))),
         );
     }
 
@@ -4984,6 +5005,8 @@ fi
         for attempt in 1..=MAX_ATTEMPTS {
             let result = catch_unwind(AssertUnwindSafe(|| {
                 cli_help_flag_prints_help_to_stdout_and_exits_ok();
+                cli_short_version_flag_prints_version_to_stdout_and_exits_ok();
+                cli_version_flag_prints_version_to_stdout_and_exits_ok();
                 start_requires_exec_command();
                 start_requires_exec_command_when_only_message_is_provided();
                 start_defaults_to_head_when_commit_is_omitted();

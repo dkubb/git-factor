@@ -1,5 +1,5 @@
 use crate::non_empty_string::NonEmptyString;
-use clap::{Args, Parser};
+use clap::{ArgAction, Args, Parser};
 
 /// Session-control flags that query or abort state.
 #[derive(Args)]
@@ -45,8 +45,14 @@ struct SessionProgressFlags {
 
 /// Split one git commit or contiguous commit span into smaller atomic commits.
 #[derive(Parser)]
+#[expect(
+    clippy::arbitrary_source_item_ordering,
+    reason = "keep --version grouped with help in CLI output"
+)]
 #[command(
     bin_name = "git-factor",
+    version,
+    disable_version_flag = true,
     disable_help_subcommand = true,
     after_long_help = "\
 WORKFLOW:
@@ -102,6 +108,14 @@ pub(in crate::git_factor) struct Cli {
     /// (`...`) is not supported.
     #[arg(value_name = "COMMIT")]
     commits: Vec<NonEmptyString>,
+
+    /// Print version information and exit.
+    #[arg(
+        short = 'v',
+        long = "version",
+        action = ArgAction::Version
+    )]
+    version: Option<bool>,
 
     /// Shell command(s) to run as the deterministic validation gate.
     ///
