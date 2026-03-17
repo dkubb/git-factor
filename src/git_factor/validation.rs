@@ -1267,6 +1267,36 @@ mod tests {
     }
 
     #[test]
+    fn resolve_commit_span_rejects_unknown_start_ref_in_two_ref_span() {
+        let dir = TempDir::new().or_abort("tempdir");
+        let [_first, _second, third] = init_linear_repo(dir.path());
+        let ctx = ctx_for(dir.path());
+        let refs = NonEmpty {
+            head: NonEmptyString::try_from("deadbeef".to_owned()).or_abort("start"),
+            tail: vec![NonEmptyString::try_from(third).or_abort("end")],
+        };
+
+        let err = resolve_commit_span(&ctx, &refs).err_or_abort("unknown start ref should reject");
+        let message = invalid_commit_message(&err).or_abort("expected InvalidCommit");
+        assert_eq!(message, "deadbeef");
+    }
+
+    #[test]
+    fn resolve_commit_span_rejects_unknown_end_ref_in_two_ref_span() {
+        let dir = TempDir::new().or_abort("tempdir");
+        let [first, _second, _third] = init_linear_repo(dir.path());
+        let ctx = ctx_for(dir.path());
+        let refs = NonEmpty {
+            head: NonEmptyString::try_from(first).or_abort("start"),
+            tail: vec![NonEmptyString::try_from("deadbeef".to_owned()).or_abort("end")],
+        };
+
+        let err = resolve_commit_span(&ctx, &refs).err_or_abort("unknown end ref should reject");
+        let message = invalid_commit_message(&err).or_abort("expected InvalidCommit");
+        assert_eq!(message, "deadbeef");
+    }
+
+    #[test]
     fn resolve_commit_span_rejects_merge_commits() {
         let dir = TempDir::new().or_abort("tempdir");
         init_git_repo(dir.path());
@@ -2485,6 +2515,8 @@ mod tests {
         resolve_commit_refs_rejects_symmetric_diff_ranges();
         resolve_commit_refs_rejects_unknown_range_ref();
         resolve_commit_refs_rejects_unknown_single_ref();
+        resolve_commit_span_rejects_unknown_start_ref_in_two_ref_span();
+        resolve_commit_span_rejects_unknown_end_ref_in_two_ref_span();
         resolve_head_commit_maps_git_errors_to_invalid_head();
         root_runner_helpers_cover_unexpected_and_status_paths();
         sort_topologically_orders_commits_from_oldest_to_newest();

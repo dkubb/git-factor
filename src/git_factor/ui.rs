@@ -436,6 +436,35 @@ mod tests {
     }
 
     #[test]
+    fn print_hints_in_reports_diff_stat_failure() {
+        let dir = TempDir::new().or_abort("tempdir");
+        let runner = HintRunner {
+            diff_stat: String::new(),
+            untracked: String::new(),
+            toplevel: dir.path().to_path_buf(),
+            fail_on: Some(HintFailure::DiffStat),
+        };
+        let env = HintEnv {
+            cwd: dir.path().to_path_buf(),
+            claude_code: false,
+        };
+        let ctx = Ctx {
+            runner: &runner,
+            cwd: dir.path().to_path_buf(),
+            io: &REAL_IO,
+            env: &env,
+            fs: &REAL_FS,
+        };
+
+        let err = print_hints_in(&ctx).err_or_abort("diff stat failure should propagate");
+        let message = git_command_message(&err).or_abort("expected GitCommand");
+        assert!(
+            message.contains("forced diff failure"),
+            "unexpected error: {err:?}"
+        );
+    }
+
+    #[test]
     fn print_session_started_reports_single_commit_and_untracked_paths() {
         let dir = TempDir::new().or_abort("tempdir");
         let references_dir = dir.path().join("references");
@@ -783,6 +812,7 @@ mod tests {
         io_helpers_cover_buffer_and_error_extractor_paths();
         print_hints_in_includes_reference_and_claude_guidance();
         print_hints_in_omits_remaining_when_diff_stat_is_empty();
+        print_hints_in_reports_diff_stat_failure();
         print_hints_in_reports_io_failures_for_reference_and_claude_lines();
         print_session_started_reports_advance_guidance();
         print_session_started_reports_advance_guidance_output_failure();
