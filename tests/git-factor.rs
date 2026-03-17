@@ -430,7 +430,7 @@ UNSTAGED:
 NEXT: Stage changes for the first atomic commit, then run:
   git factor --continue --message \"type: description\"
 
-Run git factor --help for the full workflow guide.
+Run git factor -h for command help or git-factor --help for the full workflow guide.
 
 HINTS:
   - Find the ONE smallest addition nothing depends on
@@ -460,7 +460,7 @@ UNSTAGED:
 {after_unstaged}NEXT: Stage changes for the first atomic commit, then run:
   git factor --continue --message \"type: description\"
 
-Run git factor --help for the full workflow guide.
+Run git factor -h for command help or git-factor --help for the full workflow guide.
 
 HINTS:
   - Find the ONE smallest addition nothing depends on
@@ -2862,7 +2862,7 @@ UNSTAGED:
 NEXT: Stage changes for the first atomic commit, then run:
   git factor --continue --message \"type: description\"
 
-Run git factor --help for the full workflow guide.
+Run git factor -h for command help or git-factor --help for the full workflow guide.
 
 HINTS:
   - Find the ONE smallest addition nothing depends on
@@ -2911,7 +2911,7 @@ UNSTAGED:
 NEXT: Stage changes for the first atomic commit, then run:
   git factor --continue --message \"type: description\"
 
-Run git factor --help for the full workflow guide.
+Run git factor -h for command help or git-factor --help for the full workflow guide.
 
 HINTS:
   - Find the ONE smallest addition nothing depends on
@@ -3235,7 +3235,7 @@ UNTRACKED:
 NEXT: Stage changes for the first atomic commit, then run:
   git factor --continue --message \"type: description\"
 
-Run git factor --help for the full workflow guide.
+Run git factor -h for command help or git-factor --help for the full workflow guide.
 
 HINTS:
   - Find the ONE smallest addition nothing depends on

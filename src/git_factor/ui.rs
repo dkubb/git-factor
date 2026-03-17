@@ -128,7 +128,7 @@ pub(in crate::git_factor) fn print_session_started(
                 "NEXT: Stage changes for the first atomic commit, then run:",
                 "  git factor --continue --message \"type: description\"",
                 "",
-                "Run git factor --help for the full workflow guide.",
+                "Run git factor -h for command help or git-factor --help for the full workflow guide.",
                 "",
             ],
         )?;
@@ -519,7 +519,9 @@ mod tests {
         assert!(stdout.contains("UNTRACKED:"), "stdout: {stdout}");
         assert!(stdout.contains("new.txt"), "stdout: {stdout}");
         assert!(
-            stdout.contains("Run git factor --help for the full workflow guide."),
+            stdout.contains(
+                "Run git factor -h for command help or git-factor --help for the full workflow guide."
+            ),
             "stdout: {stdout}"
         );
     }
@@ -554,7 +556,9 @@ mod tests {
             "stdout: {stdout}"
         );
         assert!(
-            !stdout.contains("Run git factor --help for the full workflow guide."),
+            !stdout.contains(
+                "Run git factor -h for command help or git-factor --help for the full workflow guide."
+            ),
             "stdout: {stdout}"
         );
     }
@@ -790,7 +794,9 @@ mod tests {
         );
 
         let footer_io = FailOnExactTextIo {
-            text: "Run git factor --help for the full workflow guide.".to_owned(),
+            text:
+                "Run git factor -h for command help or git-factor --help for the full workflow guide."
+                    .to_owned(),
         };
         let footer_ctx = Ctx {
             runner: &io_runner,
