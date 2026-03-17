@@ -227,16 +227,6 @@ impl CurrentIndex {
         Ok(Self(value))
     }
 
-    /// Returns the next index, failing on overflow.
-    fn increment(self) -> Result<Self, FactorError> {
-        let Some(value) = self.0.checked_add(1) else {
-            return Err(FactorError::GitCommand(non_empty_msg(
-                "current_index overflow".to_owned(),
-            )));
-        };
-        Ok(Self(value))
-    }
-
     /// Reads `current_index` from persisted state.
     fn read(ctx: &Ctx<'_>, state_dir: &StateDir) -> Result<Self, FactorError> {
         read_state_parsed::<usize>(
@@ -290,9 +280,11 @@ impl SplitCount {
 }
 
 /// Full commit message (1–65,536 bytes).
+#[cfg(test)]
 #[derive(Debug)]
 struct CommitMessage(NonEmptyString);
 
+#[cfg(test)]
 impl CommitMessage {
     /// Maximum byte length for a commit message.
     const MAX_LEN: usize = 0x0001_0000;
@@ -303,6 +295,7 @@ impl CommitMessage {
     }
 }
 
+#[cfg(test)]
 impl TryFrom<String> for CommitMessage {
     type Error = FactorError;
 
@@ -335,19 +328,21 @@ impl TryFrom<String> for CommitMessage {
 }
 
 /// Abbreviated commit SHA from `rev-parse --short` (1–40 lowercase hex chars).
+#[cfg(test)]
+#[expect(
+    dead_code,
+    reason = "test-only wrapper is validated by constructors even when direct field reads are absent"
+)]
 #[derive(Debug)]
 struct ShortSha(NonEmptyString);
 
+#[cfg(test)]
 impl ShortSha {
     /// Maximum length of an abbreviated SHA (full SHA-1 hex).
     const MAX_LEN: usize = 40;
-
-    /// Returns the short SHA as a string slice.
-    const fn as_str(&self) -> &str {
-        self.0.as_str()
-    }
 }
 
+#[cfg(test)]
 impl TryFrom<String> for ShortSha {
     type Error = FactorError;
 
@@ -376,18 +371,9 @@ impl TryFrom<String> for ShortSha {
     }
 }
 
-/// Result of advancing past a fully-split commit.
+/// Result of completing a fully-split span.
 #[derive(Debug)]
 enum AdvanceOutcome {
-    /// Another commit is ready to split.
-    Advanced {
-        /// Full commit message of the next commit to split.
-        next_message: CommitMessage,
-        /// Abbreviated SHA of the next commit to split.
-        next_short_sha: ShortSha,
-        /// Number of split commits produced for the previous commit.
-        previous_split_count: NonZeroU8,
-    },
     /// Session is complete — no more commits to split.
     Completed {
         /// Number of split commits produced for the final commit.
@@ -431,88 +417,34 @@ struct RebaseExecBeginBootstrap {
 }
 
 impl<'ctx> Session<'ctx> {
-    /// Advances to the next commit in a multi-commit factor session.
-    ///
-    /// Called after completing all splits for the current commit. Continues the
-    /// rebase and checks if another edit stop was reached (next commit to split)
-    /// or if the rebase finished completely.
-    ///
-    /// Returns the outcome with data the caller needs to format output.
+    /// Completes the active factor span and advances rebase to the next non-factor step.
     fn advance_to_next_commit(&self) -> Result<AdvanceOutcome, FactorError> {
         let split_count = self.split_count()?;
         let requires_rebase = self.requires_rebase(StateBool::True)?;
 
         if requires_rebase.as_bool() {
-            let previous_split_count = match split_count.as_non_zero() {
-                Some(previous_split_count) => previous_split_count,
-                None => {
-                    return Err(FactorError::GitCommand(non_empty_msg(
-                        "split_count is zero at advance".to_owned(),
-                    )));
-                }
-            };
+            if split_count.as_non_zero().is_none() {
+                return Err(FactorError::GitCommand(non_empty_msg(
+                    "split_count is zero at advance".to_owned(),
+                )));
+            }
             if !is_mid_rebase_in(self.ctx) {
                 return Err(FactorError::GitCommand(non_empty_msg(
                     "no rebase in progress".to_owned(),
                 )));
             }
 
-            let current_index = self.current_index()?;
-            if current_index.as_usize() >= self.commits.len() {
-                return Err(FactorError::GitCommand(non_empty_msg(format!(
-                    "commit index {} out of range (have {} commits)",
-                    current_index.as_usize(),
-                    self.commits.len()
-                ))));
-            }
-            let next_index = if self.commits.len() <= 1 {
-                None
-            } else {
-                let advanced_index = current_index.increment()?;
-                (advanced_index.as_usize() < self.commits.len()).then_some(advanced_index)
-            };
-            if let Some(advanced_index) = next_index {
-                let next_index_text = advanced_index.as_usize().to_string();
-                let next_split_count_text = SplitCount::zero().as_u8().to_string();
-                write_state_pairs(
-                    self.ctx,
-                    &self.state_dir,
-                    &[
-                        (StateFileKey::CurrentIndex, next_index_text.as_str()),
-                        (StateFileKey::Phase, SessionPhase::PendingStart.as_str()),
-                        (StateFileKey::SplitCount, next_split_count_text.as_str()),
-                    ],
-                )?;
-            }
-
             if let Err(err) = run_git_non_interactive(self.ctx, &["rebase", "--continue"]) {
-                let recovery = if next_index.is_some() {
-                    "If the start gate failed, fix the current commit, stage the intended changes, amend the commit, run 'git rebase --continue', then run 'git factor --continue'."
-                } else {
-                    "Resolve the rebase issue, then rerun 'git rebase --continue'."
-                };
+                let recovery = "Resolve the rebase issue, then rerun 'git rebase --continue'.";
                 return Err(FactorError::GitCommand(non_empty_msg(format!(
                     "{err}\n\n{recovery}\nTo abandon the factor session, run 'git factor --abort'"
                 ))));
             }
 
             if is_mid_rebase_in(self.ctx) {
-                if next_index.is_none() {
-                    return Err(FactorError::GitCommand(non_empty_msg(
-                        "rebase remained active after the final target without another factor stop"
-                            .to_owned(),
-                    )));
-                }
-                let (next_short_sha_raw, next_message_raw) =
-                    enter_pending_split_session(self.ctx, self)?;
-                let next_message = CommitMessage::try_from(next_message_raw)?;
-                let next_short_sha = ShortSha::try_from(next_short_sha_raw)?;
-
-                return Ok(AdvanceOutcome::Advanced {
-                    next_message,
-                    next_short_sha,
-                    previous_split_count,
-                });
+                return Err(FactorError::GitCommand(non_empty_msg(
+                    "rebase remained active after span completion".to_owned(),
+                )));
             }
         }
 
@@ -1402,7 +1334,6 @@ fn print_remaining_pool_state(
         reason = "continue path is intentionally extracted from CLI dispatch"
     )
 )]
-#[expect(clippy::too_many_lines, reason = "non_empty_msg wrapping added lines")]
 fn cmd_continue_in(ctx: &Ctx<'_>, messages: &NonEmpty<NonEmptyString>) -> Result<i32, FactorError> {
     trace_note(ctx, "factor_cmd_continue", &[]);
     if !is_factor_active_in(ctx) {
@@ -1476,28 +1407,13 @@ fn cmd_continue_in(ctx: &Ctx<'_>, messages: &NonEmpty<NonEmptyString>) -> Result
     let head_tree = TreeHash::new(&git_output(ctx, &["rev-parse", "HEAD^{tree}"])?)?;
     let expected_tree = session.expected_tree()?;
     if trace_tree_convergence(ctx, "tree_compare_continue", &head_tree, &expected_tree) {
-        return match session.advance_to_next_commit()? {
-            AdvanceOutcome::Advanced {
-                next_message,
-                next_short_sha,
-                previous_split_count,
-            } => {
-                ctx.outln(&format!(
-                    "FACTOR: Previous commit split into {} commits.",
-                    previous_split_count.get()
-                ))?;
-                let started = split_started_line(next_short_sha.as_str(), None);
-                print_session_started(ctx, &started, next_message.as_str()).map(|()| EXIT_OK)
-            }
-            AdvanceOutcome::Completed {
-                final_split_count, ..
-            } => ctx
-                .outln(&format!(
-                    "FACTOR: Complete. Final commit split into {} commits.",
-                    final_split_count.get()
-                ))
-                .map(|()| EXIT_OK),
-        };
+        let AdvanceOutcome::Completed { final_split_count } = session.advance_to_next_commit()?;
+        return ctx
+            .outln(&format!(
+                "FACTOR: Complete. Final commit split into {} commits.",
+                final_split_count.get()
+            ))
+            .map(|()| EXIT_OK);
     }
 
     let (stat_output, untracked_output) =
@@ -1735,30 +1651,13 @@ fn cmd_finish_in(ctx: &Ctx<'_>, messages: &[NonEmptyString]) -> Result<i32, Fact
         has_staged.success(),
     )?;
 
-    // Update split count and advance to next commit or finish.
+    // Update split count and complete the factor span.
     session.increment_split_count()?;
-    match session.advance_to_next_commit()? {
-        AdvanceOutcome::Advanced {
-            next_message,
-            next_short_sha,
-            previous_split_count,
-        } => {
-            ctx.outln(&format!(
-                "FACTOR: Previous commit split into {} commits.",
-                previous_split_count.get()
-            ))?;
-            let started = split_started_line(next_short_sha.as_str(), None);
-            print_session_started(ctx, &started, next_message.as_str())?;
-        }
-        AdvanceOutcome::Completed {
-            final_split_count, ..
-        } => {
-            ctx.outln(&format!(
-                "FACTOR: Complete. Final commit split into {} commits.",
-                final_split_count.get()
-            ))?;
-        }
-    }
+    let AdvanceOutcome::Completed { final_split_count } = session.advance_to_next_commit()?;
+    ctx.outln(&format!(
+        "FACTOR: Complete. Final commit split into {} commits.",
+        final_split_count.get()
+    ))?;
 
     Ok(EXIT_OK)
 }
@@ -3180,21 +3079,9 @@ mod proptests {
         assert!(!failure_status().success());
     }
 
-    fn advanced_parts(outcome: AdvanceOutcome) -> Option<(CommitMessage, ShortSha, NonZeroU8)> {
-        match outcome {
-            AdvanceOutcome::Advanced {
-                next_message,
-                next_short_sha,
-                previous_split_count,
-            } => Some((next_message, next_short_sha, previous_split_count)),
-            AdvanceOutcome::Completed { .. } => None,
-        }
-    }
-
-    fn completed_split_count(outcome: &AdvanceOutcome) -> Option<NonZeroU8> {
+    fn completed_split_count(outcome: &AdvanceOutcome) -> NonZeroU8 {
         match *outcome {
-            AdvanceOutcome::Completed { final_split_count } => Some(final_split_count),
-            AdvanceOutcome::Advanced { .. } => None,
+            AdvanceOutcome::Completed { final_split_count } => final_split_count,
         }
     }
 
@@ -3274,17 +3161,6 @@ mod proptests {
 
         let empty_err = ShortSha::try_from(String::new()).err_or_abort("empty short sha");
         assert_eq!(empty_err.to_string(), "git command failed: empty short SHA");
-    }
-
-    #[test]
-    fn advance_to_next_commit_reports_current_index_overflow() {
-        let err = CurrentIndex(usize::MAX)
-            .increment()
-            .err_or_abort("usize::MAX current_index should overflow");
-        assert_eq!(
-            err.to_string(),
-            "git command failed: current_index overflow"
-        );
     }
 
     #[test]
@@ -3504,7 +3380,7 @@ mod proptests {
     }
 
     #[test]
-    fn advance_to_next_commit_returns_next_commit_metadata_on_advance() {
+    fn advance_to_next_commit_errors_when_rebase_remains_active_after_span_completion() {
         let dir = TempDir::new().or_abort("tempdir");
         let repo = dir.path();
         let rebase_dir = repo.join(".git").join("rebase-merge");
@@ -3559,162 +3435,18 @@ mod proptests {
             runner,
         };
 
-        let outcome = Session::with_state(
+        let err = Session::with_state(
             &ctx,
             StateDir::new(state_dir.clone()),
             vec![first_commit, second_commit],
         )
         .advance_to_next_commit()
-        .or_abort("advance should succeed");
-
-        let (next_message, next_short_sha, previous_split_count) =
-            advanced_parts(outcome).or_abort("expected Advanced outcome");
-        assert_eq!(next_message.as_str(), "next message");
-        assert_eq!(next_short_sha.as_str(), "bbbbbbb");
-        assert_eq!(previous_split_count.get(), 1);
-        assert_eq!(
-            fs::read_to_string(state_dir.join("current_index")).or_abort("read current_index"),
-            "1\n"
-        );
-        assert_eq!(
-            fs::read_to_string(state_dir.join("split_count")).or_abort("read split_count"),
-            "0\n"
-        );
-    }
-
-    #[test]
-    fn advance_to_next_commit_rejects_invalid_next_message_after_reset() {
-        let dir = TempDir::new().or_abort("tempdir");
-        let repo = dir.path();
-        let rebase_dir = repo.join(".git").join("rebase-merge");
-        let state_dir = repo.join(".git").join("factor");
-        fs::create_dir_all(&rebase_dir).or_abort("create rebase dir");
-        fs::create_dir_all(&state_dir).or_abort("create factor dir");
-
-        let first_commit = CommitSha::new("a".repeat(COMMIT_SHA_HEX_LEN)).or_abort("first sha");
-        let second_commit = CommitSha::new("b".repeat(COMMIT_SHA_HEX_LEN)).or_abort("second sha");
-        fs::write(state_dir.join("split_count"), "1\n").or_abort("write split_count");
-        fs::write(state_dir.join("requires_rebase"), "true\n").or_abort("write requires_rebase");
-        fs::write(state_dir.join("current_index"), "0\n").or_abort("write current_index");
-
-        let io = Box::leak(Box::new(TestIo::default()));
-        let env = Box::leak(Box::new(TestEnv));
-        let fs = &REAL_FS;
-        let runner = Box::leak(Box::new(ScriptedRunner::new(
-            vec![
-                Ok(Output {
-                    status: success_status(),
-                    stdout: b".git\n".to_vec(),
-                    stderr: Vec::new(),
-                }),
-                Ok(Output {
-                    status: success_status(),
-                    stdout: b".git\n".to_vec(),
-                    stderr: Vec::new(),
-                }),
-                Ok(Output {
-                    status: success_status(),
-                    stdout: Vec::new(),
-                    stderr: Vec::new(),
-                }),
-                Ok(Output {
-                    status: success_status(),
-                    stdout: Vec::new(),
-                    stderr: Vec::new(),
-                }),
-                Ok(Output {
-                    status: success_status(),
-                    stdout: b"bbbbbbb\n".to_vec(),
-                    stderr: Vec::new(),
-                }),
-            ],
-            vec![Ok(success_status()), Ok(success_status())],
-        )));
-        let ctx = Ctx {
-            cwd: repo.to_path_buf(),
-            env,
-            fs,
-            io,
-            runner,
-        };
-
-        let err = Session::with_state(
-            &ctx,
-            StateDir::new(state_dir),
-            vec![first_commit, second_commit],
-        )
-        .advance_to_next_commit()
-        .err_or_abort("empty next commit message should fail");
-        assert_eq!(err.to_string(), "git command failed: empty commit message");
-    }
-
-    #[test]
-    fn advance_to_next_commit_rejects_invalid_next_short_sha_after_reset() {
-        let dir = TempDir::new().or_abort("tempdir");
-        let repo = dir.path();
-        let rebase_dir = repo.join(".git").join("rebase-merge");
-        let state_dir = repo.join(".git").join("factor");
-        fs::create_dir_all(&rebase_dir).or_abort("create rebase dir");
-        fs::create_dir_all(&state_dir).or_abort("create factor dir");
-
-        let first_commit = CommitSha::new("a".repeat(COMMIT_SHA_HEX_LEN)).or_abort("first sha");
-        let second_commit = CommitSha::new("b".repeat(COMMIT_SHA_HEX_LEN)).or_abort("second sha");
-        fs::write(state_dir.join("split_count"), "1\n").or_abort("write split_count");
-        fs::write(state_dir.join("requires_rebase"), "true\n").or_abort("write requires_rebase");
-        fs::write(state_dir.join("current_index"), "0\n").or_abort("write current_index");
-
-        let io = Box::leak(Box::new(TestIo::default()));
-        let env = Box::leak(Box::new(TestEnv));
-        let fs = &REAL_FS;
-        let runner = Box::leak(Box::new(ScriptedRunner::new(
-            vec![
-                Ok(Output {
-                    status: success_status(),
-                    stdout: b".git\n".to_vec(),
-                    stderr: Vec::new(),
-                }),
-                Ok(Output {
-                    status: success_status(),
-                    stdout: b".git\n".to_vec(),
-                    stderr: Vec::new(),
-                }),
-                Ok(Output {
-                    status: success_status(),
-                    stdout: Vec::new(),
-                    stderr: Vec::new(),
-                }),
-                Ok(Output {
-                    status: success_status(),
-                    stdout: b"next message\n".to_vec(),
-                    stderr: Vec::new(),
-                }),
-                Ok(Output {
-                    status: success_status(),
-                    stdout: b"not-hex!\n".to_vec(),
-                    stderr: Vec::new(),
-                }),
-            ],
-            vec![Ok(success_status()), Ok(success_status())],
-        )));
-        let ctx = Ctx {
-            cwd: repo.to_path_buf(),
-            env,
-            fs,
-            io,
-            runner,
-        };
-
-        let err = Session::with_state(
-            &ctx,
-            StateDir::new(state_dir),
-            vec![first_commit, second_commit],
-        )
-        .advance_to_next_commit()
-        .err_or_abort("invalid next short sha should fail");
+        .err_or_abort("mid-rebase span completion should fail closed");
         assert_eq!(
             err.to_string(),
-            "git command failed: short SHA contains non-hex characters: not-hex!"
+            "git command failed: rebase remained active after span completion"
         );
+        assert!(state_dir.exists(), "state dir should be preserved on error");
     }
 
     #[test]
@@ -4095,8 +3827,7 @@ mod proptests {
             .advance_to_next_commit()
             .or_abort("root cleanup should complete when root has tree entries");
 
-        let final_split_count =
-            completed_split_count(&outcome).or_abort("expected Completed outcome");
+        let final_split_count = completed_split_count(&outcome);
         assert_eq!(final_split_count.get(), 1);
         assert!(!state_dir.exists(), "state dir should be removed");
         let _ignored = fs::remove_dir_all(&state_dir);
@@ -4132,42 +3863,10 @@ mod proptests {
             .advance_to_next_commit()
             .or_abort("non-root completion should succeed without root cleanup");
 
-        let final_split_count =
-            completed_split_count(&outcome).or_abort("expected Completed outcome");
+        let final_split_count = completed_split_count(&outcome);
         assert_eq!(final_split_count.get(), 1);
         assert!(!state_dir.exists(), "state dir should be removed");
         let _ignored = fs::remove_dir_all(&state_dir);
-    }
-
-    #[test]
-    fn advance_outcome_extractors_panic_on_wrong_variant() {
-        use std::panic::catch_unwind;
-
-        let advanced_panic = catch_unwind(|| {
-            let _ignored = advanced_parts(AdvanceOutcome::Completed {
-                final_split_count: NonZeroU8::new(1).or_abort("non-zero split count"),
-            })
-            .or_abort("expected Advanced outcome");
-        });
-        assert!(
-            advanced_panic.is_err(),
-            "expected Advanced extractor to panic"
-        );
-
-        let completed_panic = catch_unwind(|| {
-            let outcome = AdvanceOutcome::Advanced {
-                next_message: CommitMessage::try_from("next message".to_owned())
-                    .or_abort("valid message"),
-                next_short_sha: ShortSha::try_from("bbbbbbb".to_owned())
-                    .or_abort("valid short sha"),
-                previous_split_count: NonZeroU8::new(1).or_abort("non-zero split count"),
-            };
-            let _ignored = completed_split_count(&outcome).or_abort("expected Completed outcome");
-        });
-        assert!(
-            completed_panic.is_err(),
-            "expected Completed extractor to panic"
-        );
     }
 
     #[test]
@@ -4384,14 +4083,10 @@ mod proptests {
     fn proptest_run_non_property_unit_suite() {
         advance_to_next_commit_reports_zero_split_count_on_advance();
         advance_to_next_commit_reports_zero_split_count_on_completion();
-        advance_to_next_commit_returns_next_commit_metadata_on_advance();
-        advance_to_next_commit_rejects_invalid_next_message_after_reset();
-        advance_to_next_commit_rejects_invalid_next_short_sha_after_reset();
+        advance_to_next_commit_errors_when_rebase_remains_active_after_span_completion();
         advance_to_next_commit_completes_root_cleanup_when_root_is_non_empty();
         advance_to_next_commit_completes_without_root_cleanup_when_not_root();
         advance_to_next_commit_enters_empty_root_cleanup_for_root_sessions();
-        advance_outcome_extractors_panic_on_wrong_variant();
-        advance_to_next_commit_reports_current_index_overflow();
         cmd_abort_propagates_current_commit_error_when_start_head_is_missing();
         cmd_abort_uses_current_commit_when_start_head_is_missing();
         cmd_start_in_propagates_invalid_range_error_after_prep();

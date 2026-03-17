@@ -550,7 +550,7 @@ pub(in crate::git_sequence_editor) fn build_requested_actions(
     Ok(out)
 }
 
-/// Builds factor-session insertions keyed by the todo SHA to modify.
+/// Builds the optional factor-session insertion for one targeted todo SHA.
 #[cfg_attr(
     not(test),
     expect(
@@ -558,65 +558,36 @@ pub(in crate::git_sequence_editor) fn build_requested_actions(
         reason = "factor insertion validation stays centralized in one rewrite pre-pass"
     )
 )]
-pub(in crate::git_sequence_editor) fn build_factor_insertions(
+pub(in crate::git_sequence_editor) fn build_factor_insertion(
     cli: &Cli,
     todo_shas: &BTreeSet<TodoSha>,
-) -> Result<BTreeMap<TodoSha, FactorInsertion>, TodoError> {
-    let has_factor_args = !cli.factor_target().is_empty()
-        || !cli.factor_preflight().is_empty()
-        || !cli.factor_begin().is_empty();
-    if !has_factor_args {
-        return Ok(BTreeMap::new());
-    }
-    if cli.factor_target().is_empty()
-        || cli.factor_preflight().is_empty()
-        || cli.factor_begin().is_empty()
-    {
-        return Err(TodoError::InvalidFactorArguments {
-            message: "factor-target, factor-preflight, and factor-begin must all be provided"
-                .to_owned(),
-        });
-    }
-    let expected_len = cli.factor_target().len();
-    if cli.factor_preflight().len() != expected_len || cli.factor_begin().len() != expected_len {
-        return Err(TodoError::InvalidFactorArguments {
-            message: "factor-target, factor-preflight, and factor-begin counts must match"
-                .to_owned(),
-        });
-    }
-    match validate_no_duplicates(RequestedActionKind::Edit, cli.factor_target()) {
-        Ok(()) => {}
-        Err(error) => return Err(error),
-    }
-
-    let mut out = BTreeMap::<TodoSha, FactorInsertion>::new();
-    for ((target, preflight), begin) in cli
-        .factor_target()
-        .iter()
-        .zip(cli.factor_preflight())
-        .zip(cli.factor_begin())
-    {
-        let resolved = match resolve_requested_sha(target.as_str(), todo_shas) {
-            Ok(resolved) => resolved,
-            Err(err) => return Err(err),
-        };
-        if out
-            .insert(
-                resolved.clone(),
-                FactorInsertion {
-                    begin_command: begin.clone(),
-                    preflight_command: preflight.clone(),
-                },
-            )
-            .is_some()
-        {
-            return Err(TodoError::DuplicateRequestedSha {
-                sha: resolved.as_str().to_owned(),
+) -> Result<Option<(TodoSha, FactorInsertion)>, TodoError> {
+    let (target, preflight, begin) = match (
+        cli.factor_target(),
+        cli.factor_preflight(),
+        cli.factor_begin(),
+    ) {
+        (None, None, None) => return Ok(None),
+        (Some(target), Some(preflight), Some(begin)) => (target, preflight, begin),
+        _ => {
+            return Err(TodoError::InvalidFactorArguments {
+                message: "factor-target, factor-preflight, and factor-begin must all be provided"
+                    .to_owned(),
             });
         }
-    }
+    };
+    let resolved = match resolve_requested_sha(target.as_str(), todo_shas) {
+        Ok(resolved) => resolved,
+        Err(err) => return Err(err),
+    };
 
-    Ok(out)
+    Ok(Some((
+        resolved,
+        FactorInsertion {
+            begin_command: begin.clone(),
+            preflight_command: preflight.clone(),
+        },
+    )))
 }
 
 /// Rewrites todo content and returns structured rewrite output.
@@ -625,7 +596,7 @@ pub(in crate::git_sequence_editor) fn rewrite_todo(
     content: &str,
     requested: &BTreeMap<TodoSha, Action>,
 ) -> RewriteTodoResult {
-    rewrite_todo_with_factor(content, requested, &BTreeMap::new())
+    rewrite_todo_with_factor(content, requested, None)
 }
 
 /// Rewrites todo content and returns structured rewrite output.
@@ -639,7 +610,7 @@ pub(in crate::git_sequence_editor) fn rewrite_todo(
 pub(in crate::git_sequence_editor) fn rewrite_todo_with_factor(
     content: &str,
     requested: &BTreeMap<TodoSha, Action>,
-    factor_insertions: &BTreeMap<TodoSha, FactorInsertion>,
+    factor_insertion: Option<&(TodoSha, FactorInsertion)>,
 ) -> RewriteTodoResult {
     let mut warnings = Vec::<String>::new();
     let mut output = String::with_capacity(content.len());
@@ -652,7 +623,11 @@ pub(in crate::git_sequence_editor) fn rewrite_todo_with_factor(
         };
 
         let requested_action = requested.get(sha);
-        let factor_insertion_for_sha = factor_insertions.get(sha);
+        let factor_insertion_for_sha = factor_insertion.and_then(|pair| {
+            let target_sha = &pair.0;
+            let insertion = &pair.1;
+            (target_sha.as_str() == sha).then_some(insertion)
+        });
 
         let Some(requested_action_for_sha) = requested_action else {
             output.push_str(line);
@@ -1017,63 +992,55 @@ pick ccccccc third\n\
     }
 
     #[test]
-    fn build_factor_insertions_rejects_duplicate_factor_targets() {
+    fn build_factor_insertion_rejects_incomplete_factor_args() {
         let todo_shas = BTreeSet::from([TodoSha::new("aaaaaaa").or_abort("")]);
         let cli = Cli::for_tests_with_factor(
-            vec![
-                NonEmptyString::try_from("echo begin 1".to_owned()).or_abort(""),
-                NonEmptyString::try_from("echo begin 2".to_owned()).or_abort(""),
-            ],
-            vec![
-                NonEmptyString::try_from("echo preflight 1".to_owned()).or_abort(""),
-                NonEmptyString::try_from("echo preflight 2".to_owned()).or_abort(""),
-            ],
-            vec![todo_sha("aaaaaaa"), todo_sha("aaaaaaa")],
+            Some(NonEmptyString::try_from("echo begin".to_owned()).or_abort("")),
+            None,
+            Some(todo_sha("aaaaaaa")),
             vec![],
             vec![],
             Path::new("todo").to_path_buf(),
             vec![],
         );
 
-        let err = build_factor_insertions(&cli, &todo_shas).err_or_abort("");
+        let err = build_factor_insertion(&cli, &todo_shas).err_or_abort("");
 
-        assert_eq!(err.to_string(), "duplicate edit sha: aaaaaaa");
+        assert_eq!(
+            err.to_string(),
+            "invalid factor arguments: factor-target, factor-preflight, and factor-begin must all be provided"
+        );
     }
 
     #[test]
-    fn build_factor_insertions_rejects_targets_that_resolve_to_the_same_todo_sha() {
+    fn build_factor_insertion_resolves_full_target_sha() {
         let full = head_commit_sha();
         let short = full.get(..12).or_abort("");
         let todo_shas = BTreeSet::from([TodoSha::new(short).or_abort("")]);
         let cli = Cli::for_tests_with_factor(
-            vec![
-                NonEmptyString::try_from("echo begin 1".to_owned()).or_abort(""),
-                NonEmptyString::try_from("echo begin 2".to_owned()).or_abort(""),
-            ],
-            vec![
-                NonEmptyString::try_from("echo preflight 1".to_owned()).or_abort(""),
-                NonEmptyString::try_from("echo preflight 2".to_owned()).or_abort(""),
-            ],
-            vec![todo_sha(full.as_str()), todo_sha(short)],
+            Some(NonEmptyString::try_from("echo begin".to_owned()).or_abort("")),
+            Some(NonEmptyString::try_from("echo preflight".to_owned()).or_abort("")),
+            Some(todo_sha(full.as_str())),
             vec![],
             vec![],
             Path::new("todo").to_path_buf(),
             vec![],
         );
 
-        let err = build_factor_insertions(&cli, &todo_shas).err_or_abort("");
+        let (resolved, insertion) = build_factor_insertion(&cli, &todo_shas)
+            .or_abort("")
+            .or_abort("");
 
-        assert_eq!(
-            err.to_string(),
-            format!("sha specified multiple times: {short}")
-        );
+        assert_eq!(resolved.as_str(), short);
+        assert_eq!(insertion.begin_command().as_str(), "echo begin");
+        assert_eq!(insertion.preflight_command().as_str(), "echo preflight");
     }
 
     #[test]
     fn proptest_run_coverage_extra_suite() {
         action_as_str_supports_drop();
-        build_factor_insertions_rejects_duplicate_factor_targets();
-        build_factor_insertions_rejects_targets_that_resolve_to_the_same_todo_sha();
+        build_factor_insertion_rejects_incomplete_factor_args();
+        build_factor_insertion_resolves_full_target_sha();
         build_requested_actions_propagates_drop_resolution_error();
         build_requested_actions_propagates_edit_resolution_error();
         build_requested_actions_propagates_pick_resolution_error();

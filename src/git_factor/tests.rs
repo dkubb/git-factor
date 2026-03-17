@@ -203,6 +203,10 @@ struct NthReadFailureFs {
 }
 
 impl NthReadFailureFs {
+    #[expect(
+        clippy::single_call_fn,
+        reason = "test constructor keeps read-failure setup concise at the one current callsite"
+    )]
     fn new(file_name: &'static str, fail_at: usize, message: &'static str) -> Self {
         Self {
             file_name,
@@ -1102,115 +1106,6 @@ fn continue_runner_with_remaining_output(
         .with_status("git", &["cherry-pick", "--quit"], &[], false, repo, 0)
         .with_status("git", &["read-tree", TREE_EXPECTED], &[], false, repo, 0)
         .with_status("git", &["read-tree", TREE_REHYDRATE], &[], false, repo, 0)
-}
-
-#[expect(
-    clippy::too_many_lines,
-    reason = "shared finish-to-next-step runner encodes the full scripted transcript in one helper"
-)]
-fn finish_advance_runner(repo: &Path, original: &str, next: &str) -> ScriptedRunner {
-    with_git_dir_outputs(ScriptedRunner::default(), repo, 6)
-        .with_status(
-            "git",
-            &["checkout", "--quiet", "--", "."],
-            &[],
-            false,
-            repo,
-            0,
-        )
-        .with_status(
-            "git",
-            &["clean", "--force", "--quiet", "-d"],
-            &[],
-            false,
-            repo,
-            0,
-        )
-        .with_status(
-            "git",
-            &[
-                "restore",
-                "--source",
-                original,
-                "--staged",
-                "--worktree",
-                "--",
-                ".",
-            ],
-            &[],
-            false,
-            repo,
-            0,
-        )
-        .with_output("git", &["write-tree"], repo, TREE_EXPECTED_NL)
-        .with_status("git", &["diff", "--quiet", "--staged"], &[], false, repo, 1)
-        .with_output(
-            "git",
-            &[
-                "show",
-                "--format=%an%x00%ae%x00%aI%x00%cn%x00%ce%x00%cI",
-                "--no-patch",
-                original,
-            ],
-            repo,
-            TEST_COMMIT_META,
-        )
-        .with_status(
-            "git",
-            &["commit", "--quiet", "--message", "test: message"],
-            &TEST_COMMIT_ENVS,
-            false,
-            repo,
-            0,
-        )
-        .with_status(
-            "git",
-            &["rebase", "--continue"],
-            &[("GIT_EDITOR", "false"), ("GIT_SEQUENCE_EDITOR", "false")],
-            false,
-            repo,
-            0,
-        )
-        .with_output("git", &["status", "--porcelain=v1"], repo, "")
-        .with_status(
-            "git",
-            &["reset", "--quiet", &format!("{original}^")],
-            &[],
-            false,
-            repo,
-            0,
-        )
-        .with_output(
-            "git",
-            &["show", "--format=%B", "--no-patch", next],
-            repo,
-            "next subject\n",
-        )
-        .with_output("git", &["rev-parse", "--short", next], repo, "bbbbbbb\n")
-        .with_output(
-            "git",
-            &["diff", "--stat"],
-            repo,
-            "file.txt | 1 +\n1 file changed, 1 insertion(+)\n",
-        )
-        .with_output(
-            "git",
-            &["diff", "--stat"],
-            repo,
-            "file.txt | 1 +\n1 file changed, 1 insertion(+)\n",
-        )
-        .with_output(
-            "git",
-            &["ls-files", "--others", "--exclude-standard"],
-            repo,
-            "",
-        )
-        .with_output(
-            "git",
-            &["rev-parse", "--show-toplevel"],
-            repo,
-            &format!("{}\n", repo.display()),
-        )
 }
 
 #[expect(
@@ -3488,194 +3383,6 @@ fn cmd_status_reports_active_session_fields() {
 }
 
 #[test]
-fn advance_to_next_commit_prints_untracked_changes_when_present() {
-    let dir = TempDir::new().or_abort("tempdir");
-    let repo = dir.path();
-    let git_dir = repo.join(".git");
-    fs::create_dir_all(git_dir.join("rebase-merge")).or_abort("create rebase-merge");
-
-    let state_dir = git_dir.join("factor");
-    fs::create_dir_all(&state_dir).or_abort("create factor dir");
-    fs::write(
-        state_dir.join("commits"),
-        format!("{}\n{}\n", "a".repeat(SHA_LEN), "b".repeat(SHA_LEN)),
-    )
-    .or_abort("write commits");
-    fs::write(state_dir.join("current_index"), "0\n").or_abort("write current_index");
-    fs::write(state_dir.join("split_count"), "3\n").or_abort("write split_count");
-
-    let runner = ScriptedRunner::default()
-        .with_output("git", &["rev-parse", "--git-dir"], repo, ".git\n")
-        .with_status(
-            "git",
-            &["rebase", "--continue"],
-            &[("GIT_EDITOR", "false"), ("GIT_SEQUENCE_EDITOR", "false")],
-            false,
-            repo,
-            0,
-        )
-        .with_output("git", &["status", "--porcelain=v1"], repo, "")
-        .with_status(
-            "git",
-            &["reset", "--quiet", &format!("{}^", "a".repeat(SHA_LEN))],
-            &[],
-            false,
-            repo,
-            0,
-        )
-        .with_output("git", &["rev-parse", "--git-dir"], repo, ".git\n")
-        .with_output(
-            "git",
-            &["show", "--format=%B", "--no-patch", &"b".repeat(SHA_LEN)],
-            repo,
-            "original message\n",
-        )
-        .with_output(
-            "git",
-            &["diff", "--stat"],
-            repo,
-            "file.txt | 1 +\n1 file changed, 1 insertion(+)\n",
-        )
-        .with_output(
-            "git",
-            &["ls-files", "--others", "--exclude-standard"],
-            repo,
-            "newfile.txt\n",
-        )
-        .with_output(
-            "git",
-            &["rev-parse", "--short", &"b".repeat(SHA_LEN)],
-            repo,
-            "bbbbbbb\n",
-        )
-        .with_output(
-            "git",
-            &["rev-parse", "--show-toplevel"],
-            repo,
-            repo.to_string_lossy().as_ref(),
-        );
-
-    let io = TestIo::default();
-    let env = TestEnv {
-        cwd: repo.to_path_buf(),
-    };
-    let ctx = Ctx {
-        runner: &runner,
-        cwd: repo.to_path_buf(),
-        io: &io,
-        env: &env,
-        fs: &REAL_FS,
-    };
-
-    let commits = vec![
-        CommitSha::new("a".repeat(SHA_LEN)).or_abort("sha"),
-        CommitSha::new("b".repeat(SHA_LEN)).or_abort("sha"),
-    ];
-    let outcome = Session::with_state(&ctx, StateDir::new(state_dir), commits)
-        .advance_to_next_commit()
-        .or_abort("advance ok");
-
-    assert!(
-        matches!(&outcome, AdvanceOutcome::Advanced { .. }),
-        "expected Advanced, got Completed"
-    );
-    if let AdvanceOutcome::Advanced {
-        next_message,
-        next_short_sha,
-        previous_split_count,
-    } = outcome
-    {
-        assert_eq!(previous_split_count.get(), 3);
-        assert_eq!(next_short_sha.as_str(), "bbbbbbb");
-        assert_eq!(next_message.as_str(), "original message");
-    }
-    assert!(io.stdout().is_empty(), "advance should produce no output");
-    assert_eq!(io.stderr(), "");
-}
-
-#[test]
-fn advance_to_next_commit_propagates_io_error_when_outln_fails_mid_rebase() {
-    let dir = TempDir::new().or_abort("tempdir");
-    let repo = dir.path();
-    let git_dir = repo.join(".git");
-    fs::create_dir_all(git_dir.join("rebase-merge")).or_abort("create rebase-merge");
-
-    let state_dir = git_dir.join("factor");
-    fs::create_dir_all(&state_dir).or_abort("create factor dir");
-    fs::write(
-        state_dir.join("commits"),
-        format!("{}\n{}\n", "a".repeat(SHA_LEN), "b".repeat(SHA_LEN)),
-    )
-    .or_abort("write commits");
-    fs::write(state_dir.join("current_index"), "0\n").or_abort("write current_index");
-    fs::write(state_dir.join("split_count"), "3\n").or_abort("write split_count");
-
-    let runner = ScriptedRunner::default()
-        .with_output("git", &["rev-parse", "--git-dir"], repo, ".git\n")
-        .with_status(
-            "git",
-            &["rebase", "--continue"],
-            &[("GIT_EDITOR", "false"), ("GIT_SEQUENCE_EDITOR", "false")],
-            false,
-            repo,
-            0,
-        )
-        .with_output("git", &["status", "--porcelain=v1"], repo, "")
-        .with_status(
-            "git",
-            &["reset", "--quiet", &format!("{}^", "a".repeat(SHA_LEN))],
-            &[],
-            false,
-            repo,
-            0,
-        )
-        .with_output("git", &["rev-parse", "--git-dir"], repo, ".git\n")
-        .with_output(
-            "git",
-            &["show", "--format=%B", "--no-patch", &"b".repeat(SHA_LEN)],
-            repo,
-            "original message\n",
-        )
-        .with_output("git", &["diff", "--stat"], repo, "")
-        .with_output(
-            "git",
-            &["ls-files", "--others", "--exclude-standard"],
-            repo,
-            "",
-        )
-        .with_output(
-            "git",
-            &["rev-parse", "--short", &"b".repeat(SHA_LEN)],
-            repo,
-            "bbbbbbb\n",
-        );
-
-    let io = FailingIo;
-    let env = TestEnv {
-        cwd: repo.to_path_buf(),
-    };
-    let ctx = Ctx {
-        runner: &runner,
-        cwd: repo.to_path_buf(),
-        io: &io,
-        env: &env,
-        fs: &REAL_FS,
-    };
-
-    let commits = vec![
-        CommitSha::new("a".repeat(SHA_LEN)).or_abort("sha"),
-        CommitSha::new("b".repeat(SHA_LEN)).or_abort("sha"),
-    ];
-    let outcome = Session::with_state(&ctx, StateDir::new(state_dir), commits)
-        .advance_to_next_commit()
-        .or_abort("advance should succeed without IO");
-    assert!(
-        matches!(outcome, AdvanceOutcome::Advanced { .. }),
-        "expected Advanced outcome"
-    );
-}
-
-#[test]
 fn advance_to_next_commit_propagates_io_error_when_outln_fails_after_rebase_finishes() {
     let dir = TempDir::new().or_abort("tempdir");
     let repo = dir.path();
@@ -3708,31 +3415,24 @@ fn advance_to_next_commit_propagates_io_error_when_outln_fails_after_rebase_fini
         matches!(&outcome, AdvanceOutcome::Completed { .. }),
         "expected Completed"
     );
-    if let AdvanceOutcome::Completed { final_split_count } = outcome {
-        assert_eq!(final_split_count.get(), 3);
-    }
+    let AdvanceOutcome::Completed { final_split_count } = outcome;
+    assert_eq!(final_split_count.get(), 3);
 }
 
 #[test]
-fn advance_to_next_commit_errors_on_out_of_range_current_index() {
+fn advance_to_next_commit_ignores_current_index_after_span_completion() {
     let dir = TempDir::new().or_abort("tempdir");
     let repo = dir.path();
     let git_dir = repo.join(".git");
-    fs::create_dir_all(git_dir.join("rebase-merge")).or_abort("create rebase-merge");
 
     let state_dir = git_dir.join("factor");
     fs::create_dir_all(&state_dir).or_abort("create factor dir");
-    fs::write(
-        state_dir.join("commits"),
-        format!("{}\n{}\n", "a".repeat(SHA_LEN), "b".repeat(SHA_LEN)),
-    )
-    .or_abort("write commits");
     fs::write(state_dir.join("split_count"), "1\n").or_abort("write split_count");
+    fs::write(state_dir.join("requires_rebase"), "false\n").or_abort("write requires_rebase");
     fs::write(state_dir.join("current_index"), format!("{}\n", usize::MAX))
         .or_abort("write current_index");
 
-    let runner =
-        ScriptedRunner::default().with_output("git", &["rev-parse", "--git-dir"], repo, ".git\n");
+    let runner = ScriptedRunner::default();
     let io = TestIo::default();
     let env = TestEnv {
         cwd: repo.to_path_buf(),
@@ -3745,19 +3445,16 @@ fn advance_to_next_commit_errors_on_out_of_range_current_index() {
         fs: &REAL_FS,
     };
 
-    let commits = vec![
-        CommitSha::new("a".repeat(SHA_LEN)).or_abort("sha"),
-        CommitSha::new("b".repeat(SHA_LEN)).or_abort("sha"),
-    ];
-    let err = Session::with_state(&ctx, StateDir::new(state_dir), commits)
+    let outcome = Session::with_state(&ctx, StateDir::new(state_dir.clone()), vec![])
         .advance_to_next_commit()
-        .err_or_abort("expected out-of-range index");
-    assert_eq!(
-        err.to_string(),
-        format!(
-            "git command failed: commit index {} out of range (have 2 commits)",
-            usize::MAX
-        )
+        .or_abort("advance should succeed without reading current_index");
+    assert!(
+        matches!(outcome, AdvanceOutcome::Completed { final_split_count } if final_split_count.get() == 1),
+        "expected Completed with split_count 1"
+    );
+    assert!(
+        !state_dir.exists(),
+        "state dir should be removed after completion"
     );
 }
 
@@ -3845,92 +3542,6 @@ fn advance_to_next_commit_error_includes_abort_hint() {
         msg.contains("git rebase failed"),
         "error should contain original failure message but was: {msg}"
     );
-}
-
-#[test]
-fn advance_to_next_commit_omits_untracked_section_when_empty() {
-    let dir = TempDir::new().or_abort("tempdir");
-    let repo = dir.path();
-    let git_dir = repo.join(".git");
-    fs::create_dir_all(git_dir.join("rebase-merge")).or_abort("create rebase-merge");
-
-    let state_dir = git_dir.join("factor");
-    fs::create_dir_all(&state_dir).or_abort("create factor dir");
-    fs::write(
-        state_dir.join("commits"),
-        format!("{}\n{}\n", "a".repeat(SHA_LEN), "b".repeat(SHA_LEN)),
-    )
-    .or_abort("write commits");
-    fs::write(state_dir.join("current_index"), "0\n").or_abort("write current_index");
-    fs::write(state_dir.join("split_count"), "1\n").or_abort("write split_count");
-
-    let runner = ScriptedRunner::default()
-        .with_status(
-            "git",
-            &["rebase", "--continue"],
-            &[("GIT_EDITOR", "false"), ("GIT_SEQUENCE_EDITOR", "false")],
-            false,
-            repo,
-            0,
-        )
-        .with_output("git", &["status", "--porcelain=v1"], repo, "")
-        .with_status(
-            "git",
-            &["reset", "--quiet", &format!("{}^", "a".repeat(SHA_LEN))],
-            &[],
-            false,
-            repo,
-            0,
-        )
-        .with_output(
-            "git",
-            &["show", "--format=%B", "--no-patch", &"b".repeat(SHA_LEN)],
-            repo,
-            "msg\n",
-        )
-        .with_output(
-            "git",
-            &["rev-parse", "--short", &"b".repeat(SHA_LEN)],
-            repo,
-            "bbbbbbb\n",
-        );
-
-    let io = TestIo::default();
-    let env = TestEnv {
-        cwd: repo.to_path_buf(),
-    };
-    let ctx = Ctx {
-        runner: &runner,
-        cwd: repo.to_path_buf(),
-        io: &io,
-        env: &env,
-        fs: &REAL_FS,
-    };
-
-    let commits = vec![
-        CommitSha::new("a".repeat(SHA_LEN)).or_abort("sha"),
-        CommitSha::new("b".repeat(SHA_LEN)).or_abort("sha"),
-    ];
-    let outcome = Session::with_state(&ctx, StateDir::new(state_dir), commits)
-        .advance_to_next_commit()
-        .or_abort("advance ok");
-
-    assert!(
-        matches!(&outcome, AdvanceOutcome::Advanced { .. }),
-        "expected Advanced, got Completed"
-    );
-    if let AdvanceOutcome::Advanced {
-        next_message,
-        next_short_sha,
-        previous_split_count,
-    } = outcome
-    {
-        assert_eq!(previous_split_count.get(), 1);
-        assert_eq!(next_short_sha.as_str(), "bbbbbbb");
-        assert_eq!(next_message.as_str(), "msg");
-    }
-    assert!(io.stdout().is_empty(), "advance should produce no output");
-    assert_eq!(io.stderr(), "");
 }
 
 #[test]
@@ -6435,160 +6046,6 @@ fn cmd_finish_rejects_invalid_actual_tree_hash_before_commit() {
 }
 
 #[test]
-fn cmd_finish_advances_to_next_commit_and_prints_next_guidance() {
-    let dir = TempDir::new().or_abort("tempdir");
-    let repo = dir.path();
-    let git_dir = repo.join(".git");
-    fs::create_dir_all(git_dir.join("rebase-merge")).or_abort("create rebase-merge");
-
-    let state_dir = git_dir.join("factor");
-    fs::create_dir_all(&state_dir).or_abort("create factor dir");
-    let original = "a".repeat(SHA_LEN);
-    let next = "b".repeat(SHA_LEN);
-    fs::write(state_dir.join("commits"), format!("{original}\n{next}\n")).or_abort("write commits");
-    fs::write(state_dir.join("current_index"), "0\n").or_abort("write current_index");
-    fs::write(state_dir.join("split_count"), "0\n").or_abort("write split_count");
-    fs::write(state_dir.join("exec"), "true\n").or_abort("write exec");
-    fs::write(state_dir.join("requires_rebase"), "true\n").or_abort("write requires_rebase");
-    fs::write(state_dir.join("expected_tree"), TREE_EXPECTED_NL).or_abort("write expected_tree");
-
-    let messages = [NonEmptyString::try_from("test: message".to_owned()).or_abort("non-empty")];
-    let runner = finish_advance_runner(repo, &original, &next);
-
-    let io = TestIo::default();
-    let env = TestEnv {
-        cwd: repo.to_path_buf(),
-    };
-    let ctx = Ctx {
-        runner: &runner,
-        cwd: repo.to_path_buf(),
-        io: &io,
-        env: &env,
-        fs: &REAL_FS,
-    };
-
-    let code = cmd_finish_in(&ctx, &messages).or_abort("finish should advance to next commit");
-
-    assert_eq!(code, EXIT_OK);
-    assert_eq!(
-        io.stdout(),
-        concat!(
-            "FACTOR: Previous commit split into 1 commits.\n",
-            "FACTOR: Now splitting bbbbbbb.\n",
-            "ORIGINAL MESSAGE: next subject\n",
-            "UNSTAGED:\n",
-            "  file.txt | 1 +\n",
-            "  1 file changed, 1 insertion(+)\n",
-            "\n",
-            "NEXT: Stage changes for the next commit, then run:\n",
-            "  git factor --continue --message \"type: description\"\n",
-            "\n",
-            "HINTS:\n",
-            "  - Find the ONE smallest addition nothing depends on\n",
-            "  - Target 15-30 lines (50 max)\n",
-            "  - Message: single concrete action, no \"and\"/\"or\"\n",
-            "  - Verify: git log --oneline | wc -l\n",
-            "  - NEVER use git commit. ONLY use git factor --continue.\n",
-            "  REMAINING: 1 file changed, 1 insertion(+)\n",
-            "  RECOVERY: git factor --abort\n"
-        )
-    );
-    assert!(io.stderr().is_empty(), "stderr should be empty");
-    assert_eq!(
-        fs::read_to_string(state_dir.join("current_index")).or_abort("read current_index"),
-        "1\n"
-    );
-    assert_eq!(
-        fs::read_to_string(state_dir.join("split_count")).or_abort("read split_count"),
-        "0\n"
-    );
-}
-
-#[test]
-fn cmd_finish_propagates_io_error_when_advanced_summary_write_fails() {
-    let dir = TempDir::new().or_abort("tempdir");
-    let repo = dir.path();
-    let git_dir = repo.join(".git");
-    fs::create_dir_all(git_dir.join("rebase-merge")).or_abort("create rebase-merge");
-
-    let state_dir = git_dir.join("factor");
-    fs::create_dir_all(&state_dir).or_abort("create factor dir");
-    let original = "a".repeat(SHA_LEN);
-    let next = "b".repeat(SHA_LEN);
-    fs::write(state_dir.join("commits"), format!("{original}\n{next}\n")).or_abort("write commits");
-    fs::write(state_dir.join("current_index"), "0\n").or_abort("write current_index");
-    fs::write(state_dir.join("split_count"), "0\n").or_abort("write split_count");
-    fs::write(state_dir.join("exec"), "true\n").or_abort("write exec");
-    fs::write(state_dir.join("requires_rebase"), "true\n").or_abort("write requires_rebase");
-    fs::write(state_dir.join("expected_tree"), TREE_EXPECTED_NL).or_abort("write expected_tree");
-
-    let messages = [NonEmptyString::try_from("test: message".to_owned()).or_abort("non-empty")];
-    let runner = finish_advance_runner(repo, &original, &next);
-    let io = MatchingOutlnFailureIo {
-        fail_on: "FACTOR: Previous commit split into 1 commits.",
-    };
-    let env = TestEnv {
-        cwd: repo.to_path_buf(),
-    };
-    let ctx = Ctx {
-        runner: &runner,
-        cwd: repo.to_path_buf(),
-        io: &io,
-        env: &env,
-        fs: &REAL_FS,
-    };
-
-    let err =
-        cmd_finish_in(&ctx, &messages).err_or_abort("advanced summary write failure should fail");
-    assert!(
-        matches!(&err, FactorError::Io(inner) if inner.to_string().contains("io fail")),
-        "err was: {err:?}"
-    );
-}
-
-#[test]
-fn cmd_finish_propagates_io_error_when_next_guidance_write_fails() {
-    let dir = TempDir::new().or_abort("tempdir");
-    let repo = dir.path();
-    let git_dir = repo.join(".git");
-    fs::create_dir_all(git_dir.join("rebase-merge")).or_abort("create rebase-merge");
-
-    let state_dir = git_dir.join("factor");
-    fs::create_dir_all(&state_dir).or_abort("create factor dir");
-    let original = "a".repeat(SHA_LEN);
-    let next = "b".repeat(SHA_LEN);
-    fs::write(state_dir.join("commits"), format!("{original}\n{next}\n")).or_abort("write commits");
-    fs::write(state_dir.join("current_index"), "0\n").or_abort("write current_index");
-    fs::write(state_dir.join("split_count"), "0\n").or_abort("write split_count");
-    fs::write(state_dir.join("exec"), "true\n").or_abort("write exec");
-    fs::write(state_dir.join("requires_rebase"), "true\n").or_abort("write requires_rebase");
-    fs::write(state_dir.join("expected_tree"), TREE_EXPECTED_NL).or_abort("write expected_tree");
-
-    let messages = [NonEmptyString::try_from("test: message".to_owned()).or_abort("non-empty")];
-    let runner = finish_advance_runner(repo, &original, &next);
-    let io = MatchingOutlnFailureIo {
-        fail_on: "FACTOR: Now splitting bbbbbbb.",
-    };
-    let env = TestEnv {
-        cwd: repo.to_path_buf(),
-    };
-    let ctx = Ctx {
-        runner: &runner,
-        cwd: repo.to_path_buf(),
-        io: &io,
-        env: &env,
-        fs: &REAL_FS,
-    };
-
-    let err =
-        cmd_finish_in(&ctx, &messages).err_or_abort("next guidance write failure should fail");
-    assert!(
-        matches!(&err, FactorError::Io(inner) if inner.to_string().contains("io fail")),
-        "err was: {err:?}"
-    );
-}
-
-#[test]
 fn cmd_finish_propagates_io_error_when_completion_summary_write_fails() {
     let dir = TempDir::new().or_abort("tempdir");
     let repo = dir.path();
@@ -7471,7 +6928,7 @@ fn cmd_status_io_failures_cover_active_session_output_paths() {
 }
 
 #[test]
-fn advance_to_next_commit_runner_failures_cover_command_error_paths() {
+fn advance_to_next_commit_propagates_runner_failure_from_rebase_continue() {
     let dir = TempDir::new().or_abort("tempdir");
     let repo = dir.path();
     let git_dir = repo.join(".git");
@@ -7479,15 +6936,11 @@ fn advance_to_next_commit_runner_failures_cover_command_error_paths() {
 
     let state_dir = git_dir.join("factor");
     fs::create_dir_all(&state_dir).or_abort("create factor dir");
-    fs::write(
-        state_dir.join("commits"),
-        format!("{}\n{}\n", "a".repeat(SHA_LEN), "b".repeat(SHA_LEN)),
-    )
-    .or_abort("write commits");
-    fs::write(state_dir.join("current_index"), "0\n").or_abort("write current_index");
     fs::write(state_dir.join("split_count"), "3\n").or_abort("write split_count");
+    fs::write(state_dir.join("requires_rebase"), "true\n").or_abort("write requires_rebase");
 
     let base_runner = ScriptedRunner::default()
+        .with_output("git", &["rev-parse", "--git-dir"], repo, ".git\n")
         .with_status(
             "git",
             &["rebase", "--continue"],
@@ -7495,134 +6948,23 @@ fn advance_to_next_commit_runner_failures_cover_command_error_paths() {
             false,
             repo,
             0,
-        )
-        .with_output("git", &["status", "--porcelain=v1"], repo, "")
-        .with_status(
-            "git",
-            &["reset", "--quiet", &format!("{}^", "a".repeat(SHA_LEN))],
-            &[],
-            false,
-            repo,
-            0,
-        )
-        .with_output(
-            "git",
-            &["show", "--format=%B", "--no-patch", &"b".repeat(SHA_LEN)],
-            repo,
-            "original message\n",
-        )
-        .with_output(
-            "git",
-            &["rev-parse", "--short", &"b".repeat(SHA_LEN)],
-            repo,
-            "bbbbbbb\n",
         );
     let io = TestIo::default();
     let env = TestEnv {
         cwd: repo.to_path_buf(),
     };
-
-    let commits = vec![
-        CommitSha::new("a".repeat(SHA_LEN)).or_abort("sha"),
-        CommitSha::new("b".repeat(SHA_LEN)).or_abort("sha"),
-    ];
-
-    for fail_at in [2, 4, 5, 6, 7] {
-        fs::write(state_dir.join("current_index"), "0\n").or_abort("reset current_index");
-        fs::write(state_dir.join("split_count"), "3\n").or_abort("reset split_count");
-
-        let runner = NthRunnerFailure::new(base_runner.clone(), fail_at);
-        let ctx = Ctx {
-            runner: &runner,
-            cwd: repo.to_path_buf(),
-            io: &io,
-            env: &env,
-            fs: &REAL_FS,
-        };
-        let err = Session::with_state(&ctx, StateDir::new(state_dir.clone()), commits.clone())
-            .advance_to_next_commit()
-            .err_or_abort("expected forced runner failure");
-        assert!(is_forced_runner_failure(&err), "err was: {err:?}");
-    }
-}
-
-#[test]
-fn advance_to_next_commit_io_failures_cover_output_paths() {
-    let dir = TempDir::new().or_abort("tempdir");
-    let repo = dir.path();
-    let git_dir = repo.join(".git");
-    fs::create_dir_all(git_dir.join("rebase-merge")).or_abort("create rebase-merge");
-
-    let state_dir = git_dir.join("factor");
-    fs::create_dir_all(&state_dir).or_abort("create factor dir");
-    fs::write(
-        state_dir.join("commits"),
-        format!("{}\n{}\n", "a".repeat(SHA_LEN), "b".repeat(SHA_LEN)),
-    )
-    .or_abort("write commits");
-    fs::write(state_dir.join("current_index"), "0\n").or_abort("write current_index");
-    fs::write(state_dir.join("split_count"), "3\n").or_abort("write split_count");
-
-    let base_runner = ScriptedRunner::default()
-        .with_status(
-            "git",
-            &["rebase", "--continue"],
-            &[("GIT_EDITOR", "false"), ("GIT_SEQUENCE_EDITOR", "false")],
-            false,
-            repo,
-            0,
-        )
-        .with_output("git", &["status", "--porcelain=v1"], repo, "")
-        .with_status(
-            "git",
-            &["reset", "--quiet", &format!("{}^", "a".repeat(SHA_LEN))],
-            &[],
-            false,
-            repo,
-            0,
-        )
-        .with_output(
-            "git",
-            &["show", "--format=%B", "--no-patch", &"b".repeat(SHA_LEN)],
-            repo,
-            "original message\n",
-        )
-        .with_output(
-            "git",
-            &["rev-parse", "--short", &"b".repeat(SHA_LEN)],
-            repo,
-            "bbbbbbb\n",
-        );
-    let env = TestEnv {
+    let runner = NthRunnerFailure::new(base_runner, 2);
+    let ctx = Ctx {
+        runner: &runner,
         cwd: repo.to_path_buf(),
+        io: &io,
+        env: &env,
+        fs: &REAL_FS,
     };
-
-    let commits = vec![
-        CommitSha::new("a".repeat(SHA_LEN)).or_abort("sha"),
-        CommitSha::new("b".repeat(SHA_LEN)).or_abort("sha"),
-    ];
-
-    for fail_at in 1..=SHA_LEN {
-        fs::write(state_dir.join("current_index"), "0\n").or_abort("reset current_index");
-        fs::write(state_dir.join("split_count"), "3\n").or_abort("reset split_count");
-
-        let runner = NthRunnerFailure::new(base_runner.clone(), usize::MAX);
-        let io = NthIoFailure::new(fail_at);
-        let ctx = Ctx {
-            runner: &runner,
-            cwd: repo.to_path_buf(),
-            io: &io,
-            env: &env,
-            fs: &REAL_FS,
-        };
-
-        let outcome = Session::with_state(&ctx, StateDir::new(state_dir.clone()), commits.clone())
-            .advance_to_next_commit();
-        assert!(
-            matches!(&outcome, Ok(AdvanceOutcome::Advanced { .. })),
-            "expected Advanced since advance no longer calls IO, got: {outcome:?}"
-        );
-    }
+    let err = Session::with_state(&ctx, StateDir::new(state_dir), vec![])
+        .advance_to_next_commit()
+        .err_or_abort("expected forced runner failure");
+    assert!(is_forced_runner_failure(&err), "err was: {err:?}");
 }
 
 #[test]
@@ -9157,221 +8499,6 @@ fn cmd_continue_completes_when_rebase_finishes_after_tree_converges() {
 }
 
 #[test]
-#[expect(
-    clippy::too_many_lines,
-    reason = "integration-style continue flow asserts a full multi-step success transcript"
-)]
-fn cmd_continue_advances_to_next_commit_and_prints_next_guidance() {
-    let dir = TempDir::new().or_abort("tempdir");
-    let repo = dir.path();
-    let git_dir = repo.join(".git");
-    fs::create_dir_all(git_dir.join("rebase-merge")).or_abort("create rebase-merge");
-
-    let state_dir = git_dir.join("factor");
-    fs::create_dir_all(&state_dir).or_abort("create factor dir");
-    let original = "a".repeat(SHA_LEN);
-    let next = "b".repeat(SHA_LEN);
-    fs::write(state_dir.join("commits"), format!("{original}\n{next}\n")).or_abort("write commits");
-    fs::write(state_dir.join("current_index"), "0\n").or_abort("write current_index");
-    fs::write(state_dir.join("split_count"), "0\n").or_abort("write split_count");
-    fs::write(state_dir.join("exec"), "true\n").or_abort("write exec");
-    fs::write(state_dir.join("requires_rebase"), "true\n").or_abort("write requires_rebase");
-    fs::write(state_dir.join("expected_tree"), TREE_EXPECTED_NL).or_abort("write expected_tree");
-
-    let messages = test_messages();
-    let runner = continue_runner_with_commit(repo, &original, "")
-        .with_output("git", &["rev-parse", "HEAD^{tree}"], repo, TREE_EXPECTED_NL)
-        .with_status(
-            "git",
-            &["rebase", "--continue"],
-            &[("GIT_EDITOR", "false"), ("GIT_SEQUENCE_EDITOR", "false")],
-            false,
-            repo,
-            0,
-        )
-        .with_status(
-            "git",
-            &["reset", "--quiet", &format!("{original}^")],
-            &[],
-            false,
-            repo,
-            0,
-        )
-        .with_output(
-            "git",
-            &["show", "--format=%B", "--no-patch", next.as_str()],
-            repo,
-            "next subject\n",
-        )
-        .with_output(
-            "git",
-            &["rev-parse", "--short", next.as_str()],
-            repo,
-            "bbbbbbb\n",
-        )
-        .with_output(
-            "git",
-            &["diff", "--stat"],
-            repo,
-            "file.txt | 1 +\n1 file changed, 1 insertion(+)\n",
-        )
-        .with_output(
-            "git",
-            &["diff", "--stat"],
-            repo,
-            "file.txt | 1 +\n1 file changed, 1 insertion(+)\n",
-        )
-        .with_output(
-            "git",
-            &["ls-files", "--others", "--exclude-standard"],
-            repo,
-            "",
-        )
-        .with_output(
-            "git",
-            &["rev-parse", "--show-toplevel"],
-            repo,
-            &format!("{}\n", repo.display()),
-        );
-    let io = TestIo::default();
-    let env = TestEnv {
-        cwd: repo.to_path_buf(),
-    };
-    let ctx = Ctx {
-        runner: &runner,
-        cwd: repo.to_path_buf(),
-        io: &io,
-        env: &env,
-        fs: &REAL_FS,
-    };
-
-    let code = cmd_continue_in(&ctx, &messages).or_abort("continue should advance to next commit");
-
-    assert_eq!(code, EXIT_OK);
-    assert_eq!(
-        io.stdout(),
-        concat!(
-            "FACTOR: Previous commit split into 1 commits.\n",
-            "FACTOR: Now splitting bbbbbbb.\n",
-            "ORIGINAL MESSAGE: next subject\n",
-            "UNSTAGED:\n",
-            "  file.txt | 1 +\n",
-            "  1 file changed, 1 insertion(+)\n",
-            "\n",
-            "NEXT: Stage changes for the next commit, then run:\n",
-            "  git factor --continue --message \"type: description\"\n",
-            "\n",
-            "HINTS:\n",
-            "  - Find the ONE smallest addition nothing depends on\n",
-            "  - Target 15-30 lines (50 max)\n",
-            "  - Message: single concrete action, no \"and\"/\"or\"\n",
-            "  - Verify: git log --oneline | wc -l\n",
-            "  - NEVER use git commit. ONLY use git factor --continue.\n",
-            "  REMAINING: 1 file changed, 1 insertion(+)\n",
-            "  RECOVERY: git factor --abort\n"
-        )
-    );
-    assert!(io.stderr().is_empty(), "stderr should be empty");
-    assert_eq!(
-        fs::read_to_string(state_dir.join("current_index")).or_abort("read current_index"),
-        "1\n"
-    );
-    assert_eq!(
-        fs::read_to_string(state_dir.join("split_count")).or_abort("read split_count"),
-        "0\n"
-    );
-}
-
-#[test]
-fn cmd_continue_propagates_io_error_when_advanced_summary_write_fails() {
-    let dir = TempDir::new().or_abort("tempdir");
-    let repo = dir.path();
-    let git_dir = repo.join(".git");
-    fs::create_dir_all(git_dir.join("rebase-merge")).or_abort("create rebase-merge");
-
-    let state_dir = git_dir.join("factor");
-    fs::create_dir_all(&state_dir).or_abort("create factor dir");
-    let original = "a".repeat(SHA_LEN);
-    let next = "b".repeat(SHA_LEN);
-    fs::write(state_dir.join("commits"), format!("{original}\n{next}\n")).or_abort("write commits");
-    fs::write(state_dir.join("current_index"), "0\n").or_abort("write current_index");
-    fs::write(state_dir.join("split_count"), "0\n").or_abort("write split_count");
-    fs::write(state_dir.join("exec"), "true\n").or_abort("write exec");
-    fs::write(state_dir.join("requires_rebase"), "true\n").or_abort("write requires_rebase");
-    fs::write(state_dir.join("expected_tree"), TREE_EXPECTED_NL).or_abort("write expected_tree");
-
-    let messages = test_messages();
-    let runner = continue_runner_with_commit(repo, &original, "")
-        .with_output("git", &["rev-parse", "HEAD^{tree}"], repo, TREE_EXPECTED_NL)
-        .with_status(
-            "git",
-            &["rebase", "--continue"],
-            &[("GIT_EDITOR", "false"), ("GIT_SEQUENCE_EDITOR", "false")],
-            false,
-            repo,
-            0,
-        )
-        .with_status(
-            "git",
-            &["reset", "--quiet", &format!("{original}^")],
-            &[],
-            false,
-            repo,
-            0,
-        )
-        .with_output(
-            "git",
-            &["show", "--format=%B", "--no-patch", next.as_str()],
-            repo,
-            "next subject\n",
-        )
-        .with_output(
-            "git",
-            &["rev-parse", "--short", next.as_str()],
-            repo,
-            "bbbbbbb\n",
-        )
-        .with_output(
-            "git",
-            &["diff", "--stat"],
-            repo,
-            "file.txt | 1 +\n1 file changed, 1 insertion(+)\n",
-        )
-        .with_output(
-            "git",
-            &["ls-files", "--others", "--exclude-standard"],
-            repo,
-            "",
-        )
-        .with_output(
-            "git",
-            &["rev-parse", "--show-toplevel"],
-            repo,
-            &format!("{}\n", repo.display()),
-        );
-    let io = MatchingOutlnFailureIo {
-        fail_on: "FACTOR: Previous commit split into 1 commits.",
-    };
-    let env = TestEnv {
-        cwd: repo.to_path_buf(),
-    };
-    let ctx = Ctx {
-        runner: &runner,
-        cwd: repo.to_path_buf(),
-        io: &io,
-        env: &env,
-        fs: &REAL_FS,
-    };
-
-    let err =
-        cmd_continue_in(&ctx, &messages).err_or_abort("advanced summary write failure should fail");
-    assert!(
-        matches!(&err, FactorError::Io(inner) if inner.to_string().contains("io fail")),
-        "err was: {err:?}"
-    );
-}
-
-#[test]
 fn advance_to_next_commit_finishes_root_session_and_runs_empty_root_cleanup() {
     let dir = TempDir::new().or_abort("tempdir");
     let repo = dir.path();
@@ -9442,9 +8569,8 @@ fn advance_to_next_commit_finishes_root_session_and_runs_empty_root_cleanup() {
         matches!(&outcome, AdvanceOutcome::Completed { .. }),
         "expected Completed"
     );
-    if let AdvanceOutcome::Completed { final_split_count } = outcome {
-        assert_eq!(final_split_count.get(), 2);
-    }
+    let AdvanceOutcome::Completed { final_split_count } = outcome;
+    assert_eq!(final_split_count.get(), 2);
     assert!(io.stdout().is_empty(), "advance should produce no output");
     assert!(io.stderr().is_empty(), "stderr should be empty");
     assert!(
@@ -10134,174 +9260,6 @@ fn advance_to_next_commit_reports_invalid_requires_rebase_before_rebase_step() {
         .err_or_abort("expected invalid requires_rebase");
     assert!(
         matches!(&err, FactorError::GitCommand(msg) if msg.contains("requires_rebase")),
-        "err was: {err:?}"
-    );
-}
-
-#[test]
-fn advance_to_next_commit_reports_invalid_current_index_at_edit_stop() {
-    let dir = TempDir::new().or_abort("tempdir");
-    let repo = dir.path();
-    let git_dir = repo.join(".git");
-    let state_dir = git_dir.join("factor");
-    fs::create_dir_all(git_dir.join("rebase-merge")).or_abort("create rebase-merge");
-    fs::create_dir_all(&state_dir).or_abort("create factor dir");
-    fs::write(state_dir.join("split_count"), "1\n").or_abort("write split_count");
-    fs::write(state_dir.join("current_index"), "not-a-number\n").or_abort("write current_index");
-
-    let runner = ScriptedRunner::default()
-        .with_output("git", &["rev-parse", "--git-dir"], repo, ".git\n")
-        .with_status(
-            "git",
-            &["rebase", "--continue"],
-            &[("GIT_EDITOR", "false"), ("GIT_SEQUENCE_EDITOR", "false")],
-            false,
-            repo,
-            0,
-        )
-        .with_output(
-            "git",
-            &["rev-parse", "HEAD^{tree}"],
-            repo,
-            &format!("{}\n", "c".repeat(SHA_LEN)),
-        );
-    let io = TestIo::default();
-    let env = TestEnv {
-        cwd: repo.to_path_buf(),
-    };
-    let ctx = Ctx {
-        runner: &runner,
-        cwd: repo.to_path_buf(),
-        io: &io,
-        env: &env,
-        fs: &REAL_FS,
-    };
-
-    let err = Session::with_state(&ctx, StateDir::new(state_dir), vec![])
-        .advance_to_next_commit()
-        .err_or_abort("expected invalid current_index");
-    assert!(
-        matches!(&err, FactorError::GitCommand(msg) if msg.contains("current_index")),
-        "err was: {err:?}"
-    );
-}
-
-#[test]
-fn advance_to_next_commit_propagates_state_write_failure_for_current_index_update() {
-    let dir = TempDir::new().or_abort("tempdir");
-    let repo = dir.path();
-    let git_dir = repo.join(".git");
-    let state_dir = git_dir.join("factor");
-    fs::create_dir_all(git_dir.join("rebase-merge")).or_abort("create rebase-merge");
-    fs::create_dir_all(&state_dir).or_abort("create factor dir");
-    let current = "a".repeat(SHA_LEN);
-    let next = "b".repeat(SHA_LEN);
-    fs::write(state_dir.join("commits"), format!("{current}\n{next}\n")).or_abort("write commits");
-    fs::write(state_dir.join("split_count"), "1\n").or_abort("write split_count");
-    fs::write(state_dir.join("current_index"), "0\n").or_abort("write current_index");
-
-    let runner = ScriptedRunner::default()
-        .with_output("git", &["rev-parse", "--git-dir"], repo, ".git\n")
-        .with_status(
-            "git",
-            &["rebase", "--continue"],
-            &[("GIT_EDITOR", "false"), ("GIT_SEQUENCE_EDITOR", "false")],
-            false,
-            repo,
-            0,
-        )
-        .with_output(
-            "git",
-            &["rev-parse", "HEAD^{tree}"],
-            repo,
-            &format!("{}\n", "c".repeat(SHA_LEN)),
-        );
-    let io = TestIo::default();
-    let env = TestEnv {
-        cwd: repo.to_path_buf(),
-    };
-    let fs = FailingWriteForFileFs {
-        file_name: "current_index",
-        message: "current_index write failed",
-    };
-    let ctx = Ctx {
-        runner: &runner,
-        cwd: repo.to_path_buf(),
-        io: &io,
-        env: &env,
-        fs: &fs,
-    };
-
-    let commits = vec![
-        CommitSha::new(current).or_abort("sha"),
-        CommitSha::new(next).or_abort("sha"),
-    ];
-    let err = Session::with_state(&ctx, StateDir::new(state_dir), commits)
-        .advance_to_next_commit()
-        .err_or_abort("expected current_index write failure");
-    assert!(
-        matches!(&err, FactorError::StateWrite(inner) if inner.to_string().contains("current_index write failed")),
-        "err was: {err:?}"
-    );
-}
-
-#[test]
-fn advance_to_next_commit_propagates_current_commit_lookup_failure_after_reset() {
-    let dir = TempDir::new().or_abort("tempdir");
-    let repo = dir.path();
-    let git_dir = repo.join(".git");
-    let state_dir = git_dir.join("factor");
-    fs::create_dir_all(git_dir.join("rebase-merge")).or_abort("create rebase-merge");
-    fs::create_dir_all(&state_dir).or_abort("create factor dir");
-    fs::write(
-        state_dir.join("commits"),
-        format!("{}\n{}\n", "a".repeat(SHA_LEN), "b".repeat(SHA_LEN)),
-    )
-    .or_abort("write commits");
-    fs::write(state_dir.join("split_count"), "1\n").or_abort("write split_count");
-    fs::write(state_dir.join("current_index"), "0\n").or_abort("write current_index");
-
-    let runner = ScriptedRunner::default()
-        .with_output("git", &["rev-parse", "--git-dir"], repo, ".git\n")
-        .with_status(
-            "git",
-            &["rebase", "--continue"],
-            &[("GIT_EDITOR", "false"), ("GIT_SEQUENCE_EDITOR", "false")],
-            false,
-            repo,
-            0,
-        )
-        .with_output("git", &["status", "--porcelain=v1"], repo, "")
-        .with_status(
-            "git",
-            &["reset", "--quiet", &format!("{}^", "a".repeat(SHA_LEN))],
-            &[],
-            false,
-            repo,
-            0,
-        );
-    let io = TestIo::default();
-    let env = TestEnv {
-        cwd: repo.to_path_buf(),
-    };
-    let fs = NthReadFailureFs::new("current_index", 2, "current_index read failed after reset");
-    let ctx = Ctx {
-        runner: &runner,
-        cwd: repo.to_path_buf(),
-        io: &io,
-        env: &env,
-        fs: &fs,
-    };
-
-    let commits = vec![
-        CommitSha::new("a".repeat(SHA_LEN)).or_abort("sha"),
-        CommitSha::new("b".repeat(SHA_LEN)).or_abort("sha"),
-    ];
-    let err = Session::with_state(&ctx, StateDir::new(state_dir), commits)
-        .advance_to_next_commit()
-        .err_or_abort("expected current_commit failure");
-    assert!(
-        matches!(&err, FactorError::StateRead(inner) if inner.to_string().contains("after reset")),
         "err was: {err:?}"
     );
 }
@@ -12648,23 +11606,16 @@ fn print_session_started_propagates_print_hints_failure() {
 #[test]
 fn proptest_run_unit_suite_part_1() {
     advance_to_next_commit_error_includes_abort_hint();
-    advance_to_next_commit_errors_on_out_of_range_current_index();
+    advance_to_next_commit_ignores_current_index_after_span_completion();
     advance_to_next_commit_errors_when_rebase_is_required_but_not_in_progress();
     advance_to_next_commit_finishes_root_session_and_runs_empty_root_cleanup();
-    advance_to_next_commit_io_failures_cover_output_paths();
-    advance_to_next_commit_omits_untracked_section_when_empty();
     advance_to_next_commit_omits_untracked_section_when_rebase_finishes();
-    advance_to_next_commit_prints_untracked_changes_when_present();
-    advance_to_next_commit_propagates_current_commit_lookup_failure_after_reset();
     advance_to_next_commit_propagates_empty_root_cleanup_failure();
     advance_to_next_commit_propagates_io_error_when_outln_fails_after_rebase_finishes();
-    advance_to_next_commit_propagates_io_error_when_outln_fails_mid_rebase();
     advance_to_next_commit_errors_when_cleanup_leaves_state_path_behind();
-    advance_to_next_commit_propagates_state_write_failure_for_current_index_update();
-    advance_to_next_commit_reports_invalid_current_index_at_edit_stop();
     advance_to_next_commit_reports_invalid_requires_rebase_before_rebase_step();
     advance_to_next_commit_reports_invalid_split_count_before_rebase_step();
-    advance_to_next_commit_runner_failures_cover_command_error_paths();
+    advance_to_next_commit_propagates_runner_failure_from_rebase_continue();
     advance_to_next_commit_errors_when_state_dir_removal_fails_on_completion();
     build_rebase_args_uses_parent_for_non_root_and_root_flag_for_root();
     capture_expected_tree_in_state_propagates_git_output_error();
@@ -12685,7 +11636,6 @@ fn proptest_run_unit_suite_part_1() {
     cmd_abort_runner_failures_cover_internal_question_mark_paths();
     cmd_abort_runs_rebase_abort_when_started_rebase_is_true();
     cmd_abort_uses_start_head_and_skips_rebase_abort_when_rebase_is_not_active();
-    cmd_continue_advances_to_next_commit_and_prints_next_guidance();
     cmd_continue_completes_when_rebase_finishes_after_tree_converges();
     cmd_continue_converged_path_propagates_advance_split_count_error();
     cmd_continue_converged_path_propagates_advance_split_count_read_error();
@@ -12701,7 +11651,6 @@ fn proptest_run_unit_suite_part_1() {
     cmd_continue_propagates_exec_status_io_error_after_rehydrating_pool();
     cmd_continue_propagates_expected_tree_fallback_lookup_error();
     cmd_continue_propagates_invalid_restored_tree_hash_after_restore();
-    cmd_continue_propagates_io_error_when_advanced_summary_write_fails();
     cmd_continue_propagates_io_error_when_completion_summary_write_fails();
     cmd_continue_propagates_rehydrate_error_when_exec_status_io_error_rehydrate_fails();
     cmd_continue_propagates_rehydrate_write_tree_error_when_exec_fails();
@@ -12717,16 +11666,13 @@ fn proptest_run_unit_suite_part_1() {
     cmd_finish_errors_when_no_active_session();
     cmd_finish_errors_when_original_message_is_empty_without_messages();
     cmd_finish_errors_when_rebase_is_required_but_not_active();
-    cmd_finish_advances_to_next_commit_and_prints_next_guidance();
     cmd_finish_io_failures_cover_exec_gate_failure_output_paths();
     cmd_finish_precondition_failures_cover_internal_question_mark_paths();
     cmd_finish_propagates_current_commit_lookup_error_after_session_load();
     cmd_finish_propagates_advance_error_after_successful_commit();
-    cmd_finish_propagates_io_error_when_advanced_summary_write_fails();
     cmd_finish_propagates_io_error_when_completion_summary_write_fails();
     cmd_finish_propagates_expected_tree_lookup_error_when_missing_from_state();
     cmd_finish_propagates_git_commit_preserving_metadata_error();
-    cmd_finish_propagates_io_error_when_next_guidance_write_fails();
     cmd_finish_propagates_requires_rebase_state_read_error();
     cmd_finish_propagates_restore_nonzero_exit();
     cmd_finish_propagates_restore_status_error();

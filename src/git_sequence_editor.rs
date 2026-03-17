@@ -27,7 +27,7 @@ use thiserror::Error;
 
 use self::cli::Cli;
 use self::todo::{
-    build_factor_insertions, build_requested_actions, rewrite_todo_with_factor, todo_shas_in,
+    build_factor_insertion, build_requested_actions, rewrite_todo_with_factor, todo_shas_in,
     validate_todo_format,
 };
 
@@ -331,12 +331,12 @@ fn run_for(cli: &Cli) -> Result<(), SequenceEditorError> {
         Ok(requested) => requested,
         Err(err) => return Err(SequenceEditorError::Todo(err)),
     };
-    let factor_insertions = match build_factor_insertions(cli, &todo_shas) {
-        Ok(factor_insertions) => factor_insertions,
+    let factor_insertion = match build_factor_insertion(cli, &todo_shas) {
+        Ok(factor_insertion) => factor_insertion,
         Err(err) => return Err(SequenceEditorError::Todo(err)),
     };
 
-    let rewrite = rewrite_todo_with_factor(&content, &requested, &factor_insertions);
+    let rewrite = rewrite_todo_with_factor(&content, &requested, factor_insertion.as_ref());
     if let Err(err) = write_file_atomic(cli.file(), rewrite.output()) {
         return Err(SequenceEditorError::AtomicWrite(err));
     }
@@ -860,9 +860,9 @@ pick def5678 second\n\
         )
         .or_abort("");
         let cli = Cli::for_tests_with_factor(
-            vec![NonEmptyString::try_from("echo begin".to_owned()).or_abort("")],
-            vec![NonEmptyString::try_from("echo preflight".to_owned()).or_abort("")],
-            vec![TodoSha::new("abc1234").or_abort("")],
+            Some(NonEmptyString::try_from("echo begin".to_owned()).or_abort("")),
+            Some(NonEmptyString::try_from("echo preflight".to_owned()).or_abort("")),
+            Some(TodoSha::new("abc1234").or_abort("")),
             vec![],
             vec![],
             todo_path.clone(),
@@ -892,9 +892,9 @@ pick def5678 second\n\
         let todo_path = dir.path().join("git-rebase-todo");
         fs::write(&todo_path, "pick abc1234 first\n").or_abort("");
         let cli = Cli::for_tests_with_factor(
-            vec![NonEmptyString::try_from("echo begin".to_owned()).or_abort("")],
-            vec![],
-            vec![TodoSha::new("abc1234").or_abort("")],
+            Some(NonEmptyString::try_from("echo begin".to_owned()).or_abort("")),
+            None,
+            Some(TodoSha::new("abc1234").or_abort("")),
             vec![],
             vec![],
             todo_path,
@@ -909,33 +909,6 @@ pick def5678 second\n\
     }
 
     #[test]
-    fn run_for_cli_returns_error_for_mismatched_factor_arg_counts() {
-        let _guard = lock_write_fail_point_test();
-        set_write_fail_point(WriteFailPoint::None);
-        let dir = TempDir::new().or_abort("");
-        let todo_path = dir.path().join("git-rebase-todo");
-        fs::write(&todo_path, "pick abc1234 first\n").or_abort("");
-        let cli = Cli::for_tests_with_factor(
-            vec![
-                NonEmptyString::try_from("echo begin 1".to_owned()).or_abort(""),
-                NonEmptyString::try_from("echo begin 2".to_owned()).or_abort(""),
-            ],
-            vec![NonEmptyString::try_from("echo preflight".to_owned()).or_abort("")],
-            vec![TodoSha::new("abc1234").or_abort("")],
-            vec![],
-            vec![],
-            todo_path,
-            vec![],
-        );
-
-        let err = run_for(&cli).err_or_abort("").to_string();
-        assert_eq!(
-            err,
-            "invalid factor arguments: factor-target, factor-preflight, and factor-begin counts must match"
-        );
-    }
-
-    #[test]
     fn run_for_cli_returns_error_for_factor_target_missing_from_todo() {
         let _guard = lock_write_fail_point_test();
         set_write_fail_point(WriteFailPoint::None);
@@ -943,9 +916,9 @@ pick def5678 second\n\
         let todo_path = dir.path().join("git-rebase-todo");
         fs::write(&todo_path, "pick abc1234 first\n").or_abort("");
         let cli = Cli::for_tests_with_factor(
-            vec![NonEmptyString::try_from("echo begin".to_owned()).or_abort("")],
-            vec![NonEmptyString::try_from("echo preflight".to_owned()).or_abort("")],
-            vec![TodoSha::new("def5678").or_abort("")],
+            Some(NonEmptyString::try_from("echo begin".to_owned()).or_abort("")),
+            Some(NonEmptyString::try_from("echo preflight".to_owned()).or_abort("")),
+            Some(TodoSha::new("def5678").or_abort("")),
             vec![],
             vec![],
             todo_path,

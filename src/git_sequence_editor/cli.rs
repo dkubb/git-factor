@@ -17,17 +17,17 @@ pub(in crate::git_sequence_editor) struct Cli {
     #[arg(long = "edit", value_name = "SHA")]
     edit: Vec<TodoSha>,
 
-    /// Command(s) to insert as `exec` after each targeted factor commit.
+    /// Command to insert as `exec` after the targeted factor span tip.
     #[arg(long = "factor-begin", value_name = "COMMAND")]
-    factor_begin: Vec<NonEmptyString>,
+    factor_begin: Option<NonEmptyString>,
 
-    /// Command(s) to insert as `exec` before factor sessions begin.
+    /// Command to insert as `exec` before the factor span begins.
     #[arg(long = "factor-preflight", value_name = "COMMAND")]
-    factor_preflight: Vec<NonEmptyString>,
+    factor_preflight: Option<NonEmptyString>,
 
-    /// Short SHA(s) after which factor-session exec/break lines are inserted.
+    /// Short SHA after which the factor-session exec/break lines are inserted.
     #[arg(long = "factor-target", value_name = "SHA")]
-    factor_target: Vec<TodoSha>,
+    factor_target: Option<TodoSha>,
 
     /// Path to the rebase todo file (provided by git).
     #[arg(value_name = "FILE")]
@@ -49,19 +49,19 @@ impl Cli {
         &self.edit
     }
 
-    /// Returns requested factor begin commands.
-    pub(in crate::git_sequence_editor) fn factor_begin(&self) -> &[NonEmptyString] {
-        &self.factor_begin
+    /// Returns the requested factor begin command.
+    pub(in crate::git_sequence_editor) const fn factor_begin(&self) -> Option<&NonEmptyString> {
+        self.factor_begin.as_ref()
     }
 
-    /// Returns requested factor preflight commands.
-    pub(in crate::git_sequence_editor) fn factor_preflight(&self) -> &[NonEmptyString] {
-        &self.factor_preflight
+    /// Returns the requested factor preflight command.
+    pub(in crate::git_sequence_editor) const fn factor_preflight(&self) -> Option<&NonEmptyString> {
+        self.factor_preflight.as_ref()
     }
 
-    /// Returns requested factor target SHAs.
-    pub(in crate::git_sequence_editor) fn factor_target(&self) -> &[TodoSha] {
-        &self.factor_target
+    /// Returns the requested factor target SHA.
+    pub(in crate::git_sequence_editor) const fn factor_target(&self) -> Option<&TodoSha> {
+        self.factor_target.as_ref()
     }
 
     /// Returns the todo file path.
@@ -78,9 +78,9 @@ impl Cli {
         pick: Vec<TodoSha>,
     ) -> Self {
         Self {
-            factor_begin: Vec::new(),
-            factor_preflight: Vec::new(),
-            factor_target: Vec::new(),
+            factor_begin: None,
+            factor_preflight: None,
+            factor_target: None,
             drop,
             edit,
             file,
@@ -91,9 +91,9 @@ impl Cli {
     /// Constructs a `Cli` value with factor-mode fields for unit tests.
     #[cfg(test)]
     pub(in crate::git_sequence_editor) const fn for_tests_with_factor(
-        factor_begin: Vec<NonEmptyString>,
-        factor_preflight: Vec<NonEmptyString>,
-        factor_target: Vec<TodoSha>,
+        factor_begin: Option<NonEmptyString>,
+        factor_preflight: Option<NonEmptyString>,
+        factor_target: Option<TodoSha>,
         drop: Vec<TodoSha>,
         edit: Vec<TodoSha>,
         file: PathBuf,
