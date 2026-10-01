@@ -1,5 +1,7 @@
+mod commit_message;
 #[path = "tests/main_entry.rs"]
 mod main_entry;
+mod short_sha;
 
 use alloc::collections::VecDeque;
 use core::cell::RefCell;
