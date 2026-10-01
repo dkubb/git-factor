@@ -1,4 +1,3 @@
-mod commit_message;
 #[path = "tests/main_entry.rs"]
 mod main_entry;
 mod short_sha;
