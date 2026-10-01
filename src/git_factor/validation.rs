@@ -2493,39 +2493,4 @@ mod tests {
         let tree = git_output(&ctx, &["write-tree"]).or_abort("write-tree");
         assert_eq!(tree, EMPTY_TREE);
     }
-
-    #[test]
-    fn proptest_run_non_panicking_unit_suite() {
-        env_and_fs_helpers_cover_delegated_paths();
-        error_extractors_cover_non_matching_variants();
-        init_empty_root_repo_creates_single_empty_root_commit();
-        mixed_reset_to_empty_reports_commit_tree_failure();
-        mixed_reset_to_empty_resets_index_to_empty_tree();
-        mixed_reset_to_empty_with_root_runner_uses_commit_tree_output();
-        remove_empty_root_in_passes_empty_drop_to_rebase();
-        #[cfg(unix)]
-        remove_empty_root_in_reports_non_utf8_editor_path();
-        remove_empty_root_in_propagates_rebase_status_io_error();
-        remove_empty_root_in_rejects_multiple_root_commits();
-        remove_empty_root_in_reports_git_output_and_editor_path_failures();
-        remove_empty_root_in_reports_missing_root_commit();
-        remove_empty_root_in_reports_rebase_failure_for_empty_root();
-        remove_empty_root_in_returns_early_when_root_has_content();
-        resolve_commit_refs_accepts_known_single_ref();
-        resolve_commit_refs_rejects_symmetric_diff_ranges();
-        resolve_commit_refs_rejects_unknown_range_ref();
-        resolve_commit_refs_rejects_unknown_single_ref();
-        resolve_commit_span_rejects_unknown_start_ref_in_two_ref_span();
-        resolve_commit_span_rejects_unknown_end_ref_in_two_ref_span();
-        resolve_head_commit_maps_git_errors_to_invalid_head();
-        root_runner_helpers_cover_unexpected_and_status_paths();
-        sort_topologically_orders_commits_from_oldest_to_newest();
-        sort_topologically_reports_empty_sorted_output();
-        sort_topologically_reports_git_output_failure_for_unknown_commits();
-        validate_ancestor_returns_ok_for_head_commit();
-        validate_ancestor_wraps_command_status_io_error();
-        validate_exec_syntax_returns_ok_for_valid_shell_command();
-        validate_exec_syntax_wraps_command_status_io_error();
-        validate_not_merge_rejects_merge_commit();
-    }
 }
