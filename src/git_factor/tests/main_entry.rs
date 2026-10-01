@@ -1807,3 +1807,312 @@ fn cmd_start_preserves_failure_after_the_last_output_write() {
     assert_eq!(fixture.direct_files_after(), fixture.direct_files_before);
     assert_eq!(fixture.observed_journal(), None);
 }
+
+#[test]
+fn cmd_start_characterizes_later_ancestor_query_failure() {
+    use crate::git_factor::tests::start_contracts::query;
+    use crate::git_factor::tests::start_contracts::query::{
+        QueryCase, QueryPosition, QueryReply, QueryTarget,
+    };
+
+    let selected = NonEmpty::from_vec(vec![
+        CommitSha::new("a".repeat(SHA_LEN)).or_abort("first SHA"),
+        CommitSha::new("b".repeat(SHA_LEN)).or_abort("second SHA"),
+    ])
+    .or_abort("nonempty span");
+    let case = QueryCase::Failure {
+        target: QueryTarget::Ancestor(QueryPosition::Last),
+        reply: QueryReply::Io,
+    };
+    let fixture = query::direct_start(&selected, false, &case, "gate out", "gate err");
+    let ctx = fixture.ctx();
+
+    let result = cmd_start_with_resolved_in(&ctx, &fixture.exec, &fixture.state, &fixture.selected);
+
+    assert_eq!(
+        result.map_err(|err| err.to_string()),
+        Err(concat!(
+            "git command failed: git command failed: ",
+            "git merge-base: selected query IO failure"
+        )
+        .to_owned())
+    );
+    assert_eq!(fixture.io.stdout(), "");
+    assert_eq!(fixture.io.stderr(), "");
+    assert_eq!(fixture.observed_journal(), None);
+    assert_eq!(fixture.observed_calls(), fixture.expected_calls);
+    assert_eq!(fixture.remaining_keys(), Vec::<String>::new());
+    // Only net contents/layout inside this tempdir, excluding factor state.
+    assert_eq!(fixture.direct_files_after(), fixture.direct_files_before);
+}
+
+#[test]
+fn cmd_start_preserves_partial_state_when_tree_query_fails() {
+    use crate::git_factor::tests::start_contracts::query;
+    use crate::git_factor::tests::start_contracts::query::{QueryCase, QueryReply, QueryTarget};
+    use alloc::collections::BTreeMap;
+
+    let selected = NonEmpty::new(CommitSha::new("a".repeat(SHA_LEN)).or_abort("admitted SHA"));
+    let case = QueryCase::Failure {
+        target: QueryTarget::Tree,
+        reply: QueryReply::Rejected,
+    };
+    let fixture = query::direct_start(&selected, false, &case, "gate out", "gate err");
+    let ctx = fixture.ctx();
+
+    let result = cmd_start_with_resolved_in(&ctx, &fixture.exec, &fixture.state, &fixture.selected);
+
+    assert_eq!(
+        result.map_err(|err| err.to_string()),
+        Err("git command failed: selected query refused".to_owned())
+    );
+    assert_eq!(fixture.io.stdout(), "gate out");
+    assert_eq!(fixture.io.stderr(), "gate err");
+    let expected_journal = [
+        ("commits", format!("{}\n", "a".repeat(SHA_LEN))),
+        ("current_index", "0\n".to_owned()),
+        ("exec", "true\n".to_owned()),
+        ("is_root", "false\n".to_owned()),
+        ("phase", "splitting\n".to_owned()),
+        ("requires_rebase", "false\n".to_owned()),
+        ("split_count", "0\n".to_owned()),
+        ("start_head", format!("{}\n", "a".repeat(SHA_LEN))),
+        ("started_rebase", "false\n".to_owned()),
+    ]
+    .into_iter()
+    .map(|(name, text)| (OsString::from(name), text))
+    .collect::<BTreeMap<_, _>>();
+    assert_eq!(fixture.observed_journal(), Some(expected_journal));
+    assert_eq!(fixture.observed_calls(), fixture.expected_calls);
+    assert_eq!(fixture.remaining_keys(), Vec::<String>::new());
+    // Only net contents/layout inside this tempdir, excluding factor state.
+    assert_eq!(fixture.direct_files_after(), fixture.direct_files_before);
+}
+
+#[test]
+fn cmd_start_preserves_opened_state_when_diff_query_fails() {
+    use crate::git_factor::tests::start_contracts::query;
+    use crate::git_factor::tests::start_contracts::query::{QueryCase, QueryReply, QueryTarget};
+    use alloc::collections::BTreeMap;
+
+    let selected = NonEmpty::new(CommitSha::new("a".repeat(SHA_LEN)).or_abort("admitted SHA"));
+    let case = QueryCase::Failure {
+        target: QueryTarget::Diff,
+        reply: QueryReply::Rejected,
+    };
+    let fixture = query::direct_start(&selected, false, &case, "gate out", "gate err");
+    let ctx = fixture.ctx();
+
+    let result = cmd_start_with_resolved_in(&ctx, &fixture.exec, &fixture.state, &fixture.selected);
+
+    assert_eq!(
+        result.map_err(|err| err.to_string()),
+        Err("git command failed: selected query refused".to_owned())
+    );
+    assert_eq!(fixture.io.stdout(), "gate out");
+    assert_eq!(fixture.io.stderr(), "gate err");
+    let expected_journal = [
+        ("commits", format!("{}\n", "a".repeat(SHA_LEN))),
+        ("current_index", "0\n".to_owned()),
+        ("exec", "true\n".to_owned()),
+        ("is_root", "false\n".to_owned()),
+        ("phase", "splitting\n".to_owned()),
+        ("requires_rebase", "false\n".to_owned()),
+        ("split_count", "0\n".to_owned()),
+        ("start_head", format!("{}\n", "a".repeat(SHA_LEN))),
+        ("started_rebase", "false\n".to_owned()),
+        ("expected_tree", TREE_EXPECTED_NL.to_owned()),
+    ]
+    .into_iter()
+    .map(|(name, text)| (OsString::from(name), text))
+    .collect::<BTreeMap<_, _>>();
+    assert_eq!(fixture.observed_journal(), Some(expected_journal));
+    assert_eq!(fixture.observed_calls(), fixture.expected_calls);
+    assert_eq!(fixture.remaining_keys(), Vec::<String>::new());
+    // Only net contents/layout inside this tempdir, excluding factor state.
+    assert_eq!(fixture.direct_files_after(), fixture.direct_files_before);
+}
+
+#[test]
+fn cmd_start_characterizes_later_merge_query_io_fail_open() {
+    use crate::git_factor::tests::start_contracts::query;
+    use crate::git_factor::tests::start_contracts::query::{
+        QueryCase, QueryPosition, QueryReply, QueryTarget,
+    };
+    use alloc::collections::BTreeMap;
+
+    let selected = NonEmpty::from_vec(vec![
+        CommitSha::new("a".repeat(SHA_LEN)).or_abort("first SHA"),
+        CommitSha::new("b".repeat(SHA_LEN)).or_abort("second SHA"),
+    ])
+    .or_abort("nonempty span");
+    let case = QueryCase::Failure {
+        target: QueryTarget::MergeParent(QueryPosition::Last),
+        reply: QueryReply::Io,
+    };
+    let fixture = query::direct_start(&selected, false, &case, "gate out", "gate err");
+    let ctx = fixture.ctx();
+
+    let result = cmd_start_with_resolved_in(&ctx, &fixture.exec, &fixture.state, &fixture.selected);
+
+    assert_eq!(result.map_err(|err| err.to_string()), Ok(EXIT_OK));
+    // This pins baseline fail-open behavior; the independent Merge Fix owns its repair.
+    assert_eq!(
+        fixture.io.stdout(),
+        concat!(
+            "gate outFACTOR: Split session started for 2 commits (tip: abcdef0).\n",
+            "ORIGINAL MESSAGE: subject\nUNSTAGED:\n\n",
+            "NEXT: Stage changes for the first atomic commit, then run:\n",
+            "  git factor --continue --message \"type: description\"\n\n",
+            "Run git factor -h for command help or git-factor --help for the ",
+            "full workflow guide.\n\nHINTS:\n",
+            "  - Find the ONE smallest addition nothing depends on\n",
+            "  - Target 15-30 lines (50 max)\n",
+            "  - Message: single concrete action, no \"and\"/\"or\"\n",
+            "  - Verify: git log --oneline | wc -l\n",
+            "  - NEVER use git commit. ONLY use git factor --continue.\n",
+            "  RECOVERY: git factor --abort\n",
+        )
+    );
+    assert_eq!(fixture.io.stderr(), "gate err");
+    let expected_journal = [
+        (
+            "commits",
+            format!("{}\n{}\n", "a".repeat(SHA_LEN), "b".repeat(SHA_LEN)),
+        ),
+        ("current_index", "1\n".to_owned()),
+        ("exec", "true\n".to_owned()),
+        ("is_root", "false\n".to_owned()),
+        ("phase", "splitting\n".to_owned()),
+        ("requires_rebase", "false\n".to_owned()),
+        ("split_count", "0\n".to_owned()),
+        ("start_head", format!("{}\n", "b".repeat(SHA_LEN))),
+        ("started_rebase", "false\n".to_owned()),
+        ("expected_tree", TREE_EXPECTED_NL.to_owned()),
+    ]
+    .into_iter()
+    .map(|(name, text)| (OsString::from(name), text))
+    .collect::<BTreeMap<_, _>>();
+    assert_eq!(fixture.observed_journal(), Some(expected_journal));
+    assert_eq!(fixture.observed_calls(), fixture.expected_calls);
+    assert_eq!(fixture.remaining_keys(), Vec::<String>::new());
+    // Only net contents/layout inside this tempdir, excluding factor state.
+    assert_eq!(fixture.direct_files_after(), fixture.direct_files_before);
+}
+
+#[test]
+fn cmd_start_preserves_opened_state_when_hint_query_fails() {
+    use crate::git_factor::tests::start_contracts::query;
+    use crate::git_factor::tests::start_contracts::query::{QueryCase, QueryReply, QueryTarget};
+    use alloc::collections::BTreeMap;
+
+    let selected = NonEmpty::new(CommitSha::new("a".repeat(SHA_LEN)).or_abort("admitted SHA"));
+    let case = QueryCase::Failure {
+        target: QueryTarget::TopLevel,
+        reply: QueryReply::Rejected,
+    };
+    let fixture = query::direct_start(&selected, false, &case, "gate out", "gate err");
+    let ctx = fixture.ctx();
+
+    let result = cmd_start_with_resolved_in(&ctx, &fixture.exec, &fixture.state, &fixture.selected);
+
+    assert_eq!(
+        result.map_err(|err| err.to_string()),
+        Err("git command failed: selected query refused".to_owned())
+    );
+    assert_eq!(
+        fixture.io.stdout(),
+        concat!(
+            "gate outFACTOR: Split session started for abcdef0.\n",
+            "ORIGINAL MESSAGE: subject\nUNSTAGED:\n\n",
+            "NEXT: Stage changes for the first atomic commit, then run:\n",
+            "  git factor --continue --message \"type: description\"\n\n",
+            "Run git factor -h for command help or git-factor --help for the ",
+            "full workflow guide.\n\n",
+        )
+    );
+    assert_eq!(fixture.io.stderr(), "gate err");
+    let expected_journal = [
+        ("commits", format!("{}\n", "a".repeat(SHA_LEN))),
+        ("current_index", "0\n".to_owned()),
+        ("exec", "true\n".to_owned()),
+        ("is_root", "false\n".to_owned()),
+        ("phase", "splitting\n".to_owned()),
+        ("requires_rebase", "false\n".to_owned()),
+        ("split_count", "0\n".to_owned()),
+        ("start_head", format!("{}\n", "a".repeat(SHA_LEN))),
+        ("started_rebase", "false\n".to_owned()),
+        ("expected_tree", TREE_EXPECTED_NL.to_owned()),
+    ]
+    .into_iter()
+    .map(|(name, text)| (OsString::from(name), text))
+    .collect::<BTreeMap<_, _>>();
+    assert_eq!(fixture.observed_journal(), Some(expected_journal));
+    assert_eq!(fixture.observed_calls(), fixture.expected_calls);
+    assert_eq!(fixture.remaining_keys(), Vec::<String>::new());
+    // Only net contents/layout inside this tempdir, excluding factor state.
+    assert_eq!(fixture.direct_files_after(), fixture.direct_files_before);
+}
+
+#[test]
+fn cmd_start_characterizes_nonroot_parent_query_rejection_as_root() {
+    use crate::git_factor::tests::start_contracts::query;
+    use crate::git_factor::tests::start_contracts::query::{QueryCase, QueryReply, QueryTarget};
+    use alloc::collections::BTreeMap;
+
+    let selected = NonEmpty::new(CommitSha::new("a".repeat(SHA_LEN)).or_abort("admitted SHA"));
+    let case = QueryCase::Failure {
+        target: QueryTarget::Parent,
+        reply: QueryReply::Rejected,
+    };
+    let fixture = query::direct_start(&selected, false, &case, "gate stdout", "gate stderr");
+    let ctx = fixture.ctx();
+
+    // Pins baseline fail-open behavior; the independent Parent Fix owns its repair.
+    let result = cmd_start_with_resolved_in(&ctx, &fixture.exec, &fixture.state, &fixture.selected);
+
+    assert_eq!(result.map_err(|err| err.to_string()), Ok(EXIT_OK));
+    assert_eq!(
+        fixture.io.stdout(),
+        concat!(
+            "gate stdoutFACTOR: Split session started for abcdef0.\n",
+            "ORIGINAL MESSAGE: subject\n",
+            "UNSTAGED:\n",
+            "\n",
+            "NEXT: Stage changes for the first atomic commit, then run:\n",
+            "  git factor --continue --message \"type: description\"\n",
+            "\n",
+            "Run git factor -h for command help or git-factor --help for the ",
+            "full workflow guide.\n",
+            "\n",
+            "HINTS:\n",
+            "  - Find the ONE smallest addition nothing depends on\n",
+            "  - Target 15-30 lines (50 max)\n",
+            "  - Message: single concrete action, no \"and\"/\"or\"\n",
+            "  - Verify: git log --oneline | wc -l\n",
+            "  - NEVER use git commit. ONLY use git factor --continue.\n",
+            "  RECOVERY: git factor --abort\n",
+        )
+    );
+    assert_eq!(fixture.io.stderr(), "gate stderr");
+    assert_eq!(fixture.observed_calls(), fixture.expected_calls);
+    assert_eq!(fixture.remaining_keys(), Vec::<String>::new());
+    // Compare net contents/layout in this tempdir, excluding factor state; Git has its own ledger.
+    assert_eq!(fixture.direct_files_after(), fixture.direct_files_before);
+    let expected_journal = [
+        ("commits", format!("{}\n", "a".repeat(SHA_LEN))),
+        ("current_index", "0\n".to_owned()),
+        ("exec", "true\n".to_owned()),
+        ("expected_tree", TREE_EXPECTED_NL.to_owned()),
+        ("is_root", "true\n".to_owned()),
+        ("phase", "splitting\n".to_owned()),
+        ("requires_rebase", "false\n".to_owned()),
+        ("split_count", "0\n".to_owned()),
+        ("start_head", format!("{}\n", "a".repeat(SHA_LEN))),
+        ("started_rebase", "false\n".to_owned()),
+    ]
+    .into_iter()
+    .map(|(name, text)| (OsString::from(name), text))
+    .collect::<BTreeMap<_, _>>();
+    assert_eq!(fixture.observed_journal(), Some(expected_journal));
+}
