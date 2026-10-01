@@ -485,11 +485,289 @@ pub(in crate::git_factor) fn validate_not_merge(
 }
 
 #[cfg(test)]
+#[path = "validation_resolve_contract.rs"]
+mod resolve_contract;
+
+#[cfg(test)]
 #[path = "validation_root_proptests.rs"]
 mod proptests;
 
 #[cfg(test)]
 mod tests {
+    mod resolve_commit {
+        use super::super::resolve_contract::{Observation, Reply};
+        use super::super::*;
+        use core::cell::RefCell;
+
+        #[test]
+        fn preserves_hex_case_and_trims_git_output() {
+            let calls = RefCell::new(Vec::new());
+            let observation = Observation::new(
+                &calls,
+                Reply::Output {
+                    exit_code: 0,
+                    stdout: b" \tABCDEF0123456789abcdef0123456789ABCDEF01\n".to_vec(),
+                },
+            );
+            let ctx = Ctx {
+                cwd: PathBuf::from("/contract/repository"),
+                env: &observation,
+                fs: &observation,
+                io: &observation,
+                runner: &observation,
+            };
+
+            let actual = super::super::resolve_commit(&ctx, "topic~2");
+
+            assert_eq!(
+                actual.or_abort("reference must resolve").as_str(),
+                "ABCDEF0123456789abcdef0123456789ABCDEF01"
+            );
+            assert_eq!(
+                *calls.borrow(),
+                vec![
+                    r#"output git ["rev-parse", "--verify", "topic~2"] cwd="/contract/repository""#
+                        .to_owned(),
+                ]
+            );
+        }
+
+        #[test]
+        fn preserves_reference_on_nonzero_exit() {
+            let calls = RefCell::new(Vec::new());
+            let observation = Observation::new(
+                &calls,
+                Reply::Output {
+                    exit_code: 23,
+                    stdout: b"0123456789abcdef0123456789abcdef01234567\n".to_vec(),
+                },
+            );
+            let ctx = Ctx {
+                cwd: PathBuf::from("/contract/repository"),
+                env: &observation,
+                fs: &observation,
+                io: &observation,
+                runner: &observation,
+            };
+
+            let actual = super::super::resolve_commit(&ctx, "topic~2");
+
+            assert!(matches!(actual, Err(FactorError::InvalidCommit(value)) if value == "topic~2"));
+            assert_eq!(
+                *calls.borrow(),
+                vec![
+                    r#"output git ["rev-parse", "--verify", "topic~2"] cwd="/contract/repository""#
+                        .to_owned(),
+                ]
+            );
+        }
+
+        #[test]
+        fn preserves_reference_on_launch_error() {
+            let calls = RefCell::new(Vec::new());
+            let observation = Observation::new(&calls, Reply::IoFailure);
+            let ctx = Ctx {
+                cwd: PathBuf::from("/contract/repository"),
+                env: &observation,
+                fs: &observation,
+                io: &observation,
+                runner: &observation,
+            };
+
+            let actual = super::super::resolve_commit(&ctx, "topic~2");
+
+            assert!(matches!(actual, Err(FactorError::InvalidCommit(value)) if value == "topic~2"));
+            assert_eq!(
+                *calls.borrow(),
+                vec![
+                    concat!(
+                        r#"output git ["rev-parse", "--verify", "topic~2"]"#,
+                        r#" cwd="/contract/repository""#,
+                    )
+                    .to_owned(),
+                    concat!(
+                        r#"output git ["rev-parse", "--verify", "HEAD"]"#,
+                        r#" cwd="/contract/repository""#,
+                    )
+                    .to_owned(),
+                    concat!(
+                        r#"output git ["rev-parse", "--verify", "HEAD^{tree}"]"#,
+                        r#" cwd="/contract/repository""#,
+                    )
+                    .to_owned(),
+                    concat!(
+                        r#"output git ["rev-parse", "--git-dir"]"#,
+                        r#" cwd="/contract/repository""#,
+                    )
+                    .to_owned(),
+                    concat!(
+                        r#"output git ["status", "--porcelain=v1", "--untracked-files=all"]"#,
+                        r#" cwd="/contract/repository""#,
+                    )
+                    .to_owned(),
+                ]
+            );
+        }
+
+        #[test]
+        fn rejects_empty_successful_output() {
+            let calls = RefCell::new(Vec::new());
+            let observation = Observation::new(
+                &calls,
+                Reply::Output {
+                    exit_code: 0,
+                    stdout: b" \n".to_vec(),
+                },
+            );
+            let ctx = Ctx {
+                cwd: PathBuf::from("/contract/repository"),
+                env: &observation,
+                fs: &observation,
+                io: &observation,
+                runner: &observation,
+            };
+
+            let actual = super::super::resolve_commit(&ctx, "topic~2");
+
+            assert!(matches!(actual, Err(FactorError::InvalidCommit(value)) if value.is_empty()));
+            assert_eq!(
+                *calls.borrow(),
+                vec![
+                    r#"output git ["rev-parse", "--verify", "topic~2"] cwd="/contract/repository""#
+                        .to_owned(),
+                ]
+            );
+        }
+
+        #[test]
+        fn rejects_short_successful_output() {
+            let calls = RefCell::new(Vec::new());
+            let observation = Observation::new(
+                &calls,
+                Reply::Output {
+                    exit_code: 0,
+                    stdout: b"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n".to_vec(),
+                },
+            );
+            let ctx = Ctx {
+                cwd: PathBuf::from("/contract/repository"),
+                env: &observation,
+                fs: &observation,
+                io: &observation,
+                runner: &observation,
+            };
+
+            let actual = super::super::resolve_commit(&ctx, "topic~2");
+
+            assert!(
+                matches!(actual, Err(FactorError::InvalidCommit(value)) if value == "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+            );
+            assert_eq!(
+                *calls.borrow(),
+                vec![
+                    r#"output git ["rev-parse", "--verify", "topic~2"] cwd="/contract/repository""#
+                        .to_owned(),
+                ]
+            );
+        }
+
+        #[test]
+        fn rejects_long_successful_output() {
+            let calls = RefCell::new(Vec::new());
+            let observation = Observation::new(
+                &calls,
+                Reply::Output {
+                    exit_code: 0,
+                    stdout: b"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n".to_vec(),
+                },
+            );
+            let ctx = Ctx {
+                cwd: PathBuf::from("/contract/repository"),
+                env: &observation,
+                fs: &observation,
+                io: &observation,
+                runner: &observation,
+            };
+
+            let actual = super::super::resolve_commit(&ctx, "topic~2");
+
+            assert!(
+                matches!(actual, Err(FactorError::InvalidCommit(value)) if value == "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+            );
+            assert_eq!(
+                *calls.borrow(),
+                vec![
+                    r#"output git ["rev-parse", "--verify", "topic~2"] cwd="/contract/repository""#
+                        .to_owned(),
+                ]
+            );
+        }
+
+        #[test]
+        fn rejects_nonhex_successful_output() {
+            let calls = RefCell::new(Vec::new());
+            let observation = Observation::new(
+                &calls,
+                Reply::Output {
+                    exit_code: 0,
+                    stdout: b"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaag\n".to_vec(),
+                },
+            );
+            let ctx = Ctx {
+                cwd: PathBuf::from("/contract/repository"),
+                env: &observation,
+                fs: &observation,
+                io: &observation,
+                runner: &observation,
+            };
+
+            let actual = super::super::resolve_commit(&ctx, "topic~2");
+
+            assert!(
+                matches!(actual, Err(FactorError::InvalidCommit(value)) if value == "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaag")
+            );
+            assert_eq!(
+                *calls.borrow(),
+                vec![
+                    r#"output git ["rev-parse", "--verify", "topic~2"] cwd="/contract/repository""#
+                        .to_owned(),
+                ]
+            );
+        }
+
+        #[test]
+        fn rejects_lossy_utf8_output() {
+            let calls = RefCell::new(Vec::new());
+            let observation = Observation::new(
+                &calls,
+                Reply::Output {
+                    exit_code: 0,
+                    stdout: vec![0xff],
+                },
+            );
+            let ctx = Ctx {
+                cwd: PathBuf::from("/contract/repository"),
+                env: &observation,
+                fs: &observation,
+                io: &observation,
+                runner: &observation,
+            };
+
+            let actual = super::super::resolve_commit(&ctx, "topic~2");
+
+            assert!(
+                matches!(actual, Err(FactorError::InvalidCommit(value)) if value == "\u{fffd}")
+            );
+            assert_eq!(
+                *calls.borrow(),
+                vec![
+                    r#"output git ["rev-parse", "--verify", "topic~2"] cwd="/contract/repository""#
+                        .to_owned(),
+                ]
+            );
+        }
+    }
+
     mod remove_empty_root_in {
         use super::*;
 

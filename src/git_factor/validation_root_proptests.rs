@@ -370,3 +370,115 @@ mod remove_empty_root_in {
         }
     }
 }
+
+mod resolve_commit {
+    use super::super::resolve_contract::{Observation, Reply};
+    use super::super::*;
+    use core::cell::RefCell;
+    use core::ops::RangeInclusive;
+    use proptest::prelude::*;
+
+    #[derive(Debug)]
+    enum Case {
+        LaunchFailure,
+        Malformed(String),
+        Nonzero(u8, String),
+        Success(String),
+    }
+
+    proptest! {
+        #[test]
+        fn preserves_query_identity_and_failure_payloads(
+            reference in "[A-Za-z0-9_~^/-]{0,80}",
+            case in prop_oneof![
+                "[0-9a-fA-F]{40}".prop_map(Case::Success),
+                "[0-9a-fA-F]{39}".prop_map(Case::Malformed),
+                "[0-9a-fA-F]{41}".prop_map(Case::Malformed),
+                "[0-9a-fA-F]{39}g".prop_map(Case::Malformed),
+                Just(String::new()).prop_map(Case::Malformed),
+                Just("\u{fffd}".to_owned()).prop_map(Case::Malformed),
+                (RangeInclusive::<u8>::new(1, 127), "[0-9a-fA-F]{40}")
+                    .prop_map(|(code, stdout)| Case::Nonzero(code, stdout)),
+                Just(()).prop_map(|()| Case::LaunchFailure),
+            ],
+            padding in prop::sample::select(vec!["", " ", "\t", "\n"]),
+        ) {
+            let (reply, expected, snapshot) = match case {
+                Case::LaunchFailure => (
+                    Reply::IoFailure,
+                    Err(reference.clone()),
+                    vec![
+                        concat!(
+                            r#"output git ["rev-parse", "--verify", "HEAD"]"#,
+                            r#" cwd="/contract/repository""#,
+                        ).to_owned(),
+                        concat!(
+                            r#"output git ["rev-parse", "--verify", "HEAD^{tree}"]"#,
+                            r#" cwd="/contract/repository""#,
+                        ).to_owned(),
+                        concat!(
+                            r#"output git ["rev-parse", "--git-dir"]"#,
+                            r#" cwd="/contract/repository""#,
+                        ).to_owned(),
+                        concat!(
+                            r#"output git ["status", "--porcelain=v1", "#,
+                            r#""--untracked-files=all"]"#,
+                            r#" cwd="/contract/repository""#,
+                        ).to_owned(),
+                    ],
+                ),
+                Case::Success(sha) => (
+                    Reply::Output {
+                        exit_code: 0,
+                        stdout: format!("{padding}{sha}{padding}\n").into_bytes(),
+                    },
+                    Ok(sha),
+                    Vec::new(),
+                ),
+                Case::Malformed(stdout) => (
+                    Reply::Output {
+                        exit_code: 0,
+                        stdout: format!("{padding}{stdout}{padding}\n").into_bytes(),
+                    },
+                    Err(stdout),
+                    Vec::new(),
+                ),
+                Case::Nonzero(exit_code, stdout) => (
+                    Reply::Output {
+                        exit_code,
+                        stdout: format!("{padding}{stdout}{padding}\n").into_bytes(),
+                    },
+                    Err(reference.clone()),
+                    Vec::new(),
+                ),
+            };
+            let calls = RefCell::new(Vec::new());
+            let observation = Observation::new(&calls, reply);
+            let ctx = Ctx {
+                cwd: PathBuf::from("/contract/repository"),
+                env: &observation,
+                fs: &observation,
+                io: &observation,
+                runner: &observation,
+            };
+            let mut expected_calls = vec![format!(
+                concat!(
+                    "output git [\"rev-parse\", \"--verify\", {:?}]",
+                    " cwd=\"/contract/repository\"",
+                ),
+                reference,
+            )];
+            expected_calls.extend(snapshot);
+
+            let actual = super::super::resolve_commit(&ctx, &reference);
+
+            let payload = match actual {
+                Ok(sha) => Ok(sha.as_str().to_owned()),
+                Err(FactorError::InvalidCommit(value)) => Err(value),
+                Err(other) => Err(format!("unexpected error: {other:?}")),
+            };
+            prop_assert_eq!(payload, expected);
+            prop_assert_eq!(&*calls.borrow(), &expected_calls);
+        }
+    }
+}
