@@ -2589,3 +2589,31 @@ fn cmd_start_recovery_wait_preserves_populated_begin_journal() {
     .collect::<BTreeMap<_, _>>();
     assert_eq!(fixture.observed_journal(), Some(expected_journal));
 }
+
+#[test]
+fn cmd_start_refuses_parent_query_io_before_mutation() {
+    use crate::git_factor::tests::start_contracts::query;
+    use crate::git_factor::tests::start_contracts::query::{QueryCase, QueryReply, QueryTarget};
+
+    let selected = NonEmpty::new(CommitSha::new("a".repeat(SHA_LEN)).or_abort("admitted SHA"));
+    let case = QueryCase::Failure {
+        target: QueryTarget::Parent,
+        reply: QueryReply::Io,
+    };
+    let fixture = query::direct_start(&selected, false, &case, "gate out", "gate err");
+    let ctx = fixture.ctx();
+
+    let result = cmd_start_with_resolved_in(&ctx, &fixture.exec, &fixture.state, &fixture.selected);
+
+    assert_eq!(
+        result.map_err(|err| err.to_string()),
+        Err("git command failed: git rev-parse: selected query IO failure".to_owned())
+    );
+    assert_eq!(fixture.io.stdout(), "");
+    assert_eq!(fixture.io.stderr(), "");
+    assert_eq!(fixture.observed_journal(), None);
+    assert_eq!(fixture.observed_calls(), fixture.expected_calls);
+    assert_eq!(fixture.remaining_keys(), Vec::<String>::new());
+    // Only net contents/layout inside this tempdir, excluding factor state.
+    assert_eq!(fixture.direct_files_after(), fixture.direct_files_before);
+}
