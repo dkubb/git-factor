@@ -1,4 +1,5 @@
 use super::*;
+use crate::git_factor::tests::start_contracts::replay;
 use crate::git_factor::tests::start_contracts::{DirectStart, GateCase, query};
 use core::num::NonZeroUsize;
 use core::ops::RangeInclusive;
@@ -134,6 +135,45 @@ proptest! {
         prop_assert_eq!(&fixture.io.stderr(), &fixture.expected_stderr);
         prop_assert_eq!(&fixture.observed_journal(), &fixture.expected_journal);
         // End-state contents/layout only, inside the owned tempdir and outside factor state.
+        prop_assert_eq!(&fixture.direct_files_after(), &fixture.direct_files_before);
+    }
+}
+
+proptest! {
+    #[test]
+    fn characterizes_opening_replay_and_recovery_boundaries(
+        shas in prop::collection::vec(
+            string_regex("[0-9a-f]{40}").or_abort("SHA strategy"), 1..=4),
+        root in any::<bool>(),
+        case in prop_oneof![
+            Just(replay::ReplayCase::FailedWithoutPause),
+            Just(replay::ReplayCase::FinishedWithoutPause),
+            Just(replay::ReplayCase::InvalidCommits),
+            Just(replay::ReplayCase::InvalidPhase),
+            Just(replay::ReplayCase::Paused),
+            Just(replay::ReplayCase::Waiting),
+            Just(replay::ReplayCase::WaitingAfterBegin),
+            (1..=replay::ReplayStart::single_commit_banner_fault_end().get())
+                .prop_map(|at| replay::ReplayCase::BannerFailure(
+                    NonZeroUsize::new(at).or_abort("positive banner fault"))),
+        ],
+    ) {
+        let commits = shas.into_iter().map(|sha| CommitSha::new(sha).or_abort("admitted SHA"))
+            .collect::<Vec<_>>();
+        let selected = NonEmpty::from_vec(commits).or_abort("nonempty selected span");
+        let fixture = replay::direct_start(&selected, root, &case);
+        let ctx = fixture.ctx();
+
+        let result = cmd_start_with_resolved_in(
+            &ctx, &fixture.exec, &fixture.state, &fixture.selected,
+        );
+
+        prop_assert_eq!(result.map_err(|err| err.to_string()), fixture.expected_result.clone());
+        prop_assert_eq!(fixture.io.stdout(), fixture.expected_stdout.clone());
+        prop_assert_eq!(fixture.io.stderr(), "");
+        prop_assert_eq!(fixture.observed_journal(), fixture.expected_journal.clone());
+        prop_assert_eq!(fixture.observed_calls(), fixture.expected_calls.clone());
+        prop_assert_eq!(fixture.remaining_keys(), Vec::<String>::new());
         prop_assert_eq!(&fixture.direct_files_after(), &fixture.direct_files_before);
     }
 }

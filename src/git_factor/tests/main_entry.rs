@@ -2116,3 +2116,476 @@ fn cmd_start_characterizes_nonroot_parent_query_rejection_as_root() {
     .collect::<BTreeMap<_, _>>();
     assert_eq!(fixture.observed_journal(), Some(expected_journal));
 }
+
+#[test]
+fn cmd_start_finished_replay_removes_populated_begin_journal() {
+    use crate::git_factor::tests::start_contracts::replay;
+
+    let selected = NonEmpty::new(CommitSha::new("a".repeat(SHA_LEN)).or_abort("admitted SHA"));
+    let fixture = replay::direct_start(&selected, false, &replay::ReplayCase::FinishedWithoutPause);
+    let ctx = fixture.ctx();
+
+    let result = cmd_start_with_resolved_in(&ctx, &fixture.exec, &fixture.state, &fixture.selected);
+
+    assert_eq!(
+        result.map_err(|err| err.to_string()),
+        Err(
+            "git command failed: git rebase finished without pausing at the factor session break"
+                .to_owned()
+        )
+    );
+    assert_eq!(fixture.io.stdout(), "");
+    assert_eq!(fixture.io.stderr(), "");
+    assert_eq!(fixture.observed_journal(), None);
+    assert_eq!(fixture.observed_calls(), fixture.expected_calls);
+    assert_eq!(fixture.remaining_keys(), Vec::<String>::new());
+    // Only direct effects outside the owned state and scripted native flag are observed here.
+    assert_eq!(fixture.direct_files_after(), fixture.direct_files_before);
+}
+
+#[test]
+fn cmd_start_failed_replay_removes_populated_begin_journal() {
+    use crate::git_factor::tests::start_contracts::replay;
+
+    let selected = NonEmpty::new(CommitSha::new("a".repeat(SHA_LEN)).or_abort("admitted SHA"));
+    let fixture = replay::direct_start(&selected, false, &replay::ReplayCase::FailedWithoutPause);
+    let ctx = fixture.ctx();
+
+    let result = cmd_start_with_resolved_in(&ctx, &fixture.exec, &fixture.state, &fixture.selected);
+
+    assert_eq!(
+        result.map_err(|err| err.to_string()),
+        Err("git command failed: git rebase failed (exit 1)".to_owned())
+    );
+    assert_eq!(fixture.io.stdout(), "");
+    assert_eq!(fixture.io.stderr(), "");
+    assert_eq!(fixture.observed_journal(), None);
+    assert_eq!(fixture.observed_calls(), fixture.expected_calls);
+    assert_eq!(fixture.remaining_keys(), Vec::<String>::new());
+    // Only direct effects outside the owned state and scripted native flag are observed here.
+    assert_eq!(fixture.direct_files_after(), fixture.direct_files_before);
+}
+
+#[test]
+fn cmd_start_preflight_recovery_wait_has_no_begin_journal() {
+    use crate::git_factor::tests::start_contracts::replay;
+
+    let selected = NonEmpty::new(CommitSha::new("a".repeat(SHA_LEN)).or_abort("admitted SHA"));
+    let fixture = replay::direct_start(&selected, false, &replay::ReplayCase::Waiting);
+    let ctx = fixture.ctx();
+
+    let result = cmd_start_with_resolved_in(&ctx, &fixture.exec, &fixture.state, &fixture.selected);
+
+    assert_eq!(result.map_err(|err| err.to_string()), Ok(EXIT_TEMPFAIL));
+    assert_eq!(fixture.io.stdout(), "");
+    assert_eq!(fixture.io.stderr(), "");
+    assert_eq!(fixture.observed_journal(), None);
+    assert_eq!(fixture.observed_calls(), fixture.expected_calls);
+    assert_eq!(fixture.remaining_keys(), Vec::<String>::new());
+    // Only direct effects outside the owned state and scripted native flag are observed here.
+    assert_eq!(fixture.direct_files_after(), fixture.direct_files_before);
+}
+
+#[test]
+fn cmd_start_opens_paused_replay_with_literal_journal() {
+    use crate::git_factor::tests::start_contracts::replay;
+    use alloc::collections::BTreeMap;
+
+    let selected = NonEmpty::new(CommitSha::new("a".repeat(SHA_LEN)).or_abort("admitted SHA"));
+    let fixture = replay::direct_start(&selected, false, &replay::ReplayCase::Paused);
+    let ctx = fixture.ctx();
+
+    let result = cmd_start_with_resolved_in(&ctx, &fixture.exec, &fixture.state, &fixture.selected);
+
+    assert_eq!(result.map_err(|err| err.to_string()), Ok(EXIT_OK));
+    assert_eq!(
+        fixture.io.stdout(),
+        concat!(
+            "FACTOR: Split session started for abcdef0.\n",
+            "ORIGINAL MESSAGE: subject\n",
+            "UNSTAGED:\n",
+            "\n",
+            "NEXT: Stage changes for the first atomic commit, then run:\n",
+            "  git factor --continue --message \"type: description\"\n",
+            "\n",
+            "Run git factor -h for command help or git-factor --help for the ",
+            "full workflow guide.\n",
+            "\n",
+            "HINTS:\n",
+            "  - Find the ONE smallest addition nothing depends on\n",
+            "  - Target 15-30 lines (50 max)\n",
+            "  - Message: single concrete action, no \"and\"/\"or\"\n",
+            "  - Verify: git log --oneline | wc -l\n",
+            "  - NEVER use git commit. ONLY use git factor --continue.\n",
+            "  RECOVERY: git factor --abort\n",
+        )
+    );
+    assert_eq!(fixture.io.stderr(), "");
+    assert_eq!(fixture.observed_calls(), fixture.expected_calls);
+    assert_eq!(fixture.remaining_keys(), Vec::<String>::new());
+    // Compare net contents/layout in this tempdir, excluding factor state; Git has its own ledger.
+    assert_eq!(fixture.direct_files_after(), fixture.direct_files_before);
+    let expected_journal = [
+        ("commits", format!("{}\n", "a".repeat(SHA_LEN))),
+        ("current_index", "0\n".to_owned()),
+        ("exec", "true\n".to_owned()),
+        ("expected_tree", TREE_EXPECTED_NL.to_owned()),
+        ("is_root", "false\n".to_owned()),
+        ("phase", "splitting\n".to_owned()),
+        ("requires_rebase", "true\n".to_owned()),
+        ("split_count", "0\n".to_owned()),
+        ("start_head", format!("{}\n", "0".repeat(SHA_LEN))),
+        ("started_rebase", "true\n".to_owned()),
+    ]
+    .into_iter()
+    .map(|(name, text)| (OsString::from(name), text))
+    .collect::<BTreeMap<_, _>>();
+    assert_eq!(fixture.observed_journal(), Some(expected_journal));
+}
+
+#[test]
+fn cmd_start_refuses_invalid_replay_commits_with_literal_pending_journal() {
+    use crate::git_factor::tests::start_contracts::replay;
+    use alloc::collections::BTreeMap;
+
+    let selected = NonEmpty::new(CommitSha::new("a".repeat(SHA_LEN)).or_abort("admitted SHA"));
+    let fixture = replay::direct_start(&selected, false, &replay::ReplayCase::InvalidCommits);
+    let ctx = fixture.ctx();
+
+    let result = cmd_start_with_resolved_in(&ctx, &fixture.exec, &fixture.state, &fixture.selected);
+
+    assert_eq!(
+        result.map_err(|err| err.to_string()),
+        Err("invalid commit: bad".to_owned())
+    );
+    assert_eq!(fixture.io.stdout(), "");
+    assert_eq!(fixture.io.stderr(), "");
+    assert_eq!(fixture.observed_calls(), fixture.expected_calls);
+    assert_eq!(fixture.remaining_keys(), Vec::<String>::new());
+    // Compare net contents/layout in this tempdir, excluding factor state; Git has its own ledger.
+    assert_eq!(fixture.direct_files_after(), fixture.direct_files_before);
+    let expected_journal = [
+        ("commits", "bad\n".to_owned()),
+        ("current_index", "0\n".to_owned()),
+        ("exec", "true\n".to_owned()),
+        ("expected_tree", TREE_EXPECTED_NL.to_owned()),
+        ("is_root", "false\n".to_owned()),
+        ("phase", "pending_start\n".to_owned()),
+        ("requires_rebase", "true\n".to_owned()),
+        ("split_count", "0\n".to_owned()),
+        ("start_head", format!("{}\n", "0".repeat(SHA_LEN))),
+        ("started_rebase", "true\n".to_owned()),
+    ]
+    .into_iter()
+    .map(|(name, text)| (OsString::from(name), text))
+    .collect::<BTreeMap<_, _>>();
+    assert_eq!(fixture.observed_journal(), Some(expected_journal));
+}
+
+#[test]
+fn cmd_start_refuses_nonpending_replay_phase_with_literal_journal() {
+    use crate::git_factor::tests::start_contracts::replay;
+    use alloc::collections::BTreeMap;
+
+    let selected = NonEmpty::new(CommitSha::new("a".repeat(SHA_LEN)).or_abort("admitted SHA"));
+    let fixture = replay::direct_start(&selected, false, &replay::ReplayCase::InvalidPhase);
+    let ctx = fixture.ctx();
+
+    let result = cmd_start_with_resolved_in(&ctx, &fixture.exec, &fixture.state, &fixture.selected);
+
+    assert_eq!(
+        result.map_err(|err| err.to_string()),
+        Err("git command failed: factor session is not waiting to begin splitting".to_owned())
+    );
+    assert_eq!(fixture.io.stdout(), "");
+    assert_eq!(fixture.io.stderr(), "");
+    assert_eq!(fixture.observed_calls(), fixture.expected_calls);
+    assert_eq!(fixture.remaining_keys(), Vec::<String>::new());
+    // Compare net contents/layout in this tempdir, excluding factor state; Git has its own ledger.
+    assert_eq!(fixture.direct_files_after(), fixture.direct_files_before);
+    let expected_journal = [
+        ("commits", format!("{}\n", "a".repeat(SHA_LEN))),
+        ("current_index", "0\n".to_owned()),
+        ("exec", "true\n".to_owned()),
+        ("expected_tree", TREE_EXPECTED_NL.to_owned()),
+        ("is_root", "false\n".to_owned()),
+        ("phase", "splitting\n".to_owned()),
+        ("requires_rebase", "true\n".to_owned()),
+        ("split_count", "0\n".to_owned()),
+        ("start_head", format!("{}\n", "0".repeat(SHA_LEN))),
+        ("started_rebase", "true\n".to_owned()),
+    ]
+    .into_iter()
+    .map(|(name, text)| (OsString::from(name), text))
+    .collect::<BTreeMap<_, _>>();
+    assert_eq!(fixture.observed_journal(), Some(expected_journal));
+}
+
+#[test]
+fn cmd_start_first_replay_banner_write_failure_retains_split_journal() {
+    use crate::git_factor::tests::start_contracts::replay;
+    use alloc::collections::BTreeMap;
+    use core::num::NonZeroUsize;
+
+    let selected = NonEmpty::new(CommitSha::new("a".repeat(SHA_LEN)).or_abort("admitted SHA"));
+    let fixture = replay::direct_start(
+        &selected,
+        false,
+        &replay::ReplayCase::BannerFailure(NonZeroUsize::new(1).or_abort("first write")),
+    );
+    let ctx = fixture.ctx();
+
+    let result = cmd_start_with_resolved_in(&ctx, &fixture.exec, &fixture.state, &fixture.selected);
+
+    assert_eq!(
+        result.map_err(|err| err.to_string()),
+        Err("failed to write output: selected output write failed".to_owned())
+    );
+    assert_eq!(fixture.io.stdout(), "");
+    assert_eq!(fixture.io.stderr(), "");
+    assert_eq!(fixture.observed_calls(), fixture.expected_calls);
+    assert_eq!(fixture.remaining_keys(), Vec::<String>::new());
+    // Compare net contents/layout in this tempdir, excluding factor state; Git has its own ledger.
+    assert_eq!(fixture.direct_files_after(), fixture.direct_files_before);
+    let expected_journal = [
+        ("commits", format!("{}\n", "a".repeat(SHA_LEN))),
+        ("current_index", "0\n".to_owned()),
+        ("exec", "true\n".to_owned()),
+        ("expected_tree", TREE_EXPECTED_NL.to_owned()),
+        ("is_root", "false\n".to_owned()),
+        ("phase", "splitting\n".to_owned()),
+        ("requires_rebase", "true\n".to_owned()),
+        ("split_count", "0\n".to_owned()),
+        ("start_head", format!("{}\n", "0".repeat(SHA_LEN))),
+        ("started_rebase", "true\n".to_owned()),
+    ]
+    .into_iter()
+    .map(|(name, text)| (OsString::from(name), text))
+    .collect::<BTreeMap<_, _>>();
+    assert_eq!(fixture.observed_journal(), Some(expected_journal));
+}
+
+#[test]
+fn cmd_start_last_replay_banner_write_failure_retains_split_journal() {
+    use crate::git_factor::tests::start_contracts::replay;
+    use alloc::collections::BTreeMap;
+    use core::num::NonZeroUsize;
+
+    let selected = NonEmpty::new(CommitSha::new("a".repeat(SHA_LEN)).or_abort("admitted SHA"));
+    let fixture = replay::direct_start(
+        &selected,
+        false,
+        &replay::ReplayCase::BannerFailure(NonZeroUsize::new(16).or_abort("last write")),
+    );
+    let ctx = fixture.ctx();
+
+    let result = cmd_start_with_resolved_in(&ctx, &fixture.exec, &fixture.state, &fixture.selected);
+
+    assert_eq!(
+        result.map_err(|err| err.to_string()),
+        Err("failed to write output: selected output write failed".to_owned())
+    );
+    assert_eq!(
+        fixture.io.stdout(),
+        concat!(
+            "FACTOR: Split session started for abcdef0.\n",
+            "ORIGINAL MESSAGE: subject\n",
+            "UNSTAGED:\n",
+            "\n",
+            "NEXT: Stage changes for the first atomic commit, then run:\n",
+            "  git factor --continue --message \"type: description\"\n",
+            "\n",
+            "Run git factor -h for command help or git-factor --help for the ",
+            "full workflow guide.\n",
+            "\n",
+            "HINTS:\n",
+            "  - Find the ONE smallest addition nothing depends on\n",
+            "  - Target 15-30 lines (50 max)\n",
+            "  - Message: single concrete action, no \"and\"/\"or\"\n",
+            "  - Verify: git log --oneline | wc -l\n",
+            "  - NEVER use git commit. ONLY use git factor --continue.\n",
+        )
+    );
+    assert_eq!(fixture.io.stderr(), "");
+    assert_eq!(fixture.observed_calls(), fixture.expected_calls);
+    assert_eq!(fixture.remaining_keys(), Vec::<String>::new());
+    // Compare net contents/layout in this tempdir, excluding factor state; Git has its own ledger.
+    assert_eq!(fixture.direct_files_after(), fixture.direct_files_before);
+    let expected_journal = [
+        ("commits", format!("{}\n", "a".repeat(SHA_LEN))),
+        ("current_index", "0\n".to_owned()),
+        ("exec", "true\n".to_owned()),
+        ("expected_tree", TREE_EXPECTED_NL.to_owned()),
+        ("is_root", "false\n".to_owned()),
+        ("phase", "splitting\n".to_owned()),
+        ("requires_rebase", "true\n".to_owned()),
+        ("split_count", "0\n".to_owned()),
+        ("start_head", format!("{}\n", "0".repeat(SHA_LEN))),
+        ("started_rebase", "true\n".to_owned()),
+    ]
+    .into_iter()
+    .map(|(name, text)| (OsString::from(name), text))
+    .collect::<BTreeMap<_, _>>();
+    assert_eq!(fixture.observed_journal(), Some(expected_journal));
+}
+
+#[test]
+fn cmd_start_past_last_replay_banner_write_finishes() {
+    use crate::git_factor::tests::start_contracts::replay;
+    use alloc::collections::BTreeMap;
+    use core::num::NonZeroUsize;
+
+    let selected = NonEmpty::new(CommitSha::new("a".repeat(SHA_LEN)).or_abort("admitted SHA"));
+    let fixture = replay::direct_start(
+        &selected,
+        false,
+        &replay::ReplayCase::BannerFailure(NonZeroUsize::new(17).or_abort("past last write")),
+    );
+    let ctx = fixture.ctx();
+
+    let result = cmd_start_with_resolved_in(&ctx, &fixture.exec, &fixture.state, &fixture.selected);
+
+    assert_eq!(result.map_err(|err| err.to_string()), Ok(EXIT_OK));
+    assert_eq!(
+        fixture.io.stdout(),
+        concat!(
+            "FACTOR: Split session started for abcdef0.\n",
+            "ORIGINAL MESSAGE: subject\n",
+            "UNSTAGED:\n",
+            "\n",
+            "NEXT: Stage changes for the first atomic commit, then run:\n",
+            "  git factor --continue --message \"type: description\"\n",
+            "\n",
+            "Run git factor -h for command help or git-factor --help for the ",
+            "full workflow guide.\n",
+            "\n",
+            "HINTS:\n",
+            "  - Find the ONE smallest addition nothing depends on\n",
+            "  - Target 15-30 lines (50 max)\n",
+            "  - Message: single concrete action, no \"and\"/\"or\"\n",
+            "  - Verify: git log --oneline | wc -l\n",
+            "  - NEVER use git commit. ONLY use git factor --continue.\n",
+            "  RECOVERY: git factor --abort\n",
+        )
+    );
+    assert_eq!(fixture.io.stderr(), "");
+    assert_eq!(fixture.observed_calls(), fixture.expected_calls);
+    assert_eq!(fixture.remaining_keys(), Vec::<String>::new());
+    // Compare net contents/layout in this tempdir, excluding factor state; Git has its own ledger.
+    assert_eq!(fixture.direct_files_after(), fixture.direct_files_before);
+    let expected_journal = [
+        ("commits", format!("{}\n", "a".repeat(SHA_LEN))),
+        ("current_index", "0\n".to_owned()),
+        ("exec", "true\n".to_owned()),
+        ("expected_tree", TREE_EXPECTED_NL.to_owned()),
+        ("is_root", "false\n".to_owned()),
+        ("phase", "splitting\n".to_owned()),
+        ("requires_rebase", "true\n".to_owned()),
+        ("split_count", "0\n".to_owned()),
+        ("start_head", format!("{}\n", "0".repeat(SHA_LEN))),
+        ("started_rebase", "true\n".to_owned()),
+    ]
+    .into_iter()
+    .map(|(name, text)| (OsString::from(name), text))
+    .collect::<BTreeMap<_, _>>();
+    assert_eq!(fixture.observed_journal(), Some(expected_journal));
+}
+
+#[test]
+fn cmd_start_opens_root_range_replay_with_literal_journal() {
+    use crate::git_factor::tests::start_contracts::replay;
+    use alloc::collections::BTreeMap;
+
+    let selected = NonEmpty {
+        head: CommitSha::new("a".repeat(SHA_LEN)).or_abort("admitted first SHA"),
+        tail: vec![CommitSha::new("b".repeat(SHA_LEN)).or_abort("admitted tip SHA")],
+    };
+    let fixture = replay::direct_start(&selected, true, &replay::ReplayCase::Paused);
+    let ctx = fixture.ctx();
+
+    let result = cmd_start_with_resolved_in(&ctx, &fixture.exec, &fixture.state, &fixture.selected);
+
+    assert_eq!(result.map_err(|err| err.to_string()), Ok(EXIT_OK));
+    assert_eq!(
+        fixture.io.stdout(),
+        concat!(
+            "FACTOR: Split session started for 2 commits (tip: abcdef0).\n",
+            "ORIGINAL MESSAGE: subject\n",
+            "UNSTAGED:\n",
+            "\n",
+            "NEXT: Stage changes for the first atomic commit, then run:\n",
+            "  git factor --continue --message \"type: description\"\n",
+            "\n",
+            "Run git factor -h for command help or git-factor --help for the ",
+            "full workflow guide.\n",
+            "\n",
+            "HINTS:\n",
+            "  - Find the ONE smallest addition nothing depends on\n",
+            "  - Target 15-30 lines (50 max)\n",
+            "  - Message: single concrete action, no \"and\"/\"or\"\n",
+            "  - Verify: git log --oneline | wc -l\n",
+            "  - NEVER use git commit. ONLY use git factor --continue.\n",
+            "  RECOVERY: git factor --abort\n",
+        )
+    );
+    assert_eq!(fixture.io.stderr(), "");
+    assert_eq!(fixture.observed_calls(), fixture.expected_calls);
+    assert_eq!(fixture.remaining_keys(), Vec::<String>::new());
+    // Compare net contents/layout in this tempdir, excluding factor state; Git has its own ledger.
+    assert_eq!(fixture.direct_files_after(), fixture.direct_files_before);
+    let expected_journal = [
+        (
+            "commits",
+            format!("{}\n{}\n", "a".repeat(SHA_LEN), "b".repeat(SHA_LEN)),
+        ),
+        ("current_index", "1\n".to_owned()),
+        ("exec", "true\n".to_owned()),
+        ("expected_tree", TREE_EXPECTED_NL.to_owned()),
+        ("is_root", "true\n".to_owned()),
+        ("phase", "splitting\n".to_owned()),
+        ("requires_rebase", "true\n".to_owned()),
+        ("split_count", "0\n".to_owned()),
+        ("start_head", format!("{}\n", "0".repeat(SHA_LEN))),
+        ("started_rebase", "true\n".to_owned()),
+    ]
+    .into_iter()
+    .map(|(name, text)| (OsString::from(name), text))
+    .collect::<BTreeMap<_, _>>();
+    assert_eq!(fixture.observed_journal(), Some(expected_journal));
+}
+
+#[test]
+fn cmd_start_recovery_wait_preserves_populated_begin_journal() {
+    use crate::git_factor::tests::start_contracts::replay;
+    use alloc::collections::BTreeMap;
+
+    let selected = NonEmpty::new(CommitSha::new("a".repeat(SHA_LEN)).or_abort("admitted SHA"));
+    let fixture = replay::direct_start(&selected, false, &replay::ReplayCase::WaitingAfterBegin);
+    let ctx = fixture.ctx();
+
+    let result = cmd_start_with_resolved_in(&ctx, &fixture.exec, &fixture.state, &fixture.selected);
+
+    assert_eq!(result.map_err(|err| err.to_string()), Ok(EXIT_TEMPFAIL));
+    assert_eq!(fixture.io.stdout(), "");
+    assert_eq!(fixture.io.stderr(), "");
+    assert_eq!(fixture.observed_calls(), fixture.expected_calls);
+    assert_eq!(fixture.remaining_keys(), Vec::<String>::new());
+    // Compare net contents/layout in this tempdir, excluding factor state; Git has its own ledger.
+    assert_eq!(fixture.direct_files_after(), fixture.direct_files_before);
+    let expected_journal = [
+        ("commits", format!("{}\n", "a".repeat(SHA_LEN))),
+        ("current_index", "0\n".to_owned()),
+        ("exec", "true\n".to_owned()),
+        ("expected_tree", TREE_EXPECTED_NL.to_owned()),
+        ("is_root", "false\n".to_owned()),
+        ("phase", "pending_start\n".to_owned()),
+        ("requires_rebase", "true\n".to_owned()),
+        ("split_count", "0\n".to_owned()),
+        ("start_head", format!("{}\n", "0".repeat(SHA_LEN))),
+        ("started_rebase", "true\n".to_owned()),
+    ]
+    .into_iter()
+    .map(|(name, text)| (OsString::from(name), text))
+    .collect::<BTreeMap<_, _>>();
+    assert_eq!(fixture.observed_journal(), Some(expected_journal));
+}

@@ -1,6 +1,9 @@
 #[path = "start_query_contracts.rs"]
 pub(in crate::git_factor) mod query;
 
+#[path = "start_replay_contracts.rs"]
+pub(in crate::git_factor) mod replay;
+
 use super::*;
 use alloc::collections::BTreeMap;
 use core::cell::Cell;
