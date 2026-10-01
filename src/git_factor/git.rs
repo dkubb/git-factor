@@ -804,23 +804,6 @@ mod tests {
     }
 
     #[test]
-    fn proptest_run_non_property_unit_suite_part_3() {
-        trace_process_command_writes_when_tracing_is_enabled();
-        trace_process_command_returns_early_without_trace_env();
-        git_output_with_tracing_covers_success_and_nonzero_status_paths();
-        trace_spawn_error_paths_cover_enabled_and_disabled_tracing();
-        append_and_trace_process_return_early_when_tracing_is_disabled_or_unwritable();
-        append_trace_line_handles_trace_path_without_parent();
-        env_methods_and_run_git_non_interactive_success_path();
-        git_output_with_spawn_error_covers_trace_toggle_and_before_none_paths();
-        git_output_with_success_without_trace_covers_after_default_snapshot_path();
-        git_output_with_trace_covers_snapshot_collection_paths();
-        run_git_non_interactive_reports_nonzero_exit();
-        run_git_with_reports_nonzero_exit();
-        run_git_with_returns_ok_for_zero_status();
-    }
-
-    #[test]
     fn trace_helpers_cover_edge_cases() {
         let dir = TempDir::new().or_abort("tempdir");
         let env = TestEnv {
