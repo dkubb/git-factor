@@ -279,50 +279,6 @@ impl SplitCount {
     }
 }
 
-/// Abbreviated commit SHA from `rev-parse --short` (1–40 lowercase hex chars).
-#[cfg(test)]
-#[expect(
-    dead_code,
-    reason = "test-only wrapper is validated by constructors even when direct field reads are absent"
-)]
-#[derive(Debug)]
-struct ShortSha(NonEmptyString);
-
-#[cfg(test)]
-impl ShortSha {
-    /// Maximum length of an abbreviated SHA (full SHA-1 hex).
-    const MAX_LEN: usize = 40;
-}
-
-#[cfg(test)]
-impl TryFrom<String> for ShortSha {
-    type Error = FactorError;
-
-    fn try_from(value: String) -> Result<Self, Self::Error> {
-        if value.len() > Self::MAX_LEN {
-            return Err(FactorError::GitCommand(non_empty_msg(format!(
-                "short SHA exceeds {} chars ({} chars)",
-                Self::MAX_LEN,
-                value.len()
-            ))));
-        }
-        if !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-            return Err(FactorError::GitCommand(non_empty_msg(format!(
-                "short SHA contains non-hex characters: {value}"
-            ))));
-        }
-        let non_empty = match NonEmptyString::try_from(value) {
-            Ok(non_empty) => non_empty,
-            Err(_err) => {
-                return Err(FactorError::GitCommand(non_empty_msg(
-                    "empty short SHA".to_owned(),
-                )));
-            }
-        };
-        Ok(Self(non_empty))
-    }
-}
-
 /// Result of completing a fully-split span.
 #[derive(Debug)]
 enum AdvanceOutcome {
