@@ -5,6 +5,10 @@
 use expect_fail_macro::expect_fail;
 
 #[cfg(test)]
+#[expect(
+    clippy::inline_modules,
+    reason = "preserve the established inline test layout"
+)]
 mod tests {
     use super::expect_fail;
     use std::panic::resume_unwind;
