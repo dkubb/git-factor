@@ -281,14 +281,18 @@ pub(in crate::git_factor) fn push_json_array(buf: &mut String, key: &str, values
     buf.push(']');
 }
 
-/// Runs a git command and returns `(exit_code, stdout, stderr)` on success.
+/// Observes a Git command, removing only its final stdout LF terminator.
 pub(in crate::git_factor) fn maybe_git_output(
     ctx: &Ctx<'_>,
     args: &[&str],
 ) -> Option<(i32, String, String)> {
     let output = ctx.runner.output("git", args, &ctx.cwd).ok()?;
     let code = status_code(output.status);
-    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    let observed_stdout = String::from_utf8_lossy(&output.stdout);
+    let stdout = observed_stdout
+        .strip_suffix('\n')
+        .unwrap_or(&observed_stdout)
+        .to_owned();
     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
     Some((code, stdout, stderr))
 }
@@ -716,6 +720,76 @@ pub(in crate::git_factor) fn write_error_log(
 
 #[cfg(test)]
 mod tests {
+    mod collect_status_paths {
+        use super::super::collect_status_paths;
+        use super::super::command_contracts::{arrange_context, arrange_output};
+
+        #[test]
+        fn preserves_first_unstaged_record_and_quoted_path() {
+            let exit_code: i32 = 0;
+            let runner = arrange_output(b" M \" leading and trailing \"\n", b"", exit_code);
+            let context = arrange_context(&runner);
+
+            let result = collect_status_paths(&context);
+
+            assert_eq!(
+                result,
+                (
+                    Vec::new(),
+                    vec!["\" leading and trailing \"".to_owned()],
+                    Vec::new()
+                )
+            );
+        }
+
+        #[test]
+        fn preserves_first_staged_record() {
+            let exit_code: i32 = 0;
+            let runner = arrange_output(b"M  path\n", b"", exit_code);
+            let context = arrange_context(&runner);
+
+            let result = collect_status_paths(&context);
+
+            assert_eq!(result, (vec!["path".to_owned()], Vec::new(), Vec::new()));
+        }
+
+        #[test]
+        fn preserves_first_mixed_record() {
+            let exit_code: i32 = 0;
+            let runner = arrange_output(b"MM path\n", b"", exit_code);
+            let context = arrange_context(&runner);
+
+            let result = collect_status_paths(&context);
+
+            assert_eq!(
+                result,
+                (vec!["path".to_owned()], vec!["path".to_owned()], Vec::new())
+            );
+        }
+
+        #[test]
+        fn preserves_first_untracked_record() {
+            let exit_code: i32 = 0;
+            let runner = arrange_output(b"?? path\n", b"", exit_code);
+            let context = arrange_context(&runner);
+
+            let result = collect_status_paths(&context);
+
+            assert_eq!(result, (Vec::new(), Vec::new(), vec!["path".to_owned()]));
+        }
+
+        #[test]
+        fn ignores_short_records_before_valid_unstaged_record() {
+            let exit_code: i32 = 0;
+            let runner = arrange_output(b"M\n??\n M\n\xc3\xa9\n M path\n", b"", exit_code);
+            let context = arrange_context(&runner);
+
+            let result = collect_status_paths(&context);
+
+            assert_eq!(result, (Vec::new(), vec!["path".to_owned()], Vec::new()));
+        }
+    }
+
     mod maybe_git_output {
         use super::super::command_contracts::{
             CommandObservation, arrange_context, arrange_output,
@@ -739,7 +813,7 @@ mod tests {
         }
 
         #[test]
-        fn normalizes_stdout_stderr_and_observes_exit_status() {
+        fn observes_output_channels_and_exit_status() {
             let exit_code: i32 = 17;
             let runner = arrange_output(b" \tvalue \t\n", b" \terror \t\n", exit_code);
             let context = arrange_context(&runner);
@@ -751,12 +825,12 @@ mod tests {
 
             assert_eq!(
                 result,
-                Some((exit_code, "value".to_owned(), "error".to_owned()))
+                Some((exit_code, " \tvalue \t".to_owned(), "error".to_owned()))
             );
         }
 
         #[test]
-        fn normalizes_leading_porcelain_status_space() {
+        fn preserves_leading_porcelain_status_space() {
             let exit_code: i32 = 0;
             let runner = arrange_output(b" M path\n", b"", exit_code);
             let context = arrange_context(&runner);
@@ -768,7 +842,7 @@ mod tests {
 
             assert_eq!(
                 result,
-                Some((exit_code, "M path".to_owned(), String::new()))
+                Some((exit_code, " M path".to_owned(), String::new()))
             );
         }
 
@@ -787,14 +861,14 @@ mod tests {
                 result,
                 Some((
                     exit_code,
-                    "first \t second\nthird".to_owned(),
+                    "\nfirst \t second\nthird\n".to_owned(),
                     String::new()
                 ))
             );
         }
 
         #[test]
-        fn observes_newline_only_output() {
+        fn removes_only_one_terminal_line_feed() {
             let exit_code: i32 = 0;
             let runner = arrange_output(b"\n\n", b"", exit_code);
             let context = arrange_context(&runner);
@@ -804,7 +878,7 @@ mod tests {
                 &["status", "--porcelain=v1", "--untracked-files=all"],
             );
 
-            assert_eq!(result, Some((exit_code, String::new(), String::new())));
+            assert_eq!(result, Some((exit_code, "\n".to_owned(), String::new())));
         }
 
         #[test]
@@ -820,7 +894,7 @@ mod tests {
 
             assert_eq!(
                 result,
-                Some((exit_code, "\u{fffd}".to_owned(), "\u{fffd}".to_owned()))
+                Some((exit_code, " \u{fffd} \t".to_owned(), "\u{fffd}".to_owned()))
             );
         }
 
@@ -860,6 +934,67 @@ mod tests {
 
 #[cfg(test)]
 mod proptests {
+    mod collect_status_paths {
+        use super::super::collect_status_paths;
+        use super::super::command_contracts::{arrange_context, arrange_output};
+        use proptest::prelude::*;
+
+        proptest! {
+            #[test]
+            fn preserves_generated_first_unstaged_paths(path in "[A-Za-z0-9_]{1,32}", terminator in "\n{0,1}") {
+                let exit_code: i32 = 0;
+                let reported_path = format!("\" {path} \"");
+                let stdout = format!(" M {reported_path}{terminator}");
+                let runner = arrange_output(stdout.as_bytes(), b"", exit_code);
+                let context = arrange_context(&runner);
+
+                let result = collect_status_paths(&context);
+
+                prop_assert_eq!(result, (Vec::new(), vec![reported_path], Vec::new()));
+            }
+
+            #[test]
+            fn preserves_generated_first_staged_paths(path in "[A-Za-z0-9_]{1,32}", terminator in "\n{0,1}") {
+                let exit_code: i32 = 0;
+                let reported_path = format!("\" {path} \"");
+                let stdout = format!("M  {reported_path}{terminator}");
+                let runner = arrange_output(stdout.as_bytes(), b"", exit_code);
+                let context = arrange_context(&runner);
+
+                let result = collect_status_paths(&context);
+
+                prop_assert_eq!(result, (vec![reported_path], Vec::new(), Vec::new()));
+            }
+
+            #[test]
+            fn preserves_generated_first_mixed_paths(path in "[A-Za-z0-9_]{1,32}", terminator in "\n{0,1}") {
+                let exit_code: i32 = 0;
+                let reported_path = format!("\" {path} \"");
+                let stdout = format!("MM {reported_path}{terminator}");
+                let runner = arrange_output(stdout.as_bytes(), b"", exit_code);
+                let context = arrange_context(&runner);
+
+                let result = collect_status_paths(&context);
+
+                prop_assert_eq!(result, (vec![reported_path.clone()], vec![reported_path], Vec::new()));
+            }
+
+            #[test]
+            fn preserves_generated_first_untracked_paths(path in "[A-Za-z0-9_]{1,32}", terminator in "\n{0,1}") {
+                let exit_code: i32 = 0;
+                let reported_path = format!("\" {path} \"");
+                let stdout = format!("?? {reported_path}{terminator}");
+                let runner = arrange_output(stdout.as_bytes(), b"", exit_code);
+                let context = arrange_context(&runner);
+
+                let result = collect_status_paths(&context);
+
+                prop_assert_eq!(result, (Vec::new(), Vec::new(), vec![reported_path]));
+            }
+
+        }
+    }
+
     mod maybe_git_output {
         use super::super::command_contracts::{
             CommandObservation, arrange_context, arrange_output,
@@ -870,7 +1005,7 @@ mod proptests {
 
         proptest! {
             #[test]
-            fn normalizes_generated_command_output(
+            fn preserves_generated_command_stdout(
                 payload in prop_oneof![
                     80 => "[A-Za-z0-9_]{1,16}".prop_map(|path| format!("M {path}")),
                     20 => "[A-Za-z0-9_]{1,16}( [A-Za-z0-9_]{1,16}){0,3}",
@@ -891,17 +1026,18 @@ mod proptests {
                     &["status", "--porcelain=v1", "--untracked-files=all"],
                 );
 
-                prop_assert_eq!(result, Some((exit_code, payload, stderr_payload)));
+                prop_assert_eq!(result, Some((exit_code, stdout, stderr_payload)));
             }
 
             #[test]
-            fn normalizes_generated_terminal_line_feeds(
+            fn removes_only_one_generated_terminal_line_feed(
                 payload in "[A-Za-z0-9_]{0,32}",
                 leading in "\n{0,3}",
-                trailing in "\n{0,4}",
+                remaining in "\n{0,3}",
             ) {
                 let exit_code: i32 = 0;
-                let stdout = format!("{leading}{payload}{trailing}");
+                let expected = format!("{leading}{payload}{remaining}");
+                let stdout = format!("{expected}\n");
                 let runner = arrange_output(stdout.as_bytes(), b"", exit_code);
                 let context = arrange_context(&runner);
 
@@ -910,7 +1046,7 @@ mod proptests {
                     &["status", "--porcelain=v1", "--untracked-files=all"],
                 );
 
-                prop_assert_eq!(result, Some((exit_code, payload, String::new())));
+                prop_assert_eq!(result, Some((exit_code, expected, String::new())));
             }
 
             #[test]

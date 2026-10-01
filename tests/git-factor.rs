@@ -2215,9 +2215,9 @@ fi
         let (wrap_dir, wrap_bin) = make_git_wrapper_named(
             "git",
             r#"if [ "${1-}" = "status" ] && [ "${2-}" = "--porcelain=v1" ] && [ "${3-}" = "--untracked-files=all" ]; then
+  printf ' M unstaged.txt\n'
   printf 'M\n'
   printf 'A  staged.txt\n'
-  printf ' M unstaged.txt\n'
   printf '?? untracked.txt\n'
   exit 0
 fi
