@@ -2358,6 +2358,8 @@ fn run_with_args_vec(ctx: &Ctx<'_>, args: Vec<OsString>) -> Result<i32, FactorEr
     reason = "preserve the established inline test layout"
 )]
 mod proptests {
+    mod main_entry;
+
     use core::cell::RefCell;
     use core::mem;
     use std::env;

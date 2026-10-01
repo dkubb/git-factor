@@ -1,5 +1,7 @@
 #[path = "tests/main_entry.rs"]
 mod main_entry;
+#[path = "tests/start_contracts.rs"]
+pub(in crate::git_factor) mod start_contracts;
 
 use alloc::collections::VecDeque;
 use core::cell::RefCell;
@@ -15,6 +17,7 @@ use std::sync::Mutex;
 use std::thread;
 
 use super::*;
+
 use crate::git_factor::validation::validate_not_merge;
 use tempfile::TempDir;
 
