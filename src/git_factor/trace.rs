@@ -1,3 +1,8 @@
+/// Arrangement for direct and generated command observation contracts.
+#[cfg(test)]
+#[path = "trace_command_tests.rs"]
+mod command_contracts;
+
 use core::error::Error as _;
 use core::fmt::{Arguments, Write as _};
 use core::str::FromStr;
@@ -707,4 +712,228 @@ pub(in crate::git_factor) fn write_error_log(
     ctx.fs
         .write_string(&state_dir.as_path().join(ERROR_LOG_FILE), &content)
         .map_err(FactorError::StateWrite)
+}
+
+#[cfg(test)]
+mod tests {
+    mod maybe_git_output {
+        use super::super::command_contracts::{
+            CommandObservation, arrange_context, arrange_output,
+        };
+        use super::super::maybe_git_output;
+        use std::os::unix::process::ExitStatusExt as _;
+        use std::process::{ExitStatus, Output};
+
+        #[test]
+        fn observes_empty_output() {
+            let exit_code: i32 = 0;
+            let runner = arrange_output(b"", b"", exit_code);
+            let context = arrange_context(&runner);
+
+            let result = maybe_git_output(
+                &context,
+                &["status", "--porcelain=v1", "--untracked-files=all"],
+            );
+
+            assert_eq!(result, Some((exit_code, String::new(), String::new())));
+        }
+
+        #[test]
+        fn normalizes_stdout_stderr_and_observes_exit_status() {
+            let exit_code: i32 = 17;
+            let runner = arrange_output(b" \tvalue \t\n", b" \terror \t\n", exit_code);
+            let context = arrange_context(&runner);
+
+            let result = maybe_git_output(
+                &context,
+                &["status", "--porcelain=v1", "--untracked-files=all"],
+            );
+
+            assert_eq!(
+                result,
+                Some((exit_code, "value".to_owned(), "error".to_owned()))
+            );
+        }
+
+        #[test]
+        fn normalizes_leading_porcelain_status_space() {
+            let exit_code: i32 = 0;
+            let runner = arrange_output(b" M path\n", b"", exit_code);
+            let context = arrange_context(&runner);
+
+            let result = maybe_git_output(
+                &context,
+                &["status", "--porcelain=v1", "--untracked-files=all"],
+            );
+
+            assert_eq!(
+                result,
+                Some((exit_code, "M path".to_owned(), String::new()))
+            );
+        }
+
+        #[test]
+        fn preserves_interior_payload_whitespace() {
+            let exit_code: i32 = 0;
+            let runner = arrange_output(b"\nfirst \t second\nthird\n\n", b"", exit_code);
+            let context = arrange_context(&runner);
+
+            let result = maybe_git_output(
+                &context,
+                &["status", "--porcelain=v1", "--untracked-files=all"],
+            );
+
+            assert_eq!(
+                result,
+                Some((
+                    exit_code,
+                    "first \t second\nthird".to_owned(),
+                    String::new()
+                ))
+            );
+        }
+
+        #[test]
+        fn observes_newline_only_output() {
+            let exit_code: i32 = 0;
+            let runner = arrange_output(b"\n\n", b"", exit_code);
+            let context = arrange_context(&runner);
+
+            let result = maybe_git_output(
+                &context,
+                &["status", "--porcelain=v1", "--untracked-files=all"],
+            );
+
+            assert_eq!(result, Some((exit_code, String::new(), String::new())));
+        }
+
+        #[test]
+        fn decodes_invalid_stdout_and_stderr_lossily() {
+            let exit_code: i32 = 255;
+            let runner = arrange_output(b" \xff \t", b"\n\xfe\n", exit_code);
+            let context = arrange_context(&runner);
+
+            let result = maybe_git_output(
+                &context,
+                &["status", "--porcelain=v1", "--untracked-files=all"],
+            );
+
+            assert_eq!(
+                result,
+                Some((exit_code, "\u{fffd}".to_owned(), "\u{fffd}".to_owned()))
+            );
+        }
+
+        #[test]
+        fn reports_software_error_for_signal_termination() {
+            let runner = CommandObservation::Output(Output {
+                status: ExitStatus::from_raw(9),
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+            });
+            let context = arrange_context(&runner);
+            let expected_exit_code: i32 = 70;
+
+            let result = maybe_git_output(
+                &context,
+                &["status", "--porcelain=v1", "--untracked-files=all"],
+            );
+
+            assert_eq!(
+                result,
+                Some((expected_exit_code, String::new(), String::new()))
+            );
+        }
+
+        #[test]
+        fn reports_unavailable_observation() {
+            let exit_code: i32 = 0;
+            let runner = arrange_output(b"unused", b"unused", exit_code);
+            let context = arrange_context(&runner);
+
+            let result = maybe_git_output(&context, &["unavailable-query"]);
+
+            assert_eq!(result, None);
+        }
+    }
+}
+
+#[cfg(test)]
+mod proptests {
+    mod maybe_git_output {
+        use super::super::command_contracts::{
+            CommandObservation, arrange_context, arrange_output,
+        };
+        use super::super::maybe_git_output;
+        use proptest::prelude::*;
+        use std::io;
+
+        proptest! {
+            #[test]
+            fn normalizes_generated_command_output(
+                payload in prop_oneof![
+                    80 => "[A-Za-z0-9_]{1,16}".prop_map(|path| format!("M {path}")),
+                    20 => "[A-Za-z0-9_]{1,16}( [A-Za-z0-9_]{1,16}){0,3}",
+                ],
+                leading in "[ \t]{0,4}",
+                trailing in "[ \t]{0,4}",
+                stderr_payload in "[A-Za-z0-9_]{1,16}( [A-Za-z0-9_]{1,16}){0,3}",
+                exit_status in any::<u8>(),
+            ) {
+                let exit_code = i32::from(exit_status);
+                let stdout = format!("{leading}{payload}{trailing}");
+                let stderr = format!(" \t{stderr_payload}\n");
+                let runner = arrange_output(stdout.as_bytes(), stderr.as_bytes(), exit_code);
+                let context = arrange_context(&runner);
+
+                let result = maybe_git_output(
+                    &context,
+                    &["status", "--porcelain=v1", "--untracked-files=all"],
+                );
+
+                prop_assert_eq!(result, Some((exit_code, payload, stderr_payload)));
+            }
+
+            #[test]
+            fn normalizes_generated_terminal_line_feeds(
+                payload in "[A-Za-z0-9_]{0,32}",
+                leading in "\n{0,3}",
+                trailing in "\n{0,4}",
+            ) {
+                let exit_code: i32 = 0;
+                let stdout = format!("{leading}{payload}{trailing}");
+                let runner = arrange_output(stdout.as_bytes(), b"", exit_code);
+                let context = arrange_context(&runner);
+
+                let result = maybe_git_output(
+                    &context,
+                    &["status", "--porcelain=v1", "--untracked-files=all"],
+                );
+
+                prop_assert_eq!(result, Some((exit_code, payload, String::new())));
+            }
+
+            #[test]
+            fn reports_generated_runner_failures(
+                kind in prop::sample::select(vec![
+                    io::ErrorKind::NotFound,
+                    io::ErrorKind::PermissionDenied,
+                    io::ErrorKind::Interrupted,
+                    io::ErrorKind::UnexpectedEof,
+                    io::ErrorKind::Other,
+                ]),
+                message in "[A-Za-z0-9_ ]{0,32}",
+            ) {
+                let runner = CommandObservation::Failure(kind, message);
+                let context = arrange_context(&runner);
+
+                let result = maybe_git_output(
+                    &context,
+                    &["status", "--porcelain=v1", "--untracked-files=all"],
+                );
+
+                prop_assert_eq!(result, None);
+            }
+        }
+    }
 }
