@@ -1603,3 +1603,207 @@ fn run_start_rebase_reports_non_utf8_editor_path() {
         "git command failed: editor path is not valid UTF-8"
     );
 }
+
+#[test]
+fn cmd_start_forwards_successful_gate_streams() {
+    use crate::git_factor::tests::start_contracts::{DirectStart, GateCase};
+    use alloc::collections::BTreeMap;
+
+    let selected = NonEmpty::new(CommitSha::new("a".repeat(SHA_LEN)).or_abort("admitted SHA"));
+    let fixture = DirectStart::new(
+        &selected,
+        false,
+        GateCase::Pass,
+        "gate stdout",
+        "gate stderr",
+    );
+    let ctx = fixture.ctx();
+
+    let result = cmd_start_with_resolved_in(&ctx, &fixture.exec, &fixture.state, &fixture.selected);
+
+    assert_eq!(result.map_err(|err| err.to_string()), Ok(EXIT_OK));
+    assert_eq!(
+        fixture.io.stdout(),
+        concat!(
+            "gate stdoutFACTOR: Split session started for abcdef0.\n",
+            "ORIGINAL MESSAGE: subject\n",
+            "UNSTAGED:\n",
+            "\n",
+            "NEXT: Stage changes for the first atomic commit, then run:\n",
+            "  git factor --continue --message \"type: description\"\n",
+            "\n",
+            "Run git factor -h for command help or git-factor --help for the ",
+            "full workflow guide.\n",
+            "\n",
+            "HINTS:\n",
+            "  - Find the ONE smallest addition nothing depends on\n",
+            "  - Target 15-30 lines (50 max)\n",
+            "  - Message: single concrete action, no \"and\"/\"or\"\n",
+            "  - Verify: git log --oneline | wc -l\n",
+            "  - NEVER use git commit. ONLY use git factor --continue.\n",
+            "  RECOVERY: git factor --abort\n",
+        )
+    );
+    assert_eq!(fixture.io.stderr(), "gate stderr");
+    assert_eq!(fixture.observed_calls(), fixture.expected_calls);
+    assert_eq!(fixture.remaining_keys(), Vec::<String>::new());
+    // Compare net contents/layout in this tempdir, excluding factor state; Git has its own ledger.
+    assert_eq!(fixture.direct_files_after(), fixture.direct_files_before);
+    let expected_journal = [
+        ("commits", format!("{}\n", "a".repeat(SHA_LEN))),
+        ("current_index", "0\n".to_owned()),
+        ("exec", "true\n".to_owned()),
+        ("expected_tree", TREE_EXPECTED_NL.to_owned()),
+        ("is_root", "false\n".to_owned()),
+        ("phase", "splitting\n".to_owned()),
+        ("requires_rebase", "false\n".to_owned()),
+        ("split_count", "0\n".to_owned()),
+        ("start_head", format!("{}\n", "a".repeat(SHA_LEN))),
+        ("started_rebase", "false\n".to_owned()),
+    ]
+    .into_iter()
+    .map(|(name, text)| (OsString::from(name), text))
+    .collect::<BTreeMap<_, _>>();
+    assert_eq!(fixture.observed_journal(), Some(expected_journal));
+}
+
+#[test]
+fn cmd_start_forwards_failed_gate_streams() {
+    use crate::git_factor::tests::start_contracts::{DirectStart, GateCase};
+
+    let selected = NonEmpty::new(CommitSha::new("a".repeat(SHA_LEN)).or_abort("admitted SHA"));
+    let fixture = DirectStart::new(
+        &selected,
+        false,
+        GateCase::Fail,
+        "gate stdout",
+        "gate stderr",
+    );
+    let ctx = fixture.ctx();
+
+    let result = cmd_start_with_resolved_in(&ctx, &fixture.exec, &fixture.state, &fixture.selected);
+
+    assert_eq!(
+        result.map_err(|err| err.to_string()),
+        Err("exec gate failed: true (exit code 7)".to_owned())
+    );
+    assert_eq!(
+        fixture.io.stdout(),
+        concat!(
+            "gate stdoutFACTOR: Start gate failed.\n",
+            "EXEC: true\n",
+            "CODE: 7\n",
+            "\n",
+            "NEXT: Fix the current commit, amend it, then rerun git factor.\n",
+        )
+    );
+    assert_eq!(fixture.io.stderr(), "gate stderr");
+    assert_eq!(fixture.observed_calls(), fixture.expected_calls);
+    assert_eq!(fixture.remaining_keys(), Vec::<String>::new());
+    // Compare net contents/layout in this tempdir, excluding factor state; Git has its own ledger.
+    assert_eq!(fixture.direct_files_after(), fixture.direct_files_before);
+    assert_eq!(fixture.observed_journal(), None);
+}
+
+#[test]
+fn cmd_start_preserves_success_after_the_last_output_write() {
+    use crate::git_factor::tests::start_contracts::{DirectStart, GateCase};
+    use alloc::collections::BTreeMap;
+    use core::num::NonZeroUsize;
+
+    let selected = NonEmpty::new(CommitSha::new("a".repeat(SHA_LEN)).or_abort("admitted SHA"));
+    let fixture = DirectStart::new(
+        &selected,
+        false,
+        GateCase::PassOutputFailure(NonZeroUsize::new(19).or_abort("positive past-end boundary")),
+        "gate stdout",
+        "gate stderr",
+    );
+    let ctx = fixture.ctx();
+
+    let result = cmd_start_with_resolved_in(&ctx, &fixture.exec, &fixture.state, &fixture.selected);
+
+    assert_eq!(result.map_err(|err| err.to_string()), Ok(EXIT_OK));
+    assert_eq!(
+        fixture.io.stdout(),
+        concat!(
+            "gate stdoutFACTOR: Split session started for abcdef0.\n",
+            "ORIGINAL MESSAGE: subject\n",
+            "UNSTAGED:\n",
+            "\n",
+            "NEXT: Stage changes for the first atomic commit, then run:\n",
+            "  git factor --continue --message \"type: description\"\n",
+            "\n",
+            "Run git factor -h for command help or git-factor --help for the ",
+            "full workflow guide.\n",
+            "\n",
+            "HINTS:\n",
+            "  - Find the ONE smallest addition nothing depends on\n",
+            "  - Target 15-30 lines (50 max)\n",
+            "  - Message: single concrete action, no \"and\"/\"or\"\n",
+            "  - Verify: git log --oneline | wc -l\n",
+            "  - NEVER use git commit. ONLY use git factor --continue.\n",
+            "  RECOVERY: git factor --abort\n",
+        )
+    );
+    assert_eq!(fixture.io.stderr(), "gate stderr");
+    assert_eq!(fixture.observed_calls(), fixture.expected_calls);
+    assert_eq!(fixture.remaining_keys(), Vec::<String>::new());
+    // Compare net contents/layout in this tempdir, excluding factor state; Git has its own ledger.
+    assert_eq!(fixture.direct_files_after(), fixture.direct_files_before);
+    let expected_journal = [
+        ("commits", format!("{}\n", "a".repeat(SHA_LEN))),
+        ("current_index", "0\n".to_owned()),
+        ("exec", "true\n".to_owned()),
+        ("expected_tree", TREE_EXPECTED_NL.to_owned()),
+        ("is_root", "false\n".to_owned()),
+        ("phase", "splitting\n".to_owned()),
+        ("requires_rebase", "false\n".to_owned()),
+        ("split_count", "0\n".to_owned()),
+        ("start_head", format!("{}\n", "a".repeat(SHA_LEN))),
+        ("started_rebase", "false\n".to_owned()),
+    ]
+    .into_iter()
+    .map(|(name, text)| (OsString::from(name), text))
+    .collect::<BTreeMap<_, _>>();
+    assert_eq!(fixture.observed_journal(), Some(expected_journal));
+}
+
+#[test]
+fn cmd_start_preserves_failure_after_the_last_output_write() {
+    use crate::git_factor::tests::start_contracts::{DirectStart, GateCase};
+    use core::num::NonZeroUsize;
+
+    let selected = NonEmpty::new(CommitSha::new("a".repeat(SHA_LEN)).or_abort("admitted SHA"));
+    let fixture = DirectStart::new(
+        &selected,
+        false,
+        GateCase::FailOutputFailure(NonZeroUsize::new(8).or_abort("positive past-end boundary")),
+        "gate stdout",
+        "gate stderr",
+    );
+    let ctx = fixture.ctx();
+
+    let result = cmd_start_with_resolved_in(&ctx, &fixture.exec, &fixture.state, &fixture.selected);
+
+    assert_eq!(
+        result.map_err(|err| err.to_string()),
+        Err("exec gate failed: true (exit code 7)".to_owned())
+    );
+    assert_eq!(
+        fixture.io.stdout(),
+        concat!(
+            "gate stdoutFACTOR: Start gate failed.\n",
+            "EXEC: true\n",
+            "CODE: 7\n",
+            "\n",
+            "NEXT: Fix the current commit, amend it, then rerun git factor.\n",
+        )
+    );
+    assert_eq!(fixture.io.stderr(), "gate stderr");
+    assert_eq!(fixture.observed_calls(), fixture.expected_calls);
+    assert_eq!(fixture.remaining_keys(), Vec::<String>::new());
+    // Compare net contents/layout in this tempdir, excluding factor state; Git has its own ledger.
+    assert_eq!(fixture.direct_files_after(), fixture.direct_files_before);
+    assert_eq!(fixture.observed_journal(), None);
+}
