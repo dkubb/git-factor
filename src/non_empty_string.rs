@@ -187,17 +187,4 @@ mod tests {
         let value = NonEmptyString("iota".to_owned());
         assert_eq!(value.to_string(), "iota");
     }
-
-    #[test]
-    fn proptest_run_unit_suite() {
-        as_ref_returns_inner_str();
-        borrow_returns_inner_str();
-        deref_returns_inner_str();
-        try_from_str_constructs_non_empty();
-        try_from_string_constructs_non_empty();
-        from_str_constructs_non_empty();
-        new_rejects_empty_string();
-        push_str_appends_text();
-        display_writes_inner_value();
-    }
 }

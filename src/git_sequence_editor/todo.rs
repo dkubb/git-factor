@@ -1035,32 +1035,6 @@ pick ccccccc third\n\
         assert_eq!(insertion.begin_command().as_str(), "echo begin");
         assert_eq!(insertion.preflight_command().as_str(), "echo preflight");
     }
-
-    #[test]
-    fn proptest_run_coverage_extra_suite() {
-        action_as_str_supports_drop();
-        build_factor_insertion_rejects_incomplete_factor_args();
-        build_factor_insertion_resolves_full_target_sha();
-        build_requested_actions_propagates_drop_resolution_error();
-        build_requested_actions_propagates_edit_resolution_error();
-        build_requested_actions_propagates_pick_resolution_error();
-        build_requested_actions_rejects_duplicate_edit_arguments();
-        build_requested_actions_rejects_duplicate_pick_arguments();
-        build_requested_actions_rejects_edit_values_that_resolve_to_the_same_todo_sha();
-        build_requested_actions_rejects_pick_values_that_resolve_to_the_same_todo_sha();
-        build_requested_actions_supports_pick_edit_and_drop_without_conflicts();
-        git_rev_parse_verify_full_reports_spawn_error_when_binary_is_missing();
-        resolve_requested_sha_errors_when_git_returns_non_sha_stdout();
-        is_hex40_accepts_lowercase_hex();
-        resolve_requested_sha_accepts_uppercase_full_sha_when_todo_has_lowercase_full_sha();
-        resolve_requested_sha_errors_when_multiple_todo_prefixes_match_resolved_full_sha();
-        resolve_requested_sha_errors_when_no_todo_sha_prefix_matches_resolved_full_sha();
-        resolve_requested_sha_matches_unique_short_prefix_from_resolved_full_sha();
-        resolve_requested_sha_returns_exact_short_sha_when_present();
-        rewrite_todo_rewrites_action_when_requested_action_differs();
-        uppercase_variant_preserves_non_lowercase_tail_chars();
-        uppercase_variant_supports_non_lowercase_prefix();
-    }
 }
 
 #[cfg(test)]
@@ -1169,19 +1143,6 @@ pick {sha} duplicate
     fn result_err_or_abort_returns_inner_error() {
         let value: Result<&str, &str> = Err("error");
         assert_eq!(value.err_or_abort(""), "error");
-    }
-
-    #[test]
-    fn proptest_run_unit_suite() {
-        option_or_abort_returns_inner_value();
-        result_err_or_abort_returns_inner_error();
-        result_or_abort_returns_inner_value();
-        resolve_requested_sha_rejects_len_40_non_hex_without_rev_parse();
-        resolve_requested_sha_rejects_empty_sha_without_rev_parse();
-        resolve_requested_sha_rejects_non_40_len_sha_without_rev_parse();
-        resolve_requested_sha_runs_git_rev_parse_for_full_sha();
-        todo_shas_in_deduplicates_repeated_tokens();
-        validate_todo_format_accepts_indented_comment_lines();
     }
 }
 
