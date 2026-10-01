@@ -812,18 +812,4 @@ mod tests {
             "unexpected error: {footer_err:?}"
         );
     }
-
-    #[test]
-    fn proptest_run_non_panicking_unit_suite() {
-        io_helpers_cover_buffer_and_error_extractor_paths();
-        print_hints_in_includes_reference_and_claude_guidance();
-        print_hints_in_omits_remaining_when_diff_stat_is_empty();
-        print_hints_in_reports_diff_stat_failure();
-        print_hints_in_reports_io_failures_for_reference_and_claude_lines();
-        print_session_started_reports_advance_guidance();
-        print_session_started_reports_advance_guidance_output_failure();
-        print_session_started_reports_output_failures();
-        print_session_started_reports_runner_failures();
-        print_session_started_reports_single_commit_and_untracked_paths();
-    }
 }
