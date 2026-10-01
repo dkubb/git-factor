@@ -120,6 +120,10 @@ impl TryFrom<String> for NonEmptyString {
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::inline_modules,
+    reason = "preserve the established inline test layout"
+)]
 mod tests {
     use core::borrow::Borrow;
 

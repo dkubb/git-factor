@@ -19,7 +19,7 @@ use core::sync::atomic::{AtomicU8, Ordering};
 use std::env;
 use std::ffi::OsString;
 use std::fs::{self, OpenOptions};
-use std::io::{self, ErrorKind, Write as _};
+use std::io::{self, Write as _};
 use std::path::Path;
 #[cfg(test)]
 use std::path::PathBuf;
@@ -257,7 +257,7 @@ fn write_file_atomic(path: &Path, content: &str) -> Result<(), AtomicWriteError>
             .open(&temp_path)
         {
             Ok(file) => file,
-            Err(err) if err.kind() == ErrorKind::AlreadyExists => continue,
+            Err(err) if err.kind() == io::ErrorKind::AlreadyExists => continue,
             Err(err) => {
                 return Err(AtomicWriteError::CreateTemp(
                     target.path.display().to_string(),
@@ -402,6 +402,10 @@ fn atomic_write_fixture(name: &str) -> (MutexGuard<'static, ()>, tempfile::TempD
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::inline_modules,
+    reason = "preserve the established inline test layout"
+)]
 mod tests {
     #[path = "write_file_atomic.rs"]
     mod main_entry;

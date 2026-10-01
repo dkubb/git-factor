@@ -3040,7 +3040,10 @@ fn cmd_start_propagates_rebase_status_error_in_multi_commit_session() {
     );
 }
 
-fn assert_fs_adapter_basics<F: Fs>(repo: &Path, fs: &F) {
+fn assert_fs_adapter_basics<F>(repo: &Path, fs: &F)
+where
+    F: Fs,
+{
     let mkdir = repo.join("mkdir");
     fs.create_dir_all(&mkdir).or_abort("mkdir");
     assert!(fs.is_dir(&mkdir));
@@ -3068,7 +3071,10 @@ fn fs_adapter_basics_work_with_real_fs() {
     assert_fs_adapter_basics(dir.path(), &REAL_FS);
 }
 
-fn assert_cmd_start_state_write_failure<F: Fs>(repo: &Path, fs: &F, expected_error: &str) {
+fn assert_cmd_start_state_write_failure<F>(repo: &Path, fs: &F, expected_error: &str)
+where
+    F: Fs,
+{
     assert_fs_adapter_basics(repo, fs);
     let sha = "a".repeat(SHA_LEN);
     let runner = with_start_gate_result(

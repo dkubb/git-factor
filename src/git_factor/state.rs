@@ -21,11 +21,14 @@ pub(in crate::git_factor) fn read_state(
 }
 
 /// Reads and parses a numeric state file, returning an error on corruption.
-pub(in crate::git_factor) fn read_state_parsed<T: FromStr>(
+pub(in crate::git_factor) fn read_state_parsed<T>(
     ctx: &Ctx<'_>,
     state_dir: &Path,
     name: &str,
-) -> Result<T, FactorError> {
+) -> Result<T, FactorError>
+where
+    T: FromStr,
+{
     let value = read_state(ctx, state_dir, name)?;
     match value.as_str().parse::<T>() {
         Ok(parsed) => Ok(parsed),

@@ -11,13 +11,17 @@
 mod support;
 
 #[cfg(test)]
+#[expect(
+    clippy::inline_modules,
+    reason = "preserve the established inline test layout"
+)]
 mod tests {
     use core::panic::AssertUnwindSafe;
     use core::time::Duration;
     use std::env;
     use std::ffi::{OsStr, OsString};
     use std::fs;
-    use std::io::ErrorKind;
+    use std::io;
     use std::panic::{catch_unwind, resume_unwind};
     use std::path::{Path, PathBuf};
     use std::process::{self, Command};
@@ -594,7 +598,7 @@ EXAMPLES:
         }
         let output = match command.output() {
             Ok(output) => output,
-            Err(err) if err.kind() == ErrorKind::WouldBlock => {
+            Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
                 resume_unwind(Box::new(format!("retryable spawn error: {err}")));
             }
             Err(err) => {

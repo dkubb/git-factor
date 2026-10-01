@@ -2445,6 +2445,10 @@ fn run_with_args_vec(ctx: &Ctx<'_>, args: Vec<OsString>) -> Result<i32, FactorEr
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::inline_modules,
+    reason = "preserve the established inline test layout"
+)]
 mod proptests {
     use core::cell::RefCell;
     use core::mem;
