@@ -13,7 +13,7 @@ use alloc::collections::BTreeSet;
 #[cfg(test)]
 use std::collections::HashSet;
 
-/// Removes the empty root commit left by `mixed_reset_to_empty()`.
+/// Removes the empty root commit created during a root-commit factor session.
 ///
 /// After a root-commit factor session completes, the history contains an empty
 /// commit at the root. This function rebases `--root --interactive` with a
@@ -92,18 +92,6 @@ pub(in crate::git_factor) fn remove_empty_root_in(ctx: &Ctx<'_>) -> Result<(), F
         "rebase to remove empty root failed (exit {})",
         status_code(rebase_status)
     ))))
-}
-
-/// Resets HEAD to an empty commit so all files appear as unstaged additions.
-///
-/// Used for root commits where `git reset --mixed HEAD~1` is not possible.
-#[cfg(test)]
-pub(in crate::git_factor) fn mixed_reset_to_empty(ctx: &Ctx<'_>) -> Result<(), FactorError> {
-    /// The well-known SHA-1 hash of an empty tree object in git.
-    const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
-
-    let commit_sha = git_output(ctx, &["commit-tree", EMPTY_TREE, "-m", "empty"])?;
-    run_git(ctx, &["reset", "--quiet", &commit_sha])
 }
 
 /// Resolves a commit reference to a full SHA.
@@ -1244,7 +1232,6 @@ mod tests {
 
     #[derive(Copy, Clone, Eq, PartialEq)]
     enum RootFailure {
-        CommitTree,
         LsTree,
         RevList,
         ShortRoot,
@@ -1274,12 +1261,6 @@ mod tests {
                         return Err(io::Error::other("forced short-root failure"));
                     }
                     b"aaaaaaa\n".to_vec()
-                }
-                ["commit-tree", _, "-m", "empty"] => {
-                    if self.fail_on == Some(RootFailure::CommitTree) {
-                        return Err(io::Error::other("forced commit-tree failure"));
-                    }
-                    format!("{}\n", "b".repeat(COMMIT_SHA_HEX_LEN)).into_bytes()
                 }
                 _ => {
                     return Err(io::Error::other(format!(
@@ -2452,48 +2433,6 @@ mod tests {
     }
 
     #[test]
-    fn mixed_reset_to_empty_with_root_runner_uses_commit_tree_output() {
-        let dir = TempDir::new().or_abort("tempdir");
-        let runner = RootRunner { fail_on: None };
-        let env = TestEnv {
-            cwd: dir.path().to_path_buf(),
-        };
-        let ctx = Ctx {
-            runner: &runner,
-            cwd: dir.path().to_path_buf(),
-            io: &REAL_IO,
-            env: &env,
-            fs: &REAL_FS,
-        };
-        mixed_reset_to_empty(&ctx).or_abort("reset should succeed with scripted commit tree");
-    }
-
-    #[test]
-    fn mixed_reset_to_empty_reports_commit_tree_failure() {
-        let dir = TempDir::new().or_abort("tempdir");
-        let runner = RootRunner {
-            fail_on: Some(RootFailure::CommitTree),
-        };
-        let env = TestEnv {
-            cwd: dir.path().to_path_buf(),
-        };
-        let ctx = Ctx {
-            runner: &runner,
-            cwd: dir.path().to_path_buf(),
-            io: &REAL_IO,
-            env: &env,
-            fs: &REAL_FS,
-        };
-
-        let err = mixed_reset_to_empty(&ctx).err_or_abort("commit-tree failure should be returned");
-        let message = git_command_message(&err).or_abort("expected GitCommand");
-        assert!(
-            message.contains("forced commit-tree failure"),
-            "unexpected error: {err:?}"
-        );
-    }
-
-    #[test]
     fn sort_topologically_orders_commits_from_oldest_to_newest() {
         let dir = TempDir::new().or_abort("tempdir");
         init_git_repo(dir.path());
@@ -2766,18 +2705,5 @@ mod tests {
             .or_abort("single root sha should exist");
         let tree = git_output(&ctx, &["ls-tree", root_sha]).or_abort("ls-tree should succeed");
         assert!(tree.is_empty(), "root commit should be empty");
-    }
-
-    #[test]
-    fn mixed_reset_to_empty_resets_index_to_empty_tree() {
-        const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
-
-        let dir = TempDir::new().or_abort("tempdir");
-        init_git_repo(dir.path());
-        let ctx = ctx_for(dir.path());
-
-        mixed_reset_to_empty(&ctx).or_abort("mixed_reset_to_empty should succeed");
-        let tree = git_output(&ctx, &["write-tree"]).or_abort("write-tree");
-        assert_eq!(tree, EMPTY_TREE);
     }
 }
