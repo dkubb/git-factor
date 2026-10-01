@@ -485,6 +485,10 @@ pub(in crate::git_factor) fn validate_not_merge(
 }
 
 #[cfg(test)]
+#[path = "validation_root_proptests.rs"]
+mod proptests;
+
+#[cfg(test)]
 mod tests {
     mod remove_empty_root_in {
         use super::*;
