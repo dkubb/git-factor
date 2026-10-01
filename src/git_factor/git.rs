@@ -804,24 +804,6 @@ mod tests {
     }
 
     #[test]
-    fn proptest_run_non_property_unit_suite_part_2() {
-        run_git_non_interactive_sets_editor_env();
-        non_interactive_runner_output_is_not_expected();
-        trace_note_records_rebase_merge_and_custom_fields();
-        trace_note_records_rebase_apply_state();
-        command_and_output_trace_spawn_errors_when_enabled();
-        run_git_wrappers_report_nonzero_exit_status();
-        collect_status_paths_covers_parser_branches_and_spawn_failure();
-        collect_status_paths_handles_short_and_question_mark_second_column();
-        collect_status_paths_respects_path_limits_and_short_lines();
-        collect_repo_snapshot_handles_invalid_index_and_rebase_precedence();
-        collect_repo_snapshot_sets_current_commit_and_handles_rebase_absence();
-        collect_repo_snapshot_reads_rebase_apply_state_when_merge_is_absent();
-        collect_repo_snapshot_skips_empty_toplevel_output();
-        collect_repo_snapshot_handles_show_toplevel_output_failure();
-    }
-
-    #[test]
     fn proptest_run_non_property_unit_suite_part_3() {
         trace_process_command_writes_when_tracing_is_enabled();
         trace_process_command_returns_early_without_trace_env();
