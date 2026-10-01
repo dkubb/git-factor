@@ -2251,6 +2251,53 @@ fi
     }
 
     #[test]
+    fn status_trace_ignores_empty_paths_between_valid_records() {
+        let dir = init_repo();
+        let repo = dir.path();
+        commit_file(repo, "file.txt", "base\n", "chore: base");
+
+        let (wrap_dir, wrap_bin) = make_git_wrapper_named(
+            "git",
+            r#"if [ "${1-}" = "status" ] && [ "${2-}" = "--porcelain=v1" ] && [ "${3-}" = "--untracked-files=all" ]; then
+  printf 'MM\n??\n M\nMM \n'
+  printf ' M unstaged.txt\n'
+  printf '?? \n'
+  printf 'M\n'
+  printf 'A  staged.txt\n'
+  printf '?? untracked.txt\n'
+  printf ' M '
+  exit 0
+fi
+"#,
+        );
+        let _keep_alive = wrap_dir;
+
+        let trace_path = repo.join("trace/status-paths.jsonl");
+        run_git_factor_with_prefixed_path_and_env(
+            repo,
+            &["--status"],
+            GitFactorExpectation::default().stdout("FACTOR: No active session.\n"),
+            format!("{}:{}", wrap_bin.display(), env::var("PATH").or_abort()).into(),
+            "GIT_FACTOR_TRACE_LOG",
+            trace_path.as_os_str().to_os_string(),
+        );
+
+        let trace_content = fs::read_to_string(&trace_path).or_abort();
+        assert!(
+            trace_content.contains("\"state_staged_paths\":[\"staged.txt\"]"),
+            "trace should capture staged paths from porcelain output\n{trace_content}"
+        );
+        assert!(
+            trace_content.contains("\"state_unstaged_paths\":[\"unstaged.txt\"]"),
+            "trace should capture unstaged paths from porcelain output\n{trace_content}"
+        );
+        assert!(
+            trace_content.contains("\"state_untracked_paths\":[\"untracked.txt\"]"),
+            "trace should capture untracked paths from porcelain output\n{trace_content}"
+        );
+    }
+
+    #[test]
     fn continue_trace_logs_spawn_error_when_bash_is_unavailable() {
         let dir = init_repo();
         let repo = dir.path();

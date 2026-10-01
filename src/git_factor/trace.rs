@@ -54,6 +54,9 @@ macro_rules! collect_status_paths_inline {
                 let Some(path) = line.get(3..) else {
                     continue;
                 };
+                if path.is_empty() {
+                    continue;
+                }
                 let path_text = path.to_owned();
                 if index_status == b'?' && worktree_status == b'?' {
                     if untracked.len() < TRACE_MAX_PATHS {
@@ -725,6 +728,65 @@ mod tests {
         use super::super::command_contracts::{arrange_context, arrange_output};
 
         #[test]
+        fn ignores_two_byte_status_records_without_paths() {
+            let exit_code: i32 = 0;
+            let runner = arrange_output(b"MM\n??\n M", b"", exit_code);
+            let context = arrange_context(&runner);
+
+            let result = collect_status_paths(&context);
+
+            assert_eq!(result, (Vec::new(), Vec::new(), Vec::new()));
+        }
+
+        #[test]
+        fn ignores_three_byte_status_records_with_empty_paths() {
+            let exit_code: i32 = 0;
+            let runner = arrange_output(b"MM \n?? \n M ", b"", exit_code);
+            let context = arrange_context(&runner);
+
+            let result = collect_status_paths(&context);
+
+            assert_eq!(result, (Vec::new(), Vec::new(), Vec::new()));
+        }
+
+        #[test]
+        fn preserves_one_byte_and_whitespace_only_nonempty_paths() {
+            let exit_code: i32 = 0;
+            let runner = arrange_output(b"?? a\nMM  ", b"", exit_code);
+            let context = arrange_context(&runner);
+
+            let result = collect_status_paths(&context);
+
+            assert_eq!(
+                result,
+                (
+                    vec![" ".to_owned()],
+                    vec![" ".to_owned()],
+                    vec!["a".to_owned()]
+                )
+            );
+        }
+
+        #[test]
+        fn preserves_nonempty_quoted_paths_between_empty_records() {
+            let exit_code: i32 = 0;
+            let stdout = b"MM \nMM \" mixed \"\n?? \n?? \" untracked \"\n M \" unstaged \"\n M ";
+            let runner = arrange_output(stdout, b"", exit_code);
+            let context = arrange_context(&runner);
+
+            let result = collect_status_paths(&context);
+
+            assert_eq!(
+                result,
+                (
+                    vec!["\" mixed \"".to_owned()],
+                    vec!["\" mixed \"".to_owned(), "\" unstaged \"".to_owned()],
+                    vec!["\" untracked \"".to_owned()]
+                )
+            );
+        }
+
+        #[test]
         fn preserves_first_unstaged_record_and_quoted_path() {
             let exit_code: i32 = 0;
             let runner = arrange_output(b" M \" leading and trailing \"\n", b"", exit_code);
@@ -787,6 +849,35 @@ mod tests {
             let result = collect_status_paths(&context);
 
             assert_eq!(result, (Vec::new(), vec!["path".to_owned()], Vec::new()));
+        }
+    }
+
+    mod collect_repo_snapshot {
+        use super::super::collect_repo_snapshot;
+        use super::super::command_contracts::{arrange_context, arrange_output};
+
+        #[test]
+        fn ignores_empty_status_paths_and_preserves_quoted_paths() {
+            let exit_code: i32 = 0;
+            let stdout =
+                b"MM\n??\n M\nMM \nMM \" mixed \"\n?? \n?? \" untracked \"\n M \" unstaged \"\n M ";
+            let runner = arrange_output(stdout, b"", exit_code);
+            let context = arrange_context(&runner);
+
+            let result = collect_repo_snapshot(&context);
+
+            assert_eq!(
+                (
+                    result.staged_paths,
+                    result.unstaged_paths,
+                    result.untracked_paths
+                ),
+                (
+                    vec!["\" mixed \"".to_owned()],
+                    vec!["\" mixed \"".to_owned(), "\" unstaged \"".to_owned()],
+                    vec!["\" untracked \"".to_owned()]
+                )
+            );
         }
     }
 
@@ -941,6 +1032,31 @@ mod proptests {
 
         proptest! {
             #[test]
+            fn ignores_empty_records_around_generated_quoted_paths(
+                path in "[A-Za-z0-9_]{1,32}",
+                terminator in "\n{0,1}",
+            ) {
+                let exit_code: i32 = 0;
+                let reported_path = format!("\" {path} \"");
+                let stdout = format!(
+                    "MM\n??\n M\nMM \nMM {reported_path}\n?? \n?? {reported_path}\n M {reported_path}\n M {terminator}"
+                );
+                let runner = arrange_output(stdout.as_bytes(), b"", exit_code);
+                let context = arrange_context(&runner);
+
+                let result = collect_status_paths(&context);
+
+                prop_assert_eq!(
+                    result,
+                    (
+                        vec![reported_path.clone()],
+                        vec![reported_path.clone(), reported_path.clone()],
+                        vec![reported_path]
+                    )
+                );
+            }
+
+            #[test]
             fn preserves_generated_first_unstaged_paths(path in "[A-Za-z0-9_]{1,32}", terminator in "\n{0,1}") {
                 let exit_code: i32 = 0;
                 let reported_path = format!("\" {path} \"");
@@ -992,6 +1108,39 @@ mod proptests {
                 prop_assert_eq!(result, (Vec::new(), Vec::new(), vec![reported_path]));
             }
 
+        }
+    }
+
+    mod collect_repo_snapshot {
+        use super::super::collect_repo_snapshot;
+        use super::super::command_contracts::{arrange_context, arrange_output};
+        use proptest::prelude::*;
+
+        proptest! {
+            #[test]
+            fn ignores_empty_records_around_generated_quoted_paths(
+                path in "[A-Za-z0-9_]{1,32}",
+                terminator in "\n{0,1}",
+            ) {
+                let exit_code: i32 = 0;
+                let reported_path = format!("\" {path} \"");
+                let stdout = format!(
+                    "MM\n??\n M\nMM \nMM {reported_path}\n?? \n?? {reported_path}\n M {reported_path}\n M {terminator}"
+                );
+                let runner = arrange_output(stdout.as_bytes(), b"", exit_code);
+                let context = arrange_context(&runner);
+
+                let result = collect_repo_snapshot(&context);
+
+                prop_assert_eq!(
+                    (result.staged_paths, result.unstaged_paths, result.untracked_paths),
+                    (
+                        vec![reported_path.clone()],
+                        vec![reported_path.clone(), reported_path.clone()],
+                        vec![reported_path]
+                    )
+                );
+            }
         }
     }
 
