@@ -10251,26 +10251,3 @@ fn print_session_started_propagates_print_hints_failure() {
         "err was: {err:?}"
     );
 }
-
-#[test]
-fn proptest_run_unit_suite_part_4() {
-    cmd_retry_errors_when_no_active_session();
-    cmd_retry_errors_when_session_is_pending_start();
-    cmd_retry_errors_when_rebase_is_required_but_not_active();
-    cmd_retry_restores_remaining_pool_and_prints_guidance();
-    cmd_continue_errors_when_session_is_pending_start();
-    cmd_continue_errors_when_repo_has_unstaged_changes_before_gate();
-    cmd_continue_pending_start_opens_split_session();
-    run_with_args_vec_propagates_io_errors_for_parser_and_help_output();
-    run_with_args_without_user_args_prints_help();
-    scripted_runner_missing_output_is_an_error();
-    scripted_runner_missing_status_is_an_error();
-    scripted_runner_status_includes_env_key();
-    validate_ancestor_returns_not_ancestor_on_nonzero_status();
-    validate_exec_syntax_reports_spawn_failure_as_git_command();
-    validate_exec_syntax_returns_invalid_exec_syntax_on_nonzero_status();
-    validate_not_merge_errors_for_merge_commit();
-    validate_not_merge_treats_nonzero_status_as_non_merge();
-    validate_not_merge_treats_status_error_as_non_merge();
-    write_state_pairs_propagates_first_state_write_error();
-}
