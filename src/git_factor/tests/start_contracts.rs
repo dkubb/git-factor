@@ -1,3 +1,9 @@
+#[path = "start_query_contracts.rs"]
+pub(in crate::git_factor) mod query;
+
+#[path = "start_replay_contracts.rs"]
+pub(in crate::git_factor) mod replay;
+
 use super::*;
 use alloc::collections::BTreeMap;
 use core::cell::Cell;
@@ -104,6 +110,7 @@ struct ObservedRunner {
     calls: RefCell<Vec<RecordedCall>>,
     expected: Vec<RecordedCall>,
     inner: ScriptedRunner,
+    io_fault_at: Option<NonZeroUsize>,
 }
 
 impl ObservedRunner {
@@ -305,6 +312,12 @@ impl Runner for ObservedRunner {
         self.calls
             .borrow_mut()
             .push(RecordedCall::output(bin, args, cwd));
+        if self
+            .io_fault_at
+            .is_some_and(|at| at.get() == self.calls.borrow().len())
+        {
+            return Err(io::Error::other("selected query IO failure"));
+        }
         self.inner.output(bin, args, cwd)
     }
 
@@ -319,6 +332,12 @@ impl Runner for ObservedRunner {
         self.calls
             .borrow_mut()
             .push(RecordedCall::status(bin, args, envs, quiet, cwd));
+        if self
+            .io_fault_at
+            .is_some_and(|at| at.get() == self.calls.borrow().len())
+        {
+            return Err(io::Error::other("selected query IO failure"));
+        }
         self.inner.status(bin, args, envs, quiet, cwd)
     }
 }
@@ -425,10 +444,6 @@ impl DirectStart {
         Self::direct_files(&self.env.cwd, self.state.as_path())
     }
 
-    #[expect(
-        clippy::single_call_fn,
-        reason = "complete literal journal of a freshly opened single-head session"
-    )]
     fn journal(shas: &NonEmpty<CommitSha>, root: bool) -> BTreeMap<OsString, String> {
         let tip = shas.last().as_str();
         [
@@ -561,10 +576,6 @@ impl DirectStart {
         .or_abort("nonempty output guide")
     }
 
-    #[expect(
-        clippy::single_call_fn,
-        reason = "write-order and fault-truncation model for gate and guide output"
-    )]
     fn streams(
         stdout: &str,
         stderr: &str,
