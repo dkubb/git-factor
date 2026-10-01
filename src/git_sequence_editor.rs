@@ -819,35 +819,4 @@ pick def5678 second\n\
         let value: Result<&str, &str> = Err("error");
         assert_eq!(value.err_or_abort(""), "error");
     }
-
-    #[test]
-    fn proptest_run_unit_suite() {
-        build_requested_actions_rejects_cross_action_duplicates();
-        is_hex40_accepts_uppercase_hex();
-        main_entry_reports_usage_under_test_harness_arguments();
-        main_entry_with_args_vec_returns_error_for_runtime_failures();
-        main_entry_with_args_vec_returns_ok_for_help();
-        main_entry_with_args_vec_returns_ok_for_valid_invocation();
-        main_entry_with_args_vec_returns_ok_for_version();
-        main_entry_with_args_vec_returns_usage_for_parse_errors();
-        main_entry_with_args_vec_returns_usage_for_unknown_flag();
-        option_or_abort_returns_inner_value();
-        result_err_or_abort_returns_inner_error();
-        result_or_abort_returns_inner_value();
-        parse_todo_action_ignores_blank_and_comment_lines();
-        parse_todo_sha_accepts_short_commit_actions();
-        parse_todo_sha_ignores_blank_comment_and_non_commit_actions();
-        resolve_requested_sha_requires_exact_match_for_short_sha();
-        rewrite_todo_rewrites_action_for_matching_sha_only();
-        rewrite_todo_warns_when_action_is_already_set();
-        run_for_cli_returns_error_for_invalid_todo_action();
-        run_for_propagates_atomic_write_errors();
-        run_for_propagates_requested_action_resolution_errors();
-        run_for_reports_missing_todo_file();
-        run_for_writes_idempotent_action_warnings();
-        todo_sha_new_rejects_empty_token();
-        validate_no_duplicates_rejects_duplicates();
-        validate_todo_format_accepts_supported_actions();
-        validate_todo_format_rejects_unsupported_actions();
-    }
 }
