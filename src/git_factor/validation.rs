@@ -486,6 +486,389 @@ pub(in crate::git_factor) fn validate_not_merge(
 
 #[cfg(test)]
 mod tests {
+    mod remove_empty_root_in {
+        use super::*;
+
+        #[test]
+        fn remove_empty_root_in_reports_git_output_and_editor_path_failures() {
+            let dir = TempDir::new().or_abort("tempdir");
+            let env = TestEnv {
+                cwd: dir.path().to_path_buf(),
+            };
+
+            for (failure, expected) in [
+                (RootFailure::RevList, "forced rev-list failure"),
+                (RootFailure::LsTree, "forced ls-tree failure"),
+                (RootFailure::ShortRoot, "forced short-root failure"),
+            ] {
+                let runner = RootRunner {
+                    fail_on: Some(failure),
+                };
+                let ctx = Ctx {
+                    runner: &runner,
+                    cwd: dir.path().to_path_buf(),
+                    io: &REAL_IO,
+                    env: &env,
+                    fs: &REAL_FS,
+                };
+                let err =
+                    remove_empty_root_in(&ctx).err_or_abort("remove_empty_root_in should fail");
+                let message = git_command_message(&err).or_abort("expected GitCommand");
+                assert!(message.contains(expected), "unexpected error: {err:?}");
+            }
+
+            let runner = RootRunner { fail_on: None };
+            let failing_env = FailingExeEnv {
+                cwd: dir.path().to_path_buf(),
+            };
+            assert_eq!(
+                failing_env.current_dir().or_abort("cwd"),
+                dir.path().to_path_buf()
+            );
+            assert!(failing_env.var_os("TRACE").is_none());
+            let editor_ctx = Ctx {
+                runner: &runner,
+                cwd: dir.path().to_path_buf(),
+                io: &REAL_IO,
+                env: &failing_env,
+                fs: &REAL_FS,
+            };
+            let editor_err = remove_empty_root_in(&editor_ctx)
+                .err_or_abort("editor path resolution should fail");
+            let editor_message = git_command_message(&editor_err).or_abort("expected GitCommand");
+            assert!(
+                editor_message.contains("forced current_exe failure"),
+                "unexpected error: {editor_err:?}"
+            );
+        }
+
+        #[cfg(unix)]
+        #[test]
+        fn remove_empty_root_in_reports_non_utf8_editor_path() {
+            let dir = TempDir::new().or_abort("tempdir");
+            let runner = RootRunner { fail_on: None };
+            let env = TestEnv {
+                cwd: dir.path().to_path_buf(),
+            };
+            let fs = NonUtf8Fs;
+            let ctx = Ctx {
+                runner: &runner,
+                cwd: dir.path().to_path_buf(),
+                io: &REAL_IO,
+                env: &env,
+                fs: &fs,
+            };
+
+            let err =
+                remove_empty_root_in(&ctx).err_or_abort("non-utf8 editor path should fail cleanup");
+            let message = git_command_message(&err).or_abort("expected GitCommand");
+            assert_eq!(message, "editor path is not valid UTF-8");
+        }
+
+        #[test]
+        fn remove_empty_root_in_returns_early_when_root_has_content() {
+            let dir = TempDir::new().or_abort("tempdir");
+            init_git_repo(dir.path());
+            let ctx = ctx_for(dir.path());
+
+            remove_empty_root_in(&ctx).or_abort("remove_empty_root_in should return early");
+        }
+
+        #[test]
+        fn remove_empty_root_in_reports_rebase_failure_for_empty_root() {
+            let dir = TempDir::new().or_abort("tempdir");
+            init_empty_root_repo(dir.path());
+            let ctx = ctx_for(dir.path());
+
+            let err = remove_empty_root_in(&ctx)
+                .err_or_abort("rebase should fail without sequence editor");
+            let message = git_command_message(&err).or_abort("expected GitCommand");
+            assert!(
+                message.contains("rebase to remove empty root failed"),
+                "unexpected error: {err:?}"
+            );
+        }
+
+        #[test]
+        fn remove_empty_root_in_reports_missing_root_commit() {
+            struct NoRootRunner;
+
+            impl Runner for NoRootRunner {
+                fn output(&self, _bin: &str, args: &[&str], _cwd: &Path) -> io::Result<Output> {
+                    if args != ["rev-list", "--max-parents=0", "HEAD"] {
+                        return Err(io::Error::other("unexpected args"));
+                    }
+                    Ok(Output {
+                        status: ExitStatus::from_raw(0),
+                        stdout: b"\n".to_vec(),
+                        stderr: Vec::new(),
+                    })
+                }
+
+                fn status(
+                    &self,
+                    _bin: &str,
+                    _args: &[&str],
+                    _envs: &[(&str, &str)],
+                    _quiet: bool,
+                    _cwd: &Path,
+                ) -> io::Result<ExitStatus> {
+                    Ok(ExitStatus::from_raw(0))
+                }
+            }
+
+            let dir = TempDir::new().or_abort("tempdir");
+            let env = TestEnv {
+                cwd: dir.path().to_path_buf(),
+            };
+            let runner = NoRootRunner;
+            let status = runner
+                .status("git", &["status"], &[], false, dir.path())
+                .or_abort("status should succeed");
+            assert_eq!(status.code(), Some(i32::default()));
+            let output = runner
+                .output("git", &["rev-list", "--max-parents=0", "HEAD"], dir.path())
+                .or_abort("output should succeed");
+            assert!(output.stderr.is_empty(), "stderr should be empty");
+            let output_err = runner
+                .output("git", &["unexpected"], dir.path())
+                .err_or_abort("unexpected args should fail");
+            assert_eq!(output_err.to_string(), "unexpected args");
+            let ctx = Ctx {
+                runner: &runner,
+                cwd: dir.path().to_path_buf(),
+                io: &REAL_IO,
+                env: &env,
+                fs: &REAL_FS,
+            };
+
+            let err = remove_empty_root_in(&ctx).err_or_abort("missing root should fail");
+            let message = git_command_message(&err).or_abort("expected GitCommand");
+            assert!(
+                message.contains("no root commit found"),
+                "unexpected error: {err:?}"
+            );
+        }
+
+        #[test]
+        fn remove_empty_root_in_propagates_rebase_status_io_error() {
+            struct RebaseStatusIoErrorRunner;
+
+            impl Runner for RebaseStatusIoErrorRunner {
+                fn output(&self, _bin: &str, args: &[&str], _cwd: &Path) -> io::Result<Output> {
+                    let stdout = match *args {
+                        ["rev-list", "--max-parents=0", "HEAD"] => {
+                            format!("{}\n", "a".repeat(COMMIT_SHA_HEX_LEN)).into_bytes()
+                        }
+                        ["ls-tree", _] => Vec::new(),
+                        ["rev-parse", "--short", _] => b"aaaaaaa\n".to_vec(),
+                        _ => {
+                            return Err(io::Error::other(format!(
+                                "unexpected args: {}",
+                                args.join(" ")
+                            )));
+                        }
+                    };
+
+                    Ok(Output {
+                        status: ExitStatus::from_raw(0),
+                        stdout,
+                        stderr: Vec::new(),
+                    })
+                }
+
+                fn status(
+                    &self,
+                    _bin: &str,
+                    args: &[&str],
+                    _envs: &[(&str, &str)],
+                    _quiet: bool,
+                    _cwd: &Path,
+                ) -> io::Result<ExitStatus> {
+                    if args
+                        != [
+                            "rebase",
+                            "--empty",
+                            "drop",
+                            "--interactive",
+                            "--quiet",
+                            "--root",
+                        ]
+                    {
+                        return Err(io::Error::other("unexpected status args"));
+                    }
+                    Err(io::Error::other("rebase status io fail"))
+                }
+            }
+
+            let dir = TempDir::new().or_abort("tempdir");
+            fs::write(dir.path().join("git-factor"), "").or_abort("create git-factor");
+            let env = TestEnv {
+                cwd: dir.path().to_path_buf(),
+            };
+            let runner = RebaseStatusIoErrorRunner;
+            let unexpected_output_err = runner
+                .output("git", &["unexpected"], dir.path())
+                .err_or_abort("unexpected args should fail");
+            assert!(
+                unexpected_output_err
+                    .to_string()
+                    .contains("unexpected args"),
+                "unexpected error: {unexpected_output_err}"
+            );
+            let status_err = runner
+                .status("git", &["status"], &[], false, dir.path())
+                .err_or_abort("unexpected status args should fail");
+            assert_eq!(status_err.to_string(), "unexpected status args");
+            let ctx = Ctx {
+                runner: &runner,
+                cwd: dir.path().to_path_buf(),
+                io: &REAL_IO,
+                env: &env,
+                fs: &REAL_FS,
+            };
+
+            let err = remove_empty_root_in(&ctx)
+                .err_or_abort("rebase status io failure should propagate");
+            let message = git_command_message(&err).or_abort("expected GitCommand");
+            assert!(
+                message.contains("rebase status io fail"),
+                "unexpected error: {err:?}"
+            );
+        }
+
+        #[test]
+        fn remove_empty_root_in_rejects_multiple_root_commits() {
+            struct MultiRootRunner;
+
+            impl Runner for MultiRootRunner {
+                fn output(&self, _bin: &str, args: &[&str], _cwd: &Path) -> io::Result<Output> {
+                    if args != ["rev-list", "--max-parents=0", "HEAD"] {
+                        return Err(io::Error::other("unexpected args"));
+                    }
+                    let stdout = format!(
+                        "{}\n{}\n",
+                        "a".repeat(COMMIT_SHA_HEX_LEN),
+                        "b".repeat(COMMIT_SHA_HEX_LEN)
+                    )
+                    .into_bytes();
+                    Ok(Output {
+                        status: ExitStatus::from_raw(0),
+                        stdout,
+                        stderr: Vec::new(),
+                    })
+                }
+
+                fn status(
+                    &self,
+                    _bin: &str,
+                    _args: &[&str],
+                    _envs: &[(&str, &str)],
+                    _quiet: bool,
+                    _cwd: &Path,
+                ) -> io::Result<ExitStatus> {
+                    Ok(ExitStatus::from_raw(0))
+                }
+            }
+
+            let dir = TempDir::new().or_abort("tempdir");
+            let env = TestEnv {
+                cwd: dir.path().to_path_buf(),
+            };
+            let runner = MultiRootRunner;
+            let status = runner
+                .status("git", &["status"], &[], false, dir.path())
+                .or_abort("status should succeed");
+            assert_eq!(status.code(), Some(i32::default()));
+            let output_err = runner
+                .output("git", &["unexpected"], dir.path())
+                .err_or_abort("unexpected args should fail");
+            assert_eq!(output_err.to_string(), "unexpected args");
+            let ctx = Ctx {
+                runner: &runner,
+                cwd: dir.path().to_path_buf(),
+                io: &REAL_IO,
+                env: &env,
+                fs: &REAL_FS,
+            };
+
+            let err = remove_empty_root_in(&ctx).err_or_abort("multiple roots should fail");
+            let message = git_command_message(&err).or_abort("expected GitCommand");
+            assert!(
+                message.contains("multiple root commits found"),
+                "unexpected error: {err:?}"
+            );
+        }
+
+        #[test]
+        fn remove_empty_root_in_passes_empty_drop_to_rebase() {
+            let dir = TempDir::new().or_abort("tempdir");
+            let env = TestEnv {
+                cwd: dir.path().to_path_buf(),
+            };
+            let runner = RebaseArgsRunner;
+            let unexpected = runner
+                .output("git", &["unexpected"], dir.path())
+                .err_or_abort("unexpected args should error");
+            assert!(
+                unexpected.to_string().contains("unexpected args"),
+                "err was: {unexpected}"
+            );
+            let expected_rebase_args = [
+                "rebase",
+                "--empty",
+                "drop",
+                "--interactive",
+                "--quiet",
+                "--root",
+            ];
+            let unexpected_status_args_err = runner
+                .status("git", &["status"], &[], false, dir.path())
+                .err_or_abort("unexpected status args should fail");
+            assert_eq!(
+                unexpected_status_args_err.to_string(),
+                "unexpected status args"
+            );
+            let missing_editor_env_err = runner
+                .status(
+                    "git",
+                    &expected_rebase_args,
+                    &[("GIT_SEQUENCE_EDITOR", "git-factor --drop")],
+                    false,
+                    dir.path(),
+                )
+                .err_or_abort("missing GIT_EDITOR should fail");
+            assert_eq!(
+                missing_editor_env_err.to_string(),
+                "missing GIT_EDITOR=false env var"
+            );
+            let missing_sequence_editor_env_err = runner
+                .status(
+                    "git",
+                    &expected_rebase_args,
+                    &[("GIT_EDITOR", "false")],
+                    false,
+                    dir.path(),
+                )
+                .err_or_abort("missing GIT_SEQUENCE_EDITOR should fail");
+            assert_eq!(
+                missing_sequence_editor_env_err.to_string(),
+                "missing GIT_SEQUENCE_EDITOR with --drop"
+            );
+
+            let ctx = Ctx {
+                runner: &runner,
+                cwd: dir.path().to_path_buf(),
+                io: &REAL_IO,
+                env: &env,
+                fs: &REAL_FS,
+            };
+
+            remove_empty_root_in(&ctx)
+                .or_abort("remove_empty_root_in should pass expected rebase args");
+        }
+    }
+
     use super::*;
     use core::iter;
     use std::env;
@@ -1491,81 +1874,6 @@ mod tests {
     }
 
     #[test]
-    fn remove_empty_root_in_reports_git_output_and_editor_path_failures() {
-        let dir = TempDir::new().or_abort("tempdir");
-        let env = TestEnv {
-            cwd: dir.path().to_path_buf(),
-        };
-
-        for (failure, expected) in [
-            (RootFailure::RevList, "forced rev-list failure"),
-            (RootFailure::LsTree, "forced ls-tree failure"),
-            (RootFailure::ShortRoot, "forced short-root failure"),
-        ] {
-            let runner = RootRunner {
-                fail_on: Some(failure),
-            };
-            let ctx = Ctx {
-                runner: &runner,
-                cwd: dir.path().to_path_buf(),
-                io: &REAL_IO,
-                env: &env,
-                fs: &REAL_FS,
-            };
-            let err = remove_empty_root_in(&ctx).err_or_abort("remove_empty_root_in should fail");
-            let message = git_command_message(&err).or_abort("expected GitCommand");
-            assert!(message.contains(expected), "unexpected error: {err:?}");
-        }
-
-        let runner = RootRunner { fail_on: None };
-        let failing_env = FailingExeEnv {
-            cwd: dir.path().to_path_buf(),
-        };
-        assert_eq!(
-            failing_env.current_dir().or_abort("cwd"),
-            dir.path().to_path_buf()
-        );
-        assert!(failing_env.var_os("TRACE").is_none());
-        let editor_ctx = Ctx {
-            runner: &runner,
-            cwd: dir.path().to_path_buf(),
-            io: &REAL_IO,
-            env: &failing_env,
-            fs: &REAL_FS,
-        };
-        let editor_err =
-            remove_empty_root_in(&editor_ctx).err_or_abort("editor path resolution should fail");
-        let editor_message = git_command_message(&editor_err).or_abort("expected GitCommand");
-        assert!(
-            editor_message.contains("forced current_exe failure"),
-            "unexpected error: {editor_err:?}"
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn remove_empty_root_in_reports_non_utf8_editor_path() {
-        let dir = TempDir::new().or_abort("tempdir");
-        let runner = RootRunner { fail_on: None };
-        let env = TestEnv {
-            cwd: dir.path().to_path_buf(),
-        };
-        let fs = NonUtf8Fs;
-        let ctx = Ctx {
-            runner: &runner,
-            cwd: dir.path().to_path_buf(),
-            io: &REAL_IO,
-            env: &env,
-            fs: &fs,
-        };
-
-        let err =
-            remove_empty_root_in(&ctx).err_or_abort("non-utf8 editor path should fail cleanup");
-        let message = git_command_message(&err).or_abort("expected GitCommand");
-        assert_eq!(message, "editor path is not valid UTF-8");
-    }
-
-    #[test]
     fn root_runner_helpers_cover_unexpected_and_status_paths() {
         let runner = RootRunner { fail_on: None };
         let status = runner
@@ -2157,309 +2465,6 @@ mod tests {
         let ctx = ctx_for(dir.path());
         validate_exec_syntax(&ctx, "echo ok")
             .or_abort("valid shell command should pass syntax check");
-    }
-
-    #[test]
-    fn remove_empty_root_in_returns_early_when_root_has_content() {
-        let dir = TempDir::new().or_abort("tempdir");
-        init_git_repo(dir.path());
-        let ctx = ctx_for(dir.path());
-
-        remove_empty_root_in(&ctx).or_abort("remove_empty_root_in should return early");
-    }
-
-    #[test]
-    fn remove_empty_root_in_reports_rebase_failure_for_empty_root() {
-        let dir = TempDir::new().or_abort("tempdir");
-        init_empty_root_repo(dir.path());
-        let ctx = ctx_for(dir.path());
-
-        let err =
-            remove_empty_root_in(&ctx).err_or_abort("rebase should fail without sequence editor");
-        let message = git_command_message(&err).or_abort("expected GitCommand");
-        assert!(
-            message.contains("rebase to remove empty root failed"),
-            "unexpected error: {err:?}"
-        );
-    }
-
-    #[test]
-    fn remove_empty_root_in_reports_missing_root_commit() {
-        struct NoRootRunner;
-
-        impl Runner for NoRootRunner {
-            fn output(&self, _bin: &str, args: &[&str], _cwd: &Path) -> io::Result<Output> {
-                if args != ["rev-list", "--max-parents=0", "HEAD"] {
-                    return Err(io::Error::other("unexpected args"));
-                }
-                Ok(Output {
-                    status: ExitStatus::from_raw(0),
-                    stdout: b"\n".to_vec(),
-                    stderr: Vec::new(),
-                })
-            }
-
-            fn status(
-                &self,
-                _bin: &str,
-                _args: &[&str],
-                _envs: &[(&str, &str)],
-                _quiet: bool,
-                _cwd: &Path,
-            ) -> io::Result<ExitStatus> {
-                Ok(ExitStatus::from_raw(0))
-            }
-        }
-
-        let dir = TempDir::new().or_abort("tempdir");
-        let env = TestEnv {
-            cwd: dir.path().to_path_buf(),
-        };
-        let runner = NoRootRunner;
-        let status = runner
-            .status("git", &["status"], &[], false, dir.path())
-            .or_abort("status should succeed");
-        assert_eq!(status.code(), Some(i32::default()));
-        let output = runner
-            .output("git", &["rev-list", "--max-parents=0", "HEAD"], dir.path())
-            .or_abort("output should succeed");
-        assert!(output.stderr.is_empty(), "stderr should be empty");
-        let output_err = runner
-            .output("git", &["unexpected"], dir.path())
-            .err_or_abort("unexpected args should fail");
-        assert_eq!(output_err.to_string(), "unexpected args");
-        let ctx = Ctx {
-            runner: &runner,
-            cwd: dir.path().to_path_buf(),
-            io: &REAL_IO,
-            env: &env,
-            fs: &REAL_FS,
-        };
-
-        let err = remove_empty_root_in(&ctx).err_or_abort("missing root should fail");
-        let message = git_command_message(&err).or_abort("expected GitCommand");
-        assert!(
-            message.contains("no root commit found"),
-            "unexpected error: {err:?}"
-        );
-    }
-
-    #[test]
-    fn remove_empty_root_in_propagates_rebase_status_io_error() {
-        struct RebaseStatusIoErrorRunner;
-
-        impl Runner for RebaseStatusIoErrorRunner {
-            fn output(&self, _bin: &str, args: &[&str], _cwd: &Path) -> io::Result<Output> {
-                let stdout = match *args {
-                    ["rev-list", "--max-parents=0", "HEAD"] => {
-                        format!("{}\n", "a".repeat(COMMIT_SHA_HEX_LEN)).into_bytes()
-                    }
-                    ["ls-tree", _] => Vec::new(),
-                    ["rev-parse", "--short", _] => b"aaaaaaa\n".to_vec(),
-                    _ => {
-                        return Err(io::Error::other(format!(
-                            "unexpected args: {}",
-                            args.join(" ")
-                        )));
-                    }
-                };
-
-                Ok(Output {
-                    status: ExitStatus::from_raw(0),
-                    stdout,
-                    stderr: Vec::new(),
-                })
-            }
-
-            fn status(
-                &self,
-                _bin: &str,
-                args: &[&str],
-                _envs: &[(&str, &str)],
-                _quiet: bool,
-                _cwd: &Path,
-            ) -> io::Result<ExitStatus> {
-                if args
-                    != [
-                        "rebase",
-                        "--empty",
-                        "drop",
-                        "--interactive",
-                        "--quiet",
-                        "--root",
-                    ]
-                {
-                    return Err(io::Error::other("unexpected status args"));
-                }
-                Err(io::Error::other("rebase status io fail"))
-            }
-        }
-
-        let dir = TempDir::new().or_abort("tempdir");
-        fs::write(dir.path().join("git-factor"), "").or_abort("create git-factor");
-        let env = TestEnv {
-            cwd: dir.path().to_path_buf(),
-        };
-        let runner = RebaseStatusIoErrorRunner;
-        let unexpected_output_err = runner
-            .output("git", &["unexpected"], dir.path())
-            .err_or_abort("unexpected args should fail");
-        assert!(
-            unexpected_output_err
-                .to_string()
-                .contains("unexpected args"),
-            "unexpected error: {unexpected_output_err}"
-        );
-        let status_err = runner
-            .status("git", &["status"], &[], false, dir.path())
-            .err_or_abort("unexpected status args should fail");
-        assert_eq!(status_err.to_string(), "unexpected status args");
-        let ctx = Ctx {
-            runner: &runner,
-            cwd: dir.path().to_path_buf(),
-            io: &REAL_IO,
-            env: &env,
-            fs: &REAL_FS,
-        };
-
-        let err =
-            remove_empty_root_in(&ctx).err_or_abort("rebase status io failure should propagate");
-        let message = git_command_message(&err).or_abort("expected GitCommand");
-        assert!(
-            message.contains("rebase status io fail"),
-            "unexpected error: {err:?}"
-        );
-    }
-
-    #[test]
-    fn remove_empty_root_in_rejects_multiple_root_commits() {
-        struct MultiRootRunner;
-
-        impl Runner for MultiRootRunner {
-            fn output(&self, _bin: &str, args: &[&str], _cwd: &Path) -> io::Result<Output> {
-                if args != ["rev-list", "--max-parents=0", "HEAD"] {
-                    return Err(io::Error::other("unexpected args"));
-                }
-                let stdout = format!(
-                    "{}\n{}\n",
-                    "a".repeat(COMMIT_SHA_HEX_LEN),
-                    "b".repeat(COMMIT_SHA_HEX_LEN)
-                )
-                .into_bytes();
-                Ok(Output {
-                    status: ExitStatus::from_raw(0),
-                    stdout,
-                    stderr: Vec::new(),
-                })
-            }
-
-            fn status(
-                &self,
-                _bin: &str,
-                _args: &[&str],
-                _envs: &[(&str, &str)],
-                _quiet: bool,
-                _cwd: &Path,
-            ) -> io::Result<ExitStatus> {
-                Ok(ExitStatus::from_raw(0))
-            }
-        }
-
-        let dir = TempDir::new().or_abort("tempdir");
-        let env = TestEnv {
-            cwd: dir.path().to_path_buf(),
-        };
-        let runner = MultiRootRunner;
-        let status = runner
-            .status("git", &["status"], &[], false, dir.path())
-            .or_abort("status should succeed");
-        assert_eq!(status.code(), Some(i32::default()));
-        let output_err = runner
-            .output("git", &["unexpected"], dir.path())
-            .err_or_abort("unexpected args should fail");
-        assert_eq!(output_err.to_string(), "unexpected args");
-        let ctx = Ctx {
-            runner: &runner,
-            cwd: dir.path().to_path_buf(),
-            io: &REAL_IO,
-            env: &env,
-            fs: &REAL_FS,
-        };
-
-        let err = remove_empty_root_in(&ctx).err_or_abort("multiple roots should fail");
-        let message = git_command_message(&err).or_abort("expected GitCommand");
-        assert!(
-            message.contains("multiple root commits found"),
-            "unexpected error: {err:?}"
-        );
-    }
-
-    #[test]
-    fn remove_empty_root_in_passes_empty_drop_to_rebase() {
-        let dir = TempDir::new().or_abort("tempdir");
-        let env = TestEnv {
-            cwd: dir.path().to_path_buf(),
-        };
-        let runner = RebaseArgsRunner;
-        let unexpected = runner
-            .output("git", &["unexpected"], dir.path())
-            .err_or_abort("unexpected args should error");
-        assert!(
-            unexpected.to_string().contains("unexpected args"),
-            "err was: {unexpected}"
-        );
-        let expected_rebase_args = [
-            "rebase",
-            "--empty",
-            "drop",
-            "--interactive",
-            "--quiet",
-            "--root",
-        ];
-        let unexpected_status_args_err = runner
-            .status("git", &["status"], &[], false, dir.path())
-            .err_or_abort("unexpected status args should fail");
-        assert_eq!(
-            unexpected_status_args_err.to_string(),
-            "unexpected status args"
-        );
-        let missing_editor_env_err = runner
-            .status(
-                "git",
-                &expected_rebase_args,
-                &[("GIT_SEQUENCE_EDITOR", "git-factor --drop")],
-                false,
-                dir.path(),
-            )
-            .err_or_abort("missing GIT_EDITOR should fail");
-        assert_eq!(
-            missing_editor_env_err.to_string(),
-            "missing GIT_EDITOR=false env var"
-        );
-        let missing_sequence_editor_env_err = runner
-            .status(
-                "git",
-                &expected_rebase_args,
-                &[("GIT_EDITOR", "false")],
-                false,
-                dir.path(),
-            )
-            .err_or_abort("missing GIT_SEQUENCE_EDITOR should fail");
-        assert_eq!(
-            missing_sequence_editor_env_err.to_string(),
-            "missing GIT_SEQUENCE_EDITOR with --drop"
-        );
-
-        let ctx = Ctx {
-            runner: &runner,
-            cwd: dir.path().to_path_buf(),
-            io: &REAL_IO,
-            env: &env,
-            fs: &REAL_FS,
-        };
-
-        remove_empty_root_in(&ctx)
-            .or_abort("remove_empty_root_in should pass expected rebase args");
     }
 
     #[test]
