@@ -1144,19 +1144,6 @@ pick {sha} duplicate
         let value: Result<&str, &str> = Err("error");
         assert_eq!(value.err_or_abort(""), "error");
     }
-
-    #[test]
-    fn proptest_run_unit_suite() {
-        option_or_abort_returns_inner_value();
-        result_err_or_abort_returns_inner_error();
-        result_or_abort_returns_inner_value();
-        resolve_requested_sha_rejects_len_40_non_hex_without_rev_parse();
-        resolve_requested_sha_rejects_empty_sha_without_rev_parse();
-        resolve_requested_sha_rejects_non_40_len_sha_without_rev_parse();
-        resolve_requested_sha_runs_git_rev_parse_for_full_sha();
-        todo_shas_in_deduplicates_repeated_tokens();
-        validate_todo_format_accepts_indented_comment_lines();
-    }
 }
 
 #[cfg(test)]
