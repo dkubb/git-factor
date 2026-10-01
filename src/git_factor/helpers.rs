@@ -137,12 +137,6 @@ mod tests {
             error_to_exit(&FactorError::GitCommand(non_empty_msg("nope".to_owned())));
         assert_eq!(code_git_command, EXIT_SOFTWARE);
     }
-
-    #[test]
-    fn proptest_run_non_panicking_unit_suite() {
-        error_to_exit_maps_variants_to_expected_exit_codes();
-        shell_quote_wraps_and_escapes_single_quotes();
-    }
 }
 
 #[cfg(test)]

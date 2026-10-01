@@ -373,14 +373,6 @@ mod tests {
     }
 
     #[test]
-    fn proptest_run_unit_suite() {
-        proptest_commits_new_rejects_empty_set();
-        commit_sha_new_rejects_len_40_non_hex_input();
-        proptest_tree_hash_new_preserves_inner_value();
-        strategy_helper_functions_construct();
-    }
-
-    #[test]
     fn proptest_tree_hash_new_preserves_inner_value() {
         let raw = "a".repeat(COMMIT_SHA_HEX_LEN);
         let tree = TreeHash::new(raw.as_str()).or_abort("valid tree hash");
