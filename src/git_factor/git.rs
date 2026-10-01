@@ -804,24 +804,6 @@ mod tests {
     }
 
     #[test]
-    fn proptest_run_non_property_unit_suite_part_1() {
-        io_errln_defaults_cover_buffer_and_fail_on_exact_text_types();
-        git_output_reports_spawn_errors_as_git_command();
-        run_git_reports_spawn_errors_as_git_command();
-        command_status_with_can_run_in_quiet_mode();
-        command_status_with_reports_spawn_errors_as_git_command();
-        output_only_runner_reports_missing_scripted_output();
-        git_dir_in_preserves_absolute_git_dir_output();
-        error_variant_extractors_cover_matching_and_non_matching_paths();
-        io_line_helpers_append_newlines_for_test_implementations();
-        trace_helpers_cover_edge_cases();
-        trace_helpers_cover_non_empty_path_and_none_todo_line();
-        trace_helpers_cover_env_limit_escape_and_todo_branches();
-        env_var_os_returns_none_for_non_trace_keys();
-        output_only_runner_status_returns_success_status();
-    }
-
-    #[test]
     fn proptest_run_non_property_unit_suite_part_2() {
         run_git_non_interactive_sets_editor_env();
         non_interactive_runner_output_is_not_expected();
