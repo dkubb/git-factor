@@ -4082,39 +4082,6 @@ mod proptests {
         fs.write_string(path, "hello")
             .or_abort("write_string should succeed");
     }
-
-    #[test]
-    fn proptest_run_non_property_unit_suite() {
-        advance_to_next_commit_reports_zero_split_count_on_advance();
-        advance_to_next_commit_reports_zero_split_count_on_completion();
-        advance_to_next_commit_errors_when_rebase_remains_active_after_span_completion();
-        advance_to_next_commit_completes_root_cleanup_when_root_is_non_empty();
-        advance_to_next_commit_completes_without_root_cleanup_when_not_root();
-        advance_to_next_commit_enters_empty_root_cleanup_for_root_sessions();
-        cmd_abort_propagates_current_commit_error_when_start_head_is_missing();
-        cmd_abort_uses_current_commit_when_start_head_is_missing();
-        cmd_start_in_propagates_invalid_range_error_after_prep();
-        cmd_start_in_propagates_invalid_inclusive_span_after_resolution();
-        commit_message_try_from_rejects_invalid_values();
-        failure_status_reports_failure();
-        increment_split_count_reports_overflow();
-        io_line_methods_cover_default_real_and_test_impls();
-        overflow_split_count_fs_trait_methods_are_exercised();
-        #[cfg(unix)]
-        non_utf8_fs_delegates_non_canonicalize_operations();
-        #[cfg(unix)]
-        run_start_rebase_reports_non_utf8_editor_path();
-        run_start_rebase_propagates_status_io_errors();
-        run_start_rebase_uses_parent_arg_when_not_root();
-        run_start_rebase_uses_root_arg_when_root();
-        session_expected_tree_propagates_current_commit_lookup_error();
-        session_from_active_loads_state_and_accessors();
-        session_from_active_rejects_invalid_commit_entries();
-        short_sha_try_from_rejects_invalid_values();
-        success_status_reports_success();
-        validate_split_target_accepts_non_merge_ancestor_commit();
-        validate_split_target_returns_not_ancestor_when_merge_base_fails();
-    }
 }
 
 #[cfg(test)]
