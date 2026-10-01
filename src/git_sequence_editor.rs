@@ -8,6 +8,9 @@
 /// CLI argument model for `git-sequence-editor`.
 #[path = "git_sequence_editor/cli.rs"]
 mod cli;
+#[cfg(test)]
+#[path = "git_sequence_editor/proptests.rs"]
+mod proptests;
 /// Todo parsing and rewrite logic for `git-sequence-editor`.
 #[path = "git_sequence_editor/todo.rs"]
 mod todo;
@@ -18,6 +21,8 @@ use std::ffi::OsString;
 use std::fs::{self, OpenOptions};
 use std::io::{self, ErrorKind, Write as _};
 use std::path::Path;
+#[cfg(test)]
+use std::path::PathBuf;
 use std::process;
 #[cfg(test)]
 use std::sync::{Mutex, MutexGuard};
@@ -388,7 +393,19 @@ pub fn main_entry() -> i32 {
 }
 
 #[cfg(test)]
+fn atomic_write_fixture(name: &str) -> (MutexGuard<'static, ()>, tempfile::TempDir, PathBuf) {
+    let guard = lock_write_fail_point_test();
+    set_write_fail_point(WriteFailPoint::None);
+    let directory = tempfile::TempDir::new().or_abort("writer fixture");
+    let path = directory.path().join(name);
+    (guard, directory, path)
+}
+
+#[cfg(test)]
 mod tests {
+    #[path = "write_file_atomic.rs"]
+    mod main_entry;
+
     use alloc::collections::{BTreeMap, BTreeSet};
     use std::path::Path;
 
