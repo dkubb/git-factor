@@ -1589,10 +1589,6 @@ fn cmd_start_prep_in(ctx: &Ctx<'_>) -> Result<StateDir, FactorError> {
 }
 
 /// Starts a new factor session from resolved commit SHAs.
-#[expect(
-    clippy::too_many_lines,
-    reason = "start orchestration keeps single-head and rebase-backed setup in one place"
-)]
 fn cmd_start_with_resolved_in(
     ctx: &Ctx<'_>,
     exec: &NonEmpty<NonEmptyString>,
@@ -1603,25 +1599,9 @@ fn cmd_start_with_resolved_in(
     for sha in resolved_commits {
         validate_split_target_in(ctx, sha)?;
     }
-    let parent_status = command_status_with(
-        ctx,
-        "git",
-        &[
-            "rev-parse",
-            "--quiet",
-            "--verify",
-            &format!("{}^", resolved_commits.first()),
-        ],
-        &[],
-        true,
-    )?;
     let span = CommitSpan::new(
         resolved_commits.clone(),
-        if parent_status.success() {
-            BaseParent::Commit
-        } else {
-            BaseParent::Root
-        },
+        validation::base_parent_in(ctx, resolved_commits.first())?,
     );
     let span_tip = span.tip_commit();
     let short_sha = NonEmptyString::try_from(git_output(

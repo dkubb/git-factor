@@ -156,13 +156,19 @@ impl ObservedRunner {
                 );
         }
         runner = runner
-            .with_status(
+            .with_output(
                 "git",
-                &["rev-parse", "--quiet", "--verify", &format!("{first}^")],
-                &[],
-                true,
+                &["cat-file", "commit", first],
                 repo,
-                if root { 1 << 8 } else { 0 },
+                &format!(
+                    "tree {}\n{}author Example <example@example.com> 1 +0000\n\nsubject\n",
+                    "c".repeat(SHA_LEN),
+                    if root {
+                        String::new()
+                    } else {
+                        format!("parent {}\n", "d".repeat(SHA_LEN))
+                    },
+                ),
             )
             .with_output("git", &["rev-parse", "--short", tip], repo, "abcdef0\n")
             .with_output(

@@ -13,6 +13,55 @@ use alloc::collections::BTreeSet;
 #[cfg(test)]
 use std::collections::HashSet;
 
+/// Actual-parent admission contracts.
+#[cfg(test)]
+#[path = "validation_parent_tests.rs"]
+mod parent_contracts;
+
+/// Reads consecutive parent records from an actual commit object.
+#[cfg_attr(
+    not(test),
+    expect(clippy::single_call_fn, reason = "selected-range ancestry admission")
+)]
+pub(in crate::git_factor) fn base_parent_in(
+    ctx: &Ctx<'_>,
+    commit: &CommitSha,
+) -> Result<BaseParent, FactorError> {
+    let object = git_output(ctx, &["cat-file", "commit", commit.as_str()])?;
+    let header = object
+        .split_once("\n\n")
+        .map_or(object.as_str(), |(header, _body)| header);
+    let mut lines = header.lines();
+    let tree = lines
+        .next()
+        .and_then(|line| line.strip_prefix("tree "))
+        .ok_or_else(|| {
+            FactorError::GitCommand(non_empty_msg(format!(
+                "malformed commit object {commit}: missing tree header"
+            )))
+        })?;
+    TreeHash::new(tree).map_err(|_error| {
+        FactorError::GitCommand(non_empty_msg(format!(
+            "malformed commit object {commit}: invalid tree header '{tree}'"
+        )))
+    })?;
+    let parents = lines
+        .map_while(|line| line.strip_prefix("parent "))
+        .map(|parent| {
+            CommitSha::new(parent.to_owned()).map_err(|_error| {
+                FactorError::GitCommand(non_empty_msg(format!(
+                    "malformed commit object {commit}: invalid parent header '{parent}'"
+                )))
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    match parents.len() {
+        0 => Ok(BaseParent::Root),
+        1 => Ok(BaseParent::Commit),
+        _ => Err(FactorError::MergeCommit(commit.clone())),
+    }
+}
+
 /// Removes the empty root commit created during a root-commit factor session.
 ///
 /// After a root-commit factor session completes, the history contains an empty
@@ -482,6 +531,154 @@ mod proptests;
 
 #[cfg(test)]
 mod tests {
+    mod base_parent_in {
+        use super::super::parent_contracts::{CommitObject, Reply};
+
+        #[test]
+        fn refuses_an_empty_commit_object() {
+            let fixture = CommitObject::new(
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                Reply::text(String::new()),
+            );
+            let ctx = fixture.context();
+            let actual = super::super::base_parent_in(&ctx, &fixture.commit)
+                .map_err(|error| error.to_string());
+            assert_eq!(actual, Err("git command failed: malformed commit object aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa: missing tree header".to_owned()));
+            assert_eq!(fixture.queries.get(), 1);
+            assert_eq!(fixture.mutations.get(), 0);
+            assert_eq!(fixture.io.out.borrow().as_str(), "");
+            assert_eq!(fixture.io.err.borrow().as_str(), "");
+        }
+
+        #[test]
+        fn preserves_a_failed_object_query() {
+            let code: i32 = 256;
+            let fixture = CommitObject::new(
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                Reply::Output {
+                    code,
+                    content: String::new(),
+                    error: "query refused".to_owned(),
+                },
+            );
+            let ctx = fixture.context();
+            let actual = super::super::base_parent_in(&ctx, &fixture.commit)
+                .map_err(|error| error.to_string());
+            assert_eq!(actual, Err("git command failed: query refused".to_owned()));
+            assert_eq!(fixture.queries.get(), 1);
+            assert_eq!(fixture.mutations.get(), 0);
+            assert_eq!(fixture.io.out.borrow().as_str(), "");
+            assert_eq!(fixture.io.err.borrow().as_str(), "");
+        }
+
+        #[test]
+        fn refuses_an_invalid_parent_identity() {
+            let fixture = CommitObject::new("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", Reply::text("tree cccccccccccccccccccccccccccccccccccccccc\nparent invalid-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n\nsubject".to_owned()));
+            let ctx = fixture.context();
+            let actual = super::super::base_parent_in(&ctx, &fixture.commit)
+                .map_err(|error| error.to_string());
+            assert_eq!(actual, Err("git command failed: malformed commit object aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa: invalid parent header 'invalid-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'".to_owned()));
+            assert_eq!(fixture.queries.get(), 1);
+            assert_eq!(fixture.mutations.get(), 0);
+            assert_eq!(fixture.io.out.borrow().as_str(), "");
+            assert_eq!(fixture.io.err.borrow().as_str(), "");
+        }
+
+        #[test]
+        fn refuses_an_invalid_tree_identity() {
+            let fixture = CommitObject::new(
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                Reply::text(
+                    "tree invalid-cccccccccccccccccccccccccccccccccccccccc\n\nsubject".to_owned(),
+                ),
+            );
+            let ctx = fixture.context();
+            let actual = super::super::base_parent_in(&ctx, &fixture.commit)
+                .map_err(|error| error.to_string());
+            assert_eq!(actual, Err("git command failed: malformed commit object aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa: invalid tree header 'invalid-cccccccccccccccccccccccccccccccccccccccc'".to_owned()));
+            assert_eq!(fixture.queries.get(), 1);
+            assert_eq!(fixture.mutations.get(), 0);
+            assert_eq!(fixture.io.out.borrow().as_str(), "");
+            assert_eq!(fixture.io.err.borrow().as_str(), "");
+        }
+
+        #[test]
+        fn rejects_two_actual_parents() {
+            let fixture = CommitObject::new("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", Reply::text("tree cccccccccccccccccccccccccccccccccccccccc\nparent bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\nparent bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n\nsubject".to_owned()));
+            let ctx = fixture.context();
+            let actual = super::super::base_parent_in(&ctx, &fixture.commit)
+                .map_err(|error| error.to_string());
+            assert_eq!(actual, Err("commit aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa is a merge commit and cannot be split".to_owned()));
+            assert_eq!(fixture.queries.get(), 1);
+            assert_eq!(fixture.mutations.get(), 0);
+            assert_eq!(fixture.io.out.borrow().as_str(), "");
+            assert_eq!(fixture.io.err.borrow().as_str(), "");
+        }
+
+        #[test]
+        fn requires_the_tree_header() {
+            let fixture = CommitObject::new(
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                Reply::text(
+                    "parent bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n\nsubject".to_owned(),
+                ),
+            );
+            let ctx = fixture.context();
+            let actual = super::super::base_parent_in(&ctx, &fixture.commit)
+                .map_err(|error| error.to_string());
+            assert_eq!(actual, Err("git command failed: malformed commit object aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa: missing tree header".to_owned()));
+            assert_eq!(fixture.queries.get(), 1);
+            assert_eq!(fixture.mutations.get(), 0);
+            assert_eq!(fixture.io.out.borrow().as_str(), "");
+            assert_eq!(fixture.io.err.borrow().as_str(), "");
+        }
+
+        #[test]
+        fn admits_one_actual_parent() {
+            let fixture = CommitObject::new("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", Reply::text("tree cccccccccccccccccccccccccccccccccccccccc\nparent bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\nauthor Example <example@example.com> 1 +0000\n\nsubject".to_owned()));
+            let ctx = fixture.context();
+            let actual = super::super::base_parent_in(&ctx, &fixture.commit)
+                .map_err(|error| error.to_string());
+            assert_eq!(actual, Ok(super::super::BaseParent::Commit));
+            assert_eq!(fixture.queries.get(), 1);
+            assert_eq!(fixture.mutations.get(), 0);
+            assert_eq!(fixture.io.out.borrow().as_str(), "");
+            assert_eq!(fixture.io.err.borrow().as_str(), "");
+        }
+
+        #[test]
+        fn ignores_parent_text_in_signatures_and_the_message() {
+            let fixture = CommitObject::new("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", Reply::text("tree cccccccccccccccccccccccccccccccccccccccc\nauthor Example <example@example.com> 1 +0000\ngpgsig signature\n parent bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n\nparent bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_owned()));
+            let ctx = fixture.context();
+            let actual = super::super::base_parent_in(&ctx, &fixture.commit)
+                .map_err(|error| error.to_string());
+            assert_eq!(actual, Ok(super::super::BaseParent::Root));
+            assert_eq!(fixture.queries.get(), 1);
+            assert_eq!(fixture.mutations.get(), 0);
+            assert_eq!(fixture.io.out.borrow().as_str(), "");
+            assert_eq!(fixture.io.err.borrow().as_str(), "");
+        }
+
+        #[test]
+        fn preserves_an_object_query_spawn_failure() {
+            let fixture = CommitObject::new(
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                Reply::SpawnError("lookup refused".to_owned()),
+            );
+            let ctx = fixture.context();
+            let actual = super::super::base_parent_in(&ctx, &fixture.commit)
+                .map_err(|error| error.to_string());
+            assert_eq!(
+                actual,
+                Err("git command failed: git cat-file: lookup refused".to_owned())
+            );
+            assert_eq!(fixture.queries.get(), 1);
+            assert_eq!(fixture.mutations.get(), 0);
+            assert_eq!(fixture.io.out.borrow().as_str(), "");
+            assert_eq!(fixture.io.err.borrow().as_str(), "");
+        }
+    }
+
     mod resolve_commit {
         use super::super::resolve_contract::{Observation, Reply};
         use super::super::*;

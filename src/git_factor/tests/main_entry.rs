@@ -175,14 +175,7 @@ fn cmd_start_propagates_status_error_when_start_sequence_fails() {
         repo,
         &format!("{}\n", "c".repeat(SHA_LEN)),
     )
-    .with_status(
-        "git",
-        &["rev-parse", "--quiet", "--verify", &format!("{sha}^")],
-        &[],
-        true,
-        repo,
-        0,
-    );
+    .with_commit_object(repo, &sha, Some(&"d".repeat(SHA_LEN)));
 
     let io = TestIo::default();
     let env = TestEnv {
@@ -482,14 +475,7 @@ fn cmd_start_single_head_session_exec_gate_failure_returns_exec_failed() {
         "",
         "",
     )
-    .with_status(
-        "git",
-        &["rev-parse", "--quiet", "--verify", &format!("{sha}^")],
-        &[],
-        true,
-        repo,
-        0,
-    );
+    .with_commit_object(repo, &sha, Some(&"d".repeat(SHA_LEN)));
     let io = TestIo::default();
     let env = TestEnv {
         cwd: repo.to_path_buf(),
@@ -542,14 +528,7 @@ fn cmd_start_single_head_session_exec_gate_failure_with_multiple_exec_commands_r
         "",
         "",
     )
-    .with_status(
-        "git",
-        &["rev-parse", "--quiet", "--verify", &format!("{sha}^")],
-        &[],
-        true,
-        repo,
-        0,
-    );
+    .with_commit_object(repo, &sha, Some(&"d".repeat(SHA_LEN)));
     let io = TestIo::default();
     let env = TestEnv {
         cwd: repo.to_path_buf(),
@@ -644,14 +623,7 @@ fn cmd_start_single_head_session_propagates_exec_status_io_error() {
             repo,
             "subject\n",
         )
-        .with_status(
-            "git",
-            &["rev-parse", "--quiet", "--verify", &format!("{sha}^")],
-            &[],
-            true,
-            repo,
-            0,
-        )
+        .with_commit_object(repo, &sha, Some(&"d".repeat(SHA_LEN)))
         .with_status(
             "bash",
             &["--norc", "--noprofile", "-n", "-c", "true"],
@@ -712,14 +684,7 @@ fn cmd_start_propagates_commits_state_write_failure() {
         "",
         "",
     )
-    .with_status(
-        "git",
-        &["rev-parse", "--quiet", "--verify", &format!("{sha}^")],
-        &[],
-        true,
-        repo,
-        0,
-    );
+    .with_commit_object(repo, &sha, Some(&"d".repeat(SHA_LEN)));
     let io = TestIo::default();
     let env = TestEnv {
         cwd: repo.to_path_buf(),
@@ -827,14 +792,7 @@ fn cmd_start_propagates_expected_tree_capture_error_after_state_write() {
         "",
         "",
     )
-    .with_status(
-        "git",
-        &["rev-parse", "--quiet", "--verify", &format!("{sha}^")],
-        &[],
-        true,
-        repo,
-        0,
-    );
+    .with_commit_object(repo, &sha, Some(&"d".repeat(SHA_LEN)));
     let io = TestIo::default();
     let env = TestEnv {
         cwd: repo.to_path_buf(),
@@ -878,14 +836,7 @@ fn cmd_start_root_session_propagates_mixed_reset_error() {
                 repo,
                 0,
             )
-            .with_status(
-                "git",
-                &["rev-parse", "--quiet", "--verify", &format!("{sha}^")],
-                &[],
-                true,
-                repo,
-                1,
-            )
+            .with_commit_object(repo, &sha, None)
             .with_status(
                 "git",
                 &["rev-parse", "--quiet", "--verify", &format!("{sha}^2")],
@@ -2059,10 +2010,9 @@ fn cmd_start_preserves_opened_state_when_hint_query_fails() {
 }
 
 #[test]
-fn cmd_start_characterizes_nonroot_parent_query_rejection_as_root() {
+fn cmd_start_refuses_nonroot_parent_query_rejection_before_mutation() {
     use crate::git_factor::tests::start_contracts::query;
     use crate::git_factor::tests::start_contracts::query::{QueryCase, QueryReply, QueryTarget};
-    use alloc::collections::BTreeMap;
 
     let selected = NonEmpty::new(CommitSha::new("a".repeat(SHA_LEN)).or_abort("admitted SHA"));
     let case = QueryCase::Failure {
@@ -2072,53 +2022,19 @@ fn cmd_start_characterizes_nonroot_parent_query_rejection_as_root() {
     let fixture = query::direct_start(&selected, false, &case, "gate stdout", "gate stderr");
     let ctx = fixture.ctx();
 
-    // Pins baseline fail-open behavior; the independent Parent Fix owns its repair.
     let result = cmd_start_with_resolved_in(&ctx, &fixture.exec, &fixture.state, &fixture.selected);
 
-    assert_eq!(result.map_err(|err| err.to_string()), Ok(EXIT_OK));
     assert_eq!(
-        fixture.io.stdout(),
-        concat!(
-            "gate stdoutFACTOR: Split session started for abcdef0.\n",
-            "ORIGINAL MESSAGE: subject\n",
-            "UNSTAGED:\n",
-            "\n",
-            "NEXT: Stage changes for the first atomic commit, then run:\n",
-            "  git factor --continue --message \"type: description\"\n",
-            "\n",
-            "Run git factor -h for command help or git-factor --help for the ",
-            "full workflow guide.\n",
-            "\n",
-            "HINTS:\n",
-            "  - Find the ONE smallest addition nothing depends on\n",
-            "  - Target 15-30 lines (50 max)\n",
-            "  - Message: single concrete action, no \"and\"/\"or\"\n",
-            "  - Verify: git log --oneline | wc -l\n",
-            "  - NEVER use git commit. ONLY use git factor --continue.\n",
-            "  RECOVERY: git factor --abort\n",
-        )
+        result.map_err(|err| err.to_string()),
+        Err("git command failed: selected query refused".to_owned())
     );
-    assert_eq!(fixture.io.stderr(), "gate stderr");
+    assert_eq!(fixture.io.stdout(), "");
+    assert_eq!(fixture.io.stderr(), "");
+    assert_eq!(fixture.observed_journal(), None);
     assert_eq!(fixture.observed_calls(), fixture.expected_calls);
     assert_eq!(fixture.remaining_keys(), Vec::<String>::new());
     // Compare net contents/layout in this tempdir, excluding factor state; Git has its own ledger.
     assert_eq!(fixture.direct_files_after(), fixture.direct_files_before);
-    let expected_journal = [
-        ("commits", format!("{}\n", "a".repeat(SHA_LEN))),
-        ("current_index", "0\n".to_owned()),
-        ("exec", "true\n".to_owned()),
-        ("expected_tree", TREE_EXPECTED_NL.to_owned()),
-        ("is_root", "true\n".to_owned()),
-        ("phase", "splitting\n".to_owned()),
-        ("requires_rebase", "false\n".to_owned()),
-        ("split_count", "0\n".to_owned()),
-        ("start_head", format!("{}\n", "a".repeat(SHA_LEN))),
-        ("started_rebase", "false\n".to_owned()),
-    ]
-    .into_iter()
-    .map(|(name, text)| (OsString::from(name), text))
-    .collect::<BTreeMap<_, _>>();
-    assert_eq!(fixture.observed_journal(), Some(expected_journal));
 }
 
 #[test]
@@ -2611,7 +2527,7 @@ fn cmd_start_refuses_parent_query_io_before_mutation() {
 
     assert_eq!(
         result.map_err(|err| err.to_string()),
-        Err("git command failed: git rev-parse: selected query IO failure".to_owned())
+        Err("git command failed: git cat-file: selected query IO failure".to_owned())
     );
     assert_eq!(fixture.io.stdout(), "");
     assert_eq!(fixture.io.stderr(), "");
