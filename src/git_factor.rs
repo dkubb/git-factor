@@ -1821,28 +1821,6 @@ fn run_start_rebase_in(
     ))))
 }
 
-#[cfg(test)]
-fn build_rebase_args(parent: &str, is_root: bool) -> Vec<&str> {
-    let mut rebase_args = vec![
-        "rebase",
-        "--empty",
-        "drop",
-        "--interactive",
-        "--no-autosquash",
-        "--no-autostash",
-        "--no-rebase-merges",
-        "--no-stat",
-        "--quiet",
-        "--reschedule-failed-exec",
-    ];
-    if is_root {
-        rebase_args.push("--root");
-    } else {
-        rebase_args.push(parent);
-    }
-    rebase_args
-}
-
 /// Returns the full commit message for a given commit SHA.
 fn commit_message(ctx: &Ctx<'_>, sha: &CommitSha) -> Result<String, FactorError> {
     git_output(ctx, &["show", "--format=%B", "--no-patch", sha.as_str()])
@@ -2331,7 +2309,6 @@ mod proptests {
 
     use crate::non_empty_string::NonEmptyString;
     use nonempty::NonEmpty;
-    use proptest::collection::vec;
     use proptest::prelude::*;
     use proptest::string::string_regex;
     use tempfile::TempDir;
@@ -2645,61 +2622,7 @@ mod proptests {
         assert_eq!(ctx_io.out.borrow().as_str(), "ctx-test-out\n");
     }
 
-    fn shell_fragment() -> impl Strategy<Value = String> {
-        string_regex("[A-Za-z0-9._/-]{1,24}").or_abort("valid regex")
-    }
-
-    fn nonempty_exec_commands() -> impl Strategy<Value = NonEmpty<NonEmptyString>> {
-        vec(shell_fragment(), 1..6).prop_map(|values| {
-            let mut iter = values.into_iter();
-            let first = NonEmptyString::new(iter.next().or_abort("range ensures non-empty"))
-                .or_abort("regex ensures non-empty");
-            let mut out = NonEmpty::new(first);
-            for value in iter {
-                out.push(NonEmptyString::new(value).or_abort("regex ensures non-empty"));
-            }
-            out
-        })
-    }
-
     proptest! {
-        #[test]
-        fn proptest_build_rebase_args_preserves_exec_order(
-            _exec in nonempty_exec_commands(),
-            parent in shell_fragment(),
-            is_root in any::<bool>(),
-        ) {
-            let args = build_rebase_args(parent.as_str(), is_root);
-            let prefix = [
-                "rebase",
-                "--empty",
-                "drop",
-                "--interactive",
-                "--no-autosquash",
-                "--no-autostash",
-                "--no-rebase-merges",
-                "--no-stat",
-                "--quiet",
-                "--reschedule-failed-exec",
-            ];
-            prop_assert!(args.starts_with(&prefix));
-
-            let mut tail = args.iter().skip(prefix.len());
-            if is_root {
-                prop_assert_eq!(tail.next().copied(), Some("--root"));
-            } else {
-                prop_assert_eq!(tail.next().copied(), Some(parent.as_str()));
-            }
-            prop_assert_eq!(tail.next(), None);
-        }
-
-        #[test]
-        fn proptest_nonempty_exec_commands_are_always_nonempty(
-            exec in nonempty_exec_commands(),
-        ) {
-            prop_assert!(!exec.is_empty());
-        }
-
         #[test]
         fn proptest_run_with_args_vec_reports_parse_errors(
             invalid_flag in string_regex("zz[a-z0-9]{1,12}").or_abort("valid regex"),

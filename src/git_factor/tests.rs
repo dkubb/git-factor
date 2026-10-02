@@ -3546,45 +3546,6 @@ fn commit_sha_new_validates_length_and_hex() {
 }
 
 #[test]
-fn build_rebase_args_uses_parent_for_non_root_and_root_flag_for_root() {
-    let non_root = build_rebase_args("abc1234^", false);
-    assert_eq!(
-        non_root,
-        vec![
-            "rebase",
-            "--empty",
-            "drop",
-            "--interactive",
-            "--no-autosquash",
-            "--no-autostash",
-            "--no-rebase-merges",
-            "--no-stat",
-            "--quiet",
-            "--reschedule-failed-exec",
-            "abc1234^",
-        ]
-    );
-
-    let root = build_rebase_args("abc1234^", true);
-    assert_eq!(
-        root,
-        vec![
-            "rebase",
-            "--empty",
-            "drop",
-            "--interactive",
-            "--no-autosquash",
-            "--no-autostash",
-            "--no-rebase-merges",
-            "--no-stat",
-            "--quiet",
-            "--reschedule-failed-exec",
-            "--root",
-        ]
-    );
-}
-
-#[test]
 fn remove_empty_root_is_noop_when_root_is_not_empty() {
     let dir = TempDir::new().or_abort("tempdir");
     let repo = dir.path();
