@@ -1,11 +1,54 @@
 use super::*;
+use crate::git_factor::tests::abort_contracts;
 use crate::git_factor::tests::start_contracts::launcher::{LaunchFault, LaunchFixture};
 use crate::git_factor::tests::start_contracts::replay;
 use crate::git_factor::tests::start_contracts::{DirectStart, GateCase, query};
 use crate::git_factor::tests::status_contracts;
+use crate::git_factor::tests::verify_public_abort_fallback_refusal;
 use crate::git_factor::tests::verify_public_status_phase_refusal;
 use core::num::{NonZeroU8, NonZeroUsize};
 use core::ops::RangeInclusive;
+
+proptest! {
+    #[test]
+    fn public_abort_preserves_generated_saved_head_and_rebase_routes(
+        sha in "[0-9a-f]{40}", started in any::<bool>(), rebase in any::<bool>(), saved_head in any::<bool>(),
+    ) { abort_contracts::successful(&sha, started, rebase, saved_head, 0); }
+
+    #[test]
+    fn public_abort_reports_generated_output_refusals_after_cleanup(
+        sha in "[0-9a-f]{40}", fail_at in RangeInclusive::<usize>::new(1, 4),
+    ) { abort_contracts::successful(&sha, false, true, false, fail_at); }
+
+    #[test]
+    fn public_abort_preserves_generated_inactive_user_input(path in "[a-z]{1,12}") {
+        abort_contracts::inactive(&path);
+    }
+
+    #[test]
+    fn public_abort_reports_generated_required_field_read_refusals(
+        sha in "[0-9a-f]{40}", key in prop::sample::select(vec!["commits", "requires_rebase", "started_rebase", "start_head"]),
+    ) { abort_contracts::read_refusal(&sha, key); }
+
+    #[test]
+    fn public_abort_reports_generated_native_refusals_before_cleanup(
+        sha in "[0-9a-f]{40}", operation in prop::sample::select(vec!["rebase", "reset", "clean"]), exit in { let first: i32 = 1; let last: i32 = 255; RangeInclusive::new(first, last) },
+    ) { abort_contracts::native_refusal(&sha, operation, exit); }
+
+    #[test]
+    fn public_abort_preserves_generated_cleanup_refusals(
+        sha in "[0-9a-f]{40}", leaves_path in any::<bool>(),
+    ) { abort_contracts::cleanup_refusal(&sha, leaves_path); }
+}
+
+proptest! {
+    #[test]
+    fn public_abort_refuses_generated_unavailable_fallback_without_mutation(
+        index in RangeInclusive::<u8>::new(1, 9),
+    ) {
+        verify_public_abort_fallback_refusal(index);
+    }
+}
 
 proptest! {
     #[test]
