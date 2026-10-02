@@ -191,9 +191,13 @@ pub(in crate::git_factor) fn git_output(
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
 
     if !output.status.success() {
-        return Err(FactorError::GitCommand(non_empty_msg(
-            stderr.trim().to_owned(),
-        )));
+        let diagnostic = stderr.trim();
+        let message = if diagnostic.is_empty() {
+            output.status.to_string()
+        } else {
+            diagnostic.to_owned()
+        };
+        return Err(FactorError::GitCommand(non_empty_msg(message)));
     }
 
     Ok(stdout.trim().to_owned())
@@ -211,9 +215,13 @@ pub(in crate::git_factor) fn git_output_with(
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
 
     if !output.status.success() {
-        return Err(FactorError::GitCommand(non_empty_msg(
-            stderr.trim().to_owned(),
-        )));
+        let diagnostic = stderr.trim();
+        let message = if diagnostic.is_empty() {
+            output.status.to_string()
+        } else {
+            diagnostic.to_owned()
+        };
+        return Err(FactorError::GitCommand(non_empty_msg(message)));
     }
 
     Ok(stdout.trim().to_owned())
@@ -308,6 +316,69 @@ mod tests {
         use super::*;
 
         #[test]
+        fn silent_exit_reports_native_status() {
+            let exit_code: i32 = 42;
+            let runner = OutputOnlyRunner {
+                output: Some(Output {
+                    status: ExitStatus::from_raw(
+                        exit_code
+                            .checked_shl(u8::BITS)
+                            .or_abort("native wait-status shift count is below the i32 width"),
+                    ),
+                    stdout: Vec::new(),
+                    stderr: Vec::new(),
+                }),
+                ..OutputOnlyRunner::default()
+            };
+            let environment = TestEnv {
+                cwd: PathBuf::from("."),
+                trace_log: None,
+            };
+            let io = BufferIo::default();
+            let ctx = arrange_query_context(&runner, &environment, &io);
+
+            let result = super::super::git_output(&ctx, &["rev-parse", "--short", "HEAD"]);
+
+            let error = result.err_or_abort("captured query must fail");
+            assert!(
+                matches!(
+                    &error,
+                    FactorError::GitCommand(message) if message.as_str() == "exit status: 42"
+                ),
+                "unexpected error: {error:?}"
+            );
+        }
+
+        #[test]
+        fn silent_signal_reports_native_status() {
+            let runner = OutputOnlyRunner {
+                output: Some(Output {
+                    status: ExitStatus::from_raw(9),
+                    stdout: Vec::new(),
+                    stderr: Vec::new(),
+                }),
+                ..OutputOnlyRunner::default()
+            };
+            let environment = TestEnv {
+                cwd: PathBuf::from("."),
+                trace_log: None,
+            };
+            let io = BufferIo::default();
+            let ctx = arrange_query_context(&runner, &environment, &io);
+
+            let result = super::super::git_output(&ctx, &["rev-parse", "--short", "HEAD"]);
+
+            let error = result.err_or_abort("captured query must fail");
+            assert!(
+                matches!(
+                    &error,
+                    FactorError::GitCommand(message) if message.as_str() == "signal: 9 (SIGKILL)"
+                ),
+                "unexpected error: {error:?}"
+            );
+        }
+
+        #[test]
         fn successful_output_is_lossy_decoded_and_trimmed() {
             let runner = OutputOnlyRunner {
                 output: Some(Output {
@@ -377,6 +448,110 @@ mod tests {
             let ctx = arrange_query_context(&runner, &environment, &io);
 
             let result = super::super::git_output(&ctx, &["rev-parse", "--short", "HEAD"]);
+
+            let error = result.err_or_abort("captured query must fail");
+            assert!(
+                matches!(
+                    &error,
+                    FactorError::GitCommand(message) if message.as_str() == "fatal: query failed"
+                ),
+                "unexpected error: {error:?}"
+            );
+        }
+    }
+
+    mod git_output_with {
+        use super::*;
+
+        #[test]
+        fn silent_exit_reports_native_status() {
+            let exit_code: i32 = 42;
+            let runner = OutputOnlyRunner {
+                output: Some(Output {
+                    status: ExitStatus::from_raw(
+                        exit_code
+                            .checked_shl(u8::BITS)
+                            .or_abort("native wait-status shift count is below the i32 width"),
+                    ),
+                    stdout: Vec::new(),
+                    stderr: Vec::new(),
+                }),
+                ..OutputOnlyRunner::default()
+            };
+            let environment = TestEnv {
+                cwd: PathBuf::from("."),
+                trace_log: None,
+            };
+            let io = BufferIo::default();
+            let ctx = arrange_query_context(&runner, &environment, &io);
+
+            let result =
+                super::super::git_output_with(&ctx, "git", &["rev-parse", "--short", "HEAD"]);
+
+            let error = result.err_or_abort("captured query must fail");
+            assert!(
+                matches!(
+                    &error,
+                    FactorError::GitCommand(message) if message.as_str() == "exit status: 42"
+                ),
+                "unexpected error: {error:?}"
+            );
+        }
+
+        #[test]
+        fn silent_signal_reports_native_status() {
+            let runner = OutputOnlyRunner {
+                output: Some(Output {
+                    status: ExitStatus::from_raw(9),
+                    stdout: Vec::new(),
+                    stderr: Vec::new(),
+                }),
+                ..OutputOnlyRunner::default()
+            };
+            let environment = TestEnv {
+                cwd: PathBuf::from("."),
+                trace_log: None,
+            };
+            let io = BufferIo::default();
+            let ctx = arrange_query_context(&runner, &environment, &io);
+
+            let result =
+                super::super::git_output_with(&ctx, "git", &["rev-parse", "--short", "HEAD"]);
+
+            let error = result.err_or_abort("captured query must fail");
+            assert!(
+                matches!(
+                    &error,
+                    FactorError::GitCommand(message) if message.as_str() == "signal: 9 (SIGKILL)"
+                ),
+                "unexpected error: {error:?}"
+            );
+        }
+
+        #[test]
+        fn nonempty_stderr_is_preserved() {
+            let exit_code: i32 = 42;
+            let runner = OutputOnlyRunner {
+                output: Some(Output {
+                    status: ExitStatus::from_raw(
+                        exit_code
+                            .checked_shl(u8::BITS)
+                            .or_abort("native wait-status shift count is below the i32 width"),
+                    ),
+                    stdout: Vec::new(),
+                    stderr: b" \tfatal: query failed\r\n".to_vec(),
+                }),
+                ..OutputOnlyRunner::default()
+            };
+            let environment = TestEnv {
+                cwd: PathBuf::from("."),
+                trace_log: None,
+            };
+            let io = BufferIo::default();
+            let ctx = arrange_query_context(&runner, &environment, &io);
+
+            let result =
+                super::super::git_output_with(&ctx, "git", &["rev-parse", "--short", "HEAD"]);
 
             let error = result.err_or_abort("captured query must fail");
             assert!(
@@ -1944,6 +2119,41 @@ mod proptests {
 
         proptest! {
             #[test]
+            fn whitespace_stderr_reports_each_nonzero_exit_status(
+                exit_code in 1..=u8::MAX,
+                diagnostic in "[ \t\r\n]{0,8}",
+            ) {
+                let raw_status = i32::from(exit_code)
+                    .checked_shl(u8::BITS)
+                    .or_abort("native wait-status shift count is below the i32 width");
+                let status = ExitStatus::from_raw(raw_status);
+                let expected = status.to_string();
+                let runner = OutputOnlyRunner {
+                    output: Some(Output {
+                        status,
+                        stdout: Vec::new(),
+                        stderr: diagnostic.into_bytes(),
+                    }),
+                    ..OutputOnlyRunner::default()
+                };
+                let environment = TestEnv {
+                    cwd: PathBuf::from("."),
+                    trace_log: None,
+                };
+                let io = BufferIo::default();
+                let ctx = arrange_query_context(&runner, &environment, &io);
+
+                let result = super::super::git_output(&ctx, &["rev-parse", "--short", "HEAD"]);
+
+                let Err(FactorError::GitCommand(message)) = result else {
+                    return Err(TestCaseError::fail(format!(
+                        "expected GitCommand, observed {result:?}"
+                    )));
+                };
+                prop_assert_eq!(message.as_str(), expected.as_str());
+            }
+
+            #[test]
             fn preserves_success_bytes_or_spawn_failure(
                 reply in prop_oneof![
                     Just(None),
@@ -2020,6 +2230,94 @@ mod proptests {
                 let ctx = arrange_query_context(&runner, &environment, &io);
 
                 let result = super::super::git_output(&ctx, &["rev-parse", "--short", "HEAD"]);
+
+                let Err(FactorError::GitCommand(error_message)) = result else {
+                    return Err(TestCaseError::fail(format!(
+                        "expected GitCommand, observed {result:?}"
+                    )));
+                };
+                prop_assert_eq!(error_message.as_str(), message.as_str());
+            }
+        }
+    }
+
+    mod git_output_with {
+        use super::super::tests::{BufferIo, OutputOnlyRunner, TestEnv, arrange_query_context};
+        use super::*;
+        use std::os::unix::process::ExitStatusExt as _;
+
+        proptest! {
+            #[test]
+            fn whitespace_stderr_reports_each_nonzero_exit_status(
+                exit_code in 1..=u8::MAX,
+                diagnostic in "[ \t\r\n]{0,8}",
+            ) {
+                let raw_status = i32::from(exit_code)
+                    .checked_shl(u8::BITS)
+                    .or_abort("native wait-status shift count is below the i32 width");
+                let status = ExitStatus::from_raw(raw_status);
+                let expected = status.to_string();
+                let runner = OutputOnlyRunner {
+                    output: Some(Output {
+                        status,
+                        stdout: Vec::new(),
+                        stderr: diagnostic.into_bytes(),
+                    }),
+                    ..OutputOnlyRunner::default()
+                };
+                let environment = TestEnv {
+                    cwd: PathBuf::from("."),
+                    trace_log: None,
+                };
+                let io = BufferIo::default();
+                let ctx = arrange_query_context(&runner, &environment, &io);
+
+                let result = super::super::git_output_with(
+                    &ctx,
+                    "git",
+                    &["rev-parse", "--short", "HEAD"],
+                );
+
+                let Err(FactorError::GitCommand(message)) = result else {
+                    return Err(TestCaseError::fail(format!(
+                        "expected GitCommand, observed {result:?}"
+                    )));
+                };
+                prop_assert_eq!(message.as_str(), expected.as_str());
+            }
+
+            #[test]
+            fn nonempty_stderr_takes_precedence_over_status(
+                exit_code in 1..=u8::MAX,
+                message in "[A-Za-z0-9_]{1,40}",
+                prefix in "[ \t\r\n]{0,8}",
+                suffix in "[ \t\r\n]{0,8}",
+            ) {
+                let raw_status = i32::from(exit_code)
+                    .checked_shl(u8::BITS)
+                    .or_abort("native wait-status shift count is below the i32 width");
+                let status = ExitStatus::from_raw(raw_status);
+                let diagnostic = format!("{prefix}{message}{suffix}");
+                let runner = OutputOnlyRunner {
+                    output: Some(Output {
+                        status,
+                        stdout: Vec::new(),
+                        stderr: diagnostic.into_bytes(),
+                    }),
+                    ..OutputOnlyRunner::default()
+                };
+                let environment = TestEnv {
+                    cwd: PathBuf::from("."),
+                    trace_log: None,
+                };
+                let io = BufferIo::default();
+                let ctx = arrange_query_context(&runner, &environment, &io);
+
+                let result = super::super::git_output_with(
+                    &ctx,
+                    "git",
+                    &["rev-parse", "--short", "HEAD"],
+                );
 
                 let Err(FactorError::GitCommand(error_message)) = result else {
                     return Err(TestCaseError::fail(format!(

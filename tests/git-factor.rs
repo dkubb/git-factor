@@ -3908,6 +3908,58 @@ fi
     }
 
     #[test]
+    fn start_reports_silent_git_output_exit_status() {
+        let dir = init_repo();
+        let repo = dir.path();
+        commit_file(repo, "file.txt", "one\n", "chore: base");
+        let (wrap_dir, wrap_bin) = make_git_wrapper_named(
+            "git",
+            r#"if [ "${1-}" = "rev-parse" ] && [ "${2-}" = "--short" ]; then
+  exit 42
+fi
+"#,
+        );
+        let _keep_alive = wrap_dir;
+        let wrapped_path = format!("{}:{}", wrap_bin.display(), env::var("PATH").or_abort());
+
+        run_git_factor_with_env(
+            repo,
+            &["--exec", "true", "HEAD"],
+            GitFactorExpectation::default()
+                .code(EXIT_SOFTWARE)
+                .stderr("git command failed: exit status: 42\n"),
+            "PATH",
+            wrapped_path,
+        );
+    }
+
+    #[test]
+    fn start_reports_silent_git_output_signal() {
+        let dir = init_repo();
+        let repo = dir.path();
+        commit_file(repo, "file.txt", "one\n", "chore: base");
+        let (wrap_dir, wrap_bin) = make_git_wrapper_named(
+            "git",
+            r#"if [ "${1-}" = "rev-parse" ] && [ "${2-}" = "--short" ]; then
+  kill -KILL "$$"
+fi
+"#,
+        );
+        let _keep_alive = wrap_dir;
+        let wrapped_path = format!("{}:{}", wrap_bin.display(), env::var("PATH").or_abort());
+
+        run_git_factor_with_env(
+            repo,
+            &["--exec", "true", "HEAD"],
+            GitFactorExpectation::default()
+                .code(EXIT_SOFTWARE)
+                .stderr("git command failed: signal: 9 (SIGKILL)\n"),
+            "PATH",
+            wrapped_path,
+        );
+    }
+
+    #[test]
     fn continue_restore_handles_file_directory_replacement() {
         let dir = init_repo();
         let repo = dir.path();
