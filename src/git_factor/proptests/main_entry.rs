@@ -311,3 +311,70 @@ fn cmd_abort_propagates_current_commit_error_when_start_head_is_missing() {
         "git command failed: commit index 1 out of range (have 1 commits)"
     );
 }
+
+proptest! {
+    #[test]
+    fn preserves_populated_begin_journal_when_no_pause_cleanup_is_denied(
+        shas in prop::collection::vec(
+            string_regex("[0-9a-f]{40}").or_abort("cleanup SHA strategy"), 1..=4,
+        ),
+        root in any::<bool>(),
+        outcome in prop_oneof![
+            Just(replay::cleanup::NoPause::Failed),
+            Just(replay::cleanup::NoPause::Successful),
+        ],
+    ) {
+        use alloc::collections::BTreeMap;
+
+        let selected = NonEmpty::from_vec(
+            shas.into_iter().map(|sha| CommitSha::new(sha).or_abort("admitted SHA"))
+                .collect(),
+        ).or_abort("nonempty selected span");
+        let fixture = replay::cleanup::direct_launcher(&selected, root, outcome);
+        let ctx = fixture.ctx();
+        // Calculate the entire expected journal from generated input, not a SUT state writer.
+        let expected_head = "0123456789abcdef".chars()
+            .map(|digit| digit.to_string().repeat(COMMIT_SHA_HEX_LEN))
+            .find(|head| selected.iter().all(|sha| sha.as_str() != head))
+            .or_abort("bounded selection leaves an independent HEAD");
+        let expected_commits = selected.iter().map(CommitSha::as_str)
+            .collect::<Vec<_>>().join("\n");
+        let expected_journal = [
+            ("commits", format!("{expected_commits}\n")),
+            ("current_index", format!("{}\n", selected.tail.len())),
+            ("exec", "true\n".to_owned()),
+            ("expected_tree", "dddddddddddddddddddddddddddddddddddddddd\n".to_owned()),
+            ("is_root", format!("{root}\n")),
+            ("phase", "pending_start\n".to_owned()),
+            ("requires_rebase", "true\n".to_owned()),
+            ("split_count", "0\n".to_owned()),
+            ("start_head", format!("{expected_head}\n")),
+            ("started_rebase", "true\n".to_owned()),
+        ].into_iter().map(|(name, value)| (OsString::from(name), value.into_bytes()))
+            .collect::<BTreeMap<_, _>>();
+        prop_assert_eq!(fixture.journal_bytes(), None);
+        prop_assert_eq!(&fixture.journal_at_begin(), &expected_journal);
+
+        let result = run_start_rebase_in(
+            &ctx, &fixture.span, &fixture.replay.state, &fixture.head,
+            fixture.replay.exec.first(),
+        );
+
+        prop_assert_eq!(result.map_err(|err| err.to_string()), Err(format!(
+            "git command failed: failed to remove factor state path '{}': \
+             selected factor removal denied",
+            fixture.replay.state.as_path().display(),
+        )));
+        prop_assert_eq!(fixture.replay.io.stdout(), "");
+        prop_assert_eq!(fixture.replay.io.stderr(), "");
+        prop_assert_eq!(
+            fixture.removal_attempts(), vec![fixture.replay.state.as_path().to_path_buf()],
+        );
+        prop_assert_eq!(fixture.journal_bytes(), Some(expected_journal));
+        prop_assert_eq!(fixture.replay.observed_calls(), fixture.replay.expected_calls.clone());
+        prop_assert_eq!(fixture.replay.remaining_keys(), Vec::<String>::new());
+        prop_assert_eq!(&fixture.replay.direct_files_after(), &fixture.replay.direct_files_before);
+        prop_assert!(!ctx.cwd.join(".git/rebase-merge").exists());
+        prop_assert!(!ctx.cwd.join(".git/rebase-apply").exists());
+    }
+}

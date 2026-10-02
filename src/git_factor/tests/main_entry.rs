@@ -3764,3 +3764,139 @@ fn cmd_abort_propagates_rebase_abort_nonzero_exit() {
         "err was: {err:?}"
     );
 }
+
+#[test]
+fn run_start_rebase_preserves_begin_journal_when_finished_cleanup_is_denied() {
+    use crate::git_factor::tests::start_contracts::replay::cleanup;
+    use alloc::collections::BTreeMap;
+
+    let selected = NonEmpty::new(CommitSha::new("a".repeat(SHA_LEN)).or_abort("admitted SHA"));
+    let fixture = cleanup::direct_launcher(&selected, false, cleanup::NoPause::Successful);
+    let ctx = fixture.ctx();
+    let expected_journal = [
+        ("commits", format!("{}\n", "a".repeat(SHA_LEN))),
+        ("current_index", "0\n".to_owned()),
+        ("exec", "true\n".to_owned()),
+        (
+            "expected_tree",
+            "dddddddddddddddddddddddddddddddddddddddd\n".to_owned(),
+        ),
+        ("is_root", "false\n".to_owned()),
+        ("phase", "pending_start\n".to_owned()),
+        ("requires_rebase", "true\n".to_owned()),
+        ("split_count", "0\n".to_owned()),
+        ("start_head", format!("{}\n", "0".repeat(SHA_LEN))),
+        ("started_rebase", "true\n".to_owned()),
+    ]
+    .into_iter()
+    .map(|(name, value)| (OsString::from(name), value.into_bytes()))
+    .collect::<BTreeMap<_, _>>();
+    assert_eq!(fixture.journal_bytes(), None);
+    assert_eq!(fixture.journal_at_begin(), expected_journal);
+
+    let result = run_start_rebase_in(
+        &ctx,
+        &fixture.span,
+        &fixture.replay.state,
+        &fixture.head,
+        fixture.replay.exec.first(),
+    );
+
+    assert_eq!(
+        result.map_err(|err| err.to_string()),
+        Err(format!(
+            "git command failed: failed to remove factor state path '{}': \
+             selected factor removal denied",
+            fixture.replay.state.as_path().display(),
+        )),
+    );
+    assert_eq!(fixture.replay.io.stdout(), "");
+    assert_eq!(fixture.replay.io.stderr(), "");
+    assert_eq!(
+        fixture.removal_attempts(),
+        vec![fixture.replay.state.as_path().to_path_buf()]
+    );
+    assert_eq!(fixture.journal_bytes(), Some(expected_journal));
+    assert_eq!(
+        fixture.replay.observed_calls(),
+        fixture.replay.expected_calls
+    );
+    assert_eq!(fixture.replay.remaining_keys(), Vec::<String>::new());
+    assert_eq!(
+        fixture.replay.direct_files_after(),
+        fixture.replay.direct_files_before
+    );
+    assert!(!ctx.cwd.join(".git/rebase-merge").exists());
+    assert!(!ctx.cwd.join(".git/rebase-apply").exists());
+}
+
+#[test]
+fn run_start_rebase_preserves_begin_journal_when_failed_cleanup_is_denied() {
+    use crate::git_factor::tests::start_contracts::replay::cleanup;
+    use alloc::collections::BTreeMap;
+
+    let selected = NonEmpty {
+        head: CommitSha::new("a".repeat(SHA_LEN)).or_abort("admitted first SHA"),
+        tail: vec![CommitSha::new("b".repeat(SHA_LEN)).or_abort("admitted tip SHA")],
+    };
+    let fixture = cleanup::direct_launcher(&selected, true, cleanup::NoPause::Failed);
+    let ctx = fixture.ctx();
+    let expected_journal = [
+        (
+            "commits",
+            format!("{}\n{}\n", "a".repeat(SHA_LEN), "b".repeat(SHA_LEN)),
+        ),
+        ("current_index", "1\n".to_owned()),
+        ("exec", "true\n".to_owned()),
+        (
+            "expected_tree",
+            "dddddddddddddddddddddddddddddddddddddddd\n".to_owned(),
+        ),
+        ("is_root", "true\n".to_owned()),
+        ("phase", "pending_start\n".to_owned()),
+        ("requires_rebase", "true\n".to_owned()),
+        ("split_count", "0\n".to_owned()),
+        ("start_head", format!("{}\n", "0".repeat(SHA_LEN))),
+        ("started_rebase", "true\n".to_owned()),
+    ]
+    .into_iter()
+    .map(|(name, value)| (OsString::from(name), value.into_bytes()))
+    .collect::<BTreeMap<_, _>>();
+    assert_eq!(fixture.journal_bytes(), None);
+    assert_eq!(fixture.journal_at_begin(), expected_journal);
+
+    let result = run_start_rebase_in(
+        &ctx,
+        &fixture.span,
+        &fixture.replay.state,
+        &fixture.head,
+        fixture.replay.exec.first(),
+    );
+
+    assert_eq!(
+        result.map_err(|err| err.to_string()),
+        Err(format!(
+            "git command failed: failed to remove factor state path '{}': \
+             selected factor removal denied",
+            fixture.replay.state.as_path().display(),
+        )),
+    );
+    assert_eq!(fixture.replay.io.stdout(), "");
+    assert_eq!(fixture.replay.io.stderr(), "");
+    assert_eq!(
+        fixture.removal_attempts(),
+        vec![fixture.replay.state.as_path().to_path_buf()]
+    );
+    assert_eq!(fixture.journal_bytes(), Some(expected_journal));
+    assert_eq!(
+        fixture.replay.observed_calls(),
+        fixture.replay.expected_calls
+    );
+    assert_eq!(fixture.replay.remaining_keys(), Vec::<String>::new());
+    assert_eq!(
+        fixture.replay.direct_files_after(),
+        fixture.replay.direct_files_before
+    );
+    assert!(!ctx.cwd.join(".git/rebase-merge").exists());
+    assert!(!ctx.cwd.join(".git/rebase-apply").exists());
+}

@@ -1,3 +1,6 @@
+#[path = "start_replay_cleanup_contracts.rs"]
+pub(in crate::git_factor) mod cleanup;
+
 use super::*;
 
 #[derive(Clone, Copy, Debug)]
@@ -486,10 +489,6 @@ fn pending_journal(
     .collect()
 }
 
-#[expect(
-    clippy::single_call_fn,
-    reason = "exact native rebase command and sequence environment belong to replay arrangement"
-)]
 fn rebase_script(
     admitted: ObservedRunner,
     repo: &Path,
