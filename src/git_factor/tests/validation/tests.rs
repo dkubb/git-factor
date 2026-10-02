@@ -846,6 +846,7 @@ mod remove_empty_root_in {
                         "--empty",
                         "drop",
                         "--interactive",
+                        "--no-update-refs",
                         "--quiet",
                         "--root",
                     ]
@@ -974,6 +975,7 @@ mod remove_empty_root_in {
             "--empty",
             "drop",
             "--interactive",
+            "--no-update-refs",
             "--quiet",
             "--root",
         ];
@@ -1213,6 +1215,7 @@ impl Runner for RebaseArgsRunner {
                 "--empty",
                 "drop",
                 "--interactive",
+                "--no-update-refs",
                 "--quiet",
                 "--root",
             ]
