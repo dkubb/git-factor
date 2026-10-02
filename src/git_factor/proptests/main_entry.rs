@@ -2,8 +2,50 @@ use super::*;
 use crate::git_factor::tests::start_contracts::launcher::{LaunchFault, LaunchFixture};
 use crate::git_factor::tests::start_contracts::replay;
 use crate::git_factor::tests::start_contracts::{DirectStart, GateCase, query};
+use crate::git_factor::tests::status_contracts;
+use crate::git_factor::tests::verify_public_status_phase_refusal;
 use core::num::{NonZeroU8, NonZeroUsize};
 use core::ops::RangeInclusive;
+
+proptest! {
+    #[test]
+    fn public_status_preserves_generated_active_frames_and_write_refusals(
+        sha in "[0-9a-f]{40}",
+        split in any::<u8>(),
+        requires in any::<bool>(),
+        root in any::<bool>(),
+        phase in prop::sample::select(vec!["splitting", "pending_start"]),
+        rebase in any::<bool>(),
+        fail_at in RangeInclusive::<usize>::new(0, 16),
+    ) {
+        status_contracts::active(&sha, split, requires, root, phase, rebase, fail_at);
+    }
+
+    #[test]
+    fn public_status_preserves_generated_inactive_frames_and_write_refusals(
+        path in "[a-z]{1,12}",
+        fail_at in RangeInclusive::<usize>::new(0, 2),
+    ) {
+        status_contracts::inactive(&path, fail_at);
+    }
+
+    #[test]
+    fn public_status_reports_generated_required_field_read_refusals(
+        sha in "[0-9a-f]{40}",
+        field in prop::sample::select(Vec::<(&str, usize)>::from([("commits", 1), ("current_index", 1), ("current_index", 2), ("split_count", 1), ("requires_rebase", 1), ("is_root", 1), ("phase", 1)])),
+    ) {
+        status_contracts::read_refusal(&sha, field.0, field.1);
+    }
+}
+
+proptest! {
+    #[test]
+    fn public_status_refuses_generated_unknown_phase_without_mutation(
+        suffix in "[a-zA-Z0-9]{0,24}",
+    ) {
+        verify_public_status_phase_refusal(&format!("unsupported:{suffix}"));
+    }
+}
 
 proptest! {
     #[test]

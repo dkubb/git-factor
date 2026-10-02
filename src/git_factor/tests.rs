@@ -2,6 +2,8 @@
 mod main_entry;
 #[path = "tests/start_contracts.rs"]
 pub(in crate::git_factor) mod start_contracts;
+#[path = "tests/status_contracts.rs"]
+pub(in crate::git_factor) mod status_contracts;
 
 use alloc::collections::VecDeque;
 use core::cell::RefCell;
@@ -1526,6 +1528,79 @@ fn ctx_from_parts<'ctx>(
         io,
         runner,
     })
+}
+
+/// Invalid persisted phases refuse public status before output or mutation.
+pub(in crate::git_factor) fn verify_public_status_phase_refusal(phase: &str) {
+    let directory = TempDir::new().or_abort("status phase refusal fixture");
+    let repo = directory.path();
+    let state = setup_factor_state(
+        repo,
+        &"a".repeat(SHA_LEN),
+        "1\n",
+        Some("false\n"),
+        Some(TREE_EXPECTED_NL),
+    );
+    fs::write(state.join("phase"), format!("{phase}\n")).or_abort("invalid saved phase");
+    fs::write(repo.join("unrelated"), b"user bytes\n").or_abort("unrelated status input");
+    let journal_bytes = || {
+        let mut files = fs::read_dir(&state)
+            .or_abort("status journal inventory")
+            .map(|entry| {
+                let file = entry.or_abort("status journal entry");
+                (
+                    file.file_name(),
+                    fs::read(file.path()).or_abort("status journal bytes"),
+                )
+            })
+            .collect::<Vec<_>>();
+        files.sort_by(|left, right| left.0.cmp(&right.0));
+        files
+    };
+    let expected_error = if phase.is_empty() {
+        "git command failed: corrupted state file 'phase': file is empty".to_owned()
+    } else {
+        format!("git command failed: corrupted state file 'phase': invalid value '{phase}'")
+    };
+    let before = journal_bytes();
+    let runner = ScriptedRunner::default();
+    let io = TestIo::default();
+    let environment = TestEnv {
+        cwd: repo.to_path_buf(),
+    };
+
+    let code = main_entry_with_vec(
+        &io,
+        ctx_from_parts(&environment, &runner, &io, &REAL_FS),
+        &[OsString::from("git-factor"), OsString::from("--status")],
+    );
+
+    assert_eq!(code, EXIT_SOFTWARE);
+    assert_eq!(io.stdout(), "");
+    assert_eq!(io.stderr(), format!("{expected_error}\n"));
+    let mut after = journal_bytes();
+    let diagnostic_position = after
+        .iter()
+        .position(|entry| entry.0 == "error.log")
+        .or_abort("added diagnostic entry");
+    after.remove(diagnostic_position);
+    assert_eq!(after, before);
+    let diagnostic =
+        fs::read_to_string(state.join("error.log")).or_abort("status refusal diagnostic");
+    assert!(
+        diagnostic
+            .lines()
+            .any(|line| line == "argv=git-factor --status")
+    );
+    assert!(
+        diagnostic
+            .lines()
+            .any(|line| line == format!("error={expected_error}"))
+    );
+    assert_eq!(
+        fs::read(repo.join("unrelated")).or_abort("preserved unrelated input"),
+        b"user bytes\n"
+    );
 }
 
 #[test]
