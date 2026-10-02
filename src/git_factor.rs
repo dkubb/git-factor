@@ -217,16 +217,6 @@ impl CurrentIndex {
         self.0
     }
 
-    /// Returns the last valid index for a non-empty commit span.
-    fn from_commit_count(commit_count: usize) -> Result<Self, FactorError> {
-        let Some(value) = commit_count.checked_sub(1) else {
-            return Err(FactorError::GitCommand(non_empty_msg(
-                "commit span must be non-empty".to_owned(),
-            )));
-        };
-        Ok(Self(value))
-    }
-
     /// Reads `current_index` from persisted state.
     fn read(ctx: &Ctx<'_>, state_dir: &StateDir) -> Result<Self, FactorError> {
         read_state_parsed::<usize>(
@@ -1645,7 +1635,7 @@ fn cmd_start_with_resolved_in(
     let single_head_session = span.tip_commit() == &head_commit;
     let requires_rebase = StateBool::from_bool(!single_head_session);
     let is_root_state = StateBool::from_bool(span.is_root());
-    let current_index = CurrentIndex::from_commit_count(span.len())?;
+    let current_index = CurrentIndex(span.commits().tail.len());
     if single_head_session {
         let output = command_output_with(ctx, "bash", &["-c", exec_command.as_str()])?;
         let (stdout, stderr) = output_text(&output);
@@ -1793,7 +1783,7 @@ fn run_start_rebase_in(
     };
     let mut seq_parts: Vec<String> = vec![editor_str.to_owned()];
     let short = git_output(ctx, &["rev-parse", "--short", span.tip_commit().as_str()])?;
-    let current_index = CurrentIndex::from_commit_count(span.len())?;
+    let current_index = CurrentIndex(span.commits().tail.len());
     let preflight = rebase_exec_preflight_command(ctx, current_index, exec_command)?;
     let begin = rebase_exec_begin_command(
         ctx,
