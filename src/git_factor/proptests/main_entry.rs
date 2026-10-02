@@ -1,7 +1,8 @@
 use super::*;
+use crate::git_factor::tests::start_contracts::launcher::{LaunchFault, LaunchFixture};
 use crate::git_factor::tests::start_contracts::replay;
 use crate::git_factor::tests::start_contracts::{DirectStart, GateCase, query};
-use core::num::NonZeroUsize;
+use core::num::{NonZeroU8, NonZeroUsize};
 use core::ops::RangeInclusive;
 
 proptest! {
@@ -376,5 +377,74 @@ proptest! {
         prop_assert_eq!(&fixture.replay.direct_files_after(), &fixture.replay.direct_files_before);
         prop_assert!(!ctx.cwd.join(".git/rebase-merge").exists());
         prop_assert!(!ctx.cwd.join(".git/rebase-apply").exists());
+    }
+}
+
+proptest! {
+    #[test]
+    fn characterizes_launcher_capability_failure_boundaries(
+        shas in prop::collection::vec(
+            string_regex("[0-9a-f]{40}").or_abort("SHA strategy"), 1..=4,
+        ),
+        root in any::<bool>(),
+        fault in prop_oneof![
+            Just(LaunchFault::BeginExecutable),
+            Just(LaunchFault::EditorCanonicalize),
+            Just(LaunchFault::EditorExecutable),
+            Just(LaunchFault::NativeLaunch),
+            Just(LaunchFault::PreflightExecutable),
+            Just(LaunchFault::ShortIo),
+            RangeInclusive::<u8>::new(1, 255).prop_map(|code| LaunchFault::ShortRejected(
+                NonZeroU8::new(code).or_abort("nonzero rejected exit"),
+            )),
+        ],
+    ) {
+        let selected = NonEmpty::from_vec(
+            shas.into_iter().map(|sha| CommitSha::new(sha).or_abort("admitted SHA")).collect(),
+        ).or_abort("nonempty selected span");
+        let fixture = LaunchFixture::new(selected, root, &fault);
+        let ctx = fixture.ctx();
+
+        let result = run_start_rebase_in(
+            &ctx, &fixture.span, &fixture.state, &fixture.start_head, &fixture.exec,
+        );
+
+        prop_assert_eq!(
+            result.map_err(|err| err.to_string()),
+            Err(fixture.expected_error().to_owned()),
+        );
+        prop_assert_eq!(fixture.calls(), fixture.expected_calls());
+        prop_assert_eq!(fixture.remaining_executable_replies(), 0);
+        prop_assert_eq!(fixture.remaining_keys(), Vec::<String>::new());
+    }
+}
+
+#[cfg(unix)]
+proptest! {
+    #[test]
+    fn rejects_generated_non_utf8_launcher_paths(
+        fault in prop_oneof![
+            "[a-z]{0,8}".prop_map(LaunchFault::EditorEncoding),
+            "[a-z]{0,8}".prop_map(LaunchFault::PreflightEncoding),
+            "[a-z]{0,8}".prop_map(LaunchFault::BeginEncoding),
+        ],
+    ) {
+        let selected = NonEmpty::new(
+            CommitSha::new("a".repeat(COMMIT_SHA_HEX_LEN)).or_abort("admitted SHA")
+        );
+        let fixture = LaunchFixture::new(selected, false, &fault);
+        let ctx = fixture.ctx();
+
+        let result = run_start_rebase_in(
+            &ctx, &fixture.span, &fixture.state, &fixture.start_head, &fixture.exec,
+        );
+
+        prop_assert_eq!(
+            result.map_err(|err| err.to_string()),
+            Err(fixture.expected_error().to_owned()),
+        );
+        prop_assert_eq!(fixture.calls(), fixture.expected_calls());
+        prop_assert_eq!(fixture.remaining_executable_replies(), 0);
+        prop_assert_eq!(fixture.remaining_keys(), Vec::<String>::new());
     }
 }

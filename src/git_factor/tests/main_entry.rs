@@ -3900,3 +3900,102 @@ fn run_start_rebase_preserves_begin_journal_when_failed_cleanup_is_denied() {
     assert!(!ctx.cwd.join(".git/rebase-merge").exists());
     assert!(!ctx.cwd.join(".git/rebase-apply").exists());
 }
+
+#[test]
+fn run_start_rebase_preserves_preflight_executable_failure_boundary() {
+    use crate::git_factor::tests::start_contracts::RecordedCall;
+    use crate::git_factor::tests::start_contracts::launcher::{
+        LaunchCall, LaunchFault, LaunchFixture,
+    };
+
+    let selected = NonEmpty::new(CommitSha::new("a".repeat(SHA_LEN)).or_abort("admitted SHA"));
+    let fixture = LaunchFixture::new(selected, false, &LaunchFault::PreflightExecutable);
+    let ctx = fixture.ctx();
+
+    let result = run_start_rebase_in(
+        &ctx,
+        &fixture.span,
+        &fixture.state,
+        &fixture.start_head,
+        &fixture.exec,
+    );
+
+    assert_eq!(
+        result.map_err(|err| err.to_string()),
+        Err(
+            "git command failed: cannot resolve current executable: preflight executable refused"
+                .to_owned()
+        ),
+    );
+    assert_eq!(
+        fixture.calls(),
+        vec![
+            LaunchCall::CurrentExecutable,
+            LaunchCall::Canonicalize(PathBuf::from("/contract/launcher/git-factor")),
+            LaunchCall::Variable("GIT_FACTOR_TRACE_LOG".to_owned()),
+            LaunchCall::Runner(RecordedCall::Output {
+                args: vec![
+                    "rev-parse".to_owned(),
+                    "--short".to_owned(),
+                    "a".repeat(SHA_LEN)
+                ],
+                bin: "git".to_owned(),
+                cwd: PathBuf::from("/contract/launcher"),
+            }),
+            LaunchCall::Variable("GIT_FACTOR_TRACE_LOG".to_owned()),
+            LaunchCall::CurrentExecutable,
+        ]
+    );
+    assert_eq!(fixture.remaining_executable_replies(), 0);
+    assert_eq!(fixture.remaining_keys(), Vec::<String>::new());
+}
+
+#[test]
+fn run_start_rebase_preserves_begin_executable_failure_boundary() {
+    use crate::git_factor::tests::start_contracts::RecordedCall;
+    use crate::git_factor::tests::start_contracts::launcher::{
+        LaunchCall, LaunchFault, LaunchFixture,
+    };
+
+    let selected = NonEmpty::new(CommitSha::new("a".repeat(SHA_LEN)).or_abort("admitted SHA"));
+    let fixture = LaunchFixture::new(selected, false, &LaunchFault::BeginExecutable);
+    let ctx = fixture.ctx();
+
+    let result = run_start_rebase_in(
+        &ctx,
+        &fixture.span,
+        &fixture.state,
+        &fixture.start_head,
+        &fixture.exec,
+    );
+
+    assert_eq!(
+        result.map_err(|err| err.to_string()),
+        Err(
+            "git command failed: cannot resolve current executable: begin executable refused"
+                .to_owned()
+        ),
+    );
+    assert_eq!(
+        fixture.calls(),
+        vec![
+            LaunchCall::CurrentExecutable,
+            LaunchCall::Canonicalize(PathBuf::from("/contract/launcher/git-factor")),
+            LaunchCall::Variable("GIT_FACTOR_TRACE_LOG".to_owned()),
+            LaunchCall::Runner(RecordedCall::Output {
+                args: vec![
+                    "rev-parse".to_owned(),
+                    "--short".to_owned(),
+                    "a".repeat(SHA_LEN)
+                ],
+                bin: "git".to_owned(),
+                cwd: PathBuf::from("/contract/launcher"),
+            }),
+            LaunchCall::Variable("GIT_FACTOR_TRACE_LOG".to_owned()),
+            LaunchCall::CurrentExecutable,
+            LaunchCall::CurrentExecutable,
+        ]
+    );
+    assert_eq!(fixture.remaining_executable_replies(), 0);
+    assert_eq!(fixture.remaining_keys(), Vec::<String>::new());
+}
