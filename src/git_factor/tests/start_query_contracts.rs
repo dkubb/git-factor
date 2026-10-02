@@ -51,15 +51,12 @@ pub(in crate::git_factor) enum QueryCase {
 
 impl QueryCase {
     fn continues(&self) -> bool {
-        // Characterize baseline fail-open admissions; separate Parent/Merge Fixes own repair.
+        // Only the separate Merge Fix still owns a fail-open admission boundary.
         matches!(
             *self,
             Self::Failure {
                 target: QueryTarget::MergeParent(_),
                 ..
-            } | Self::Failure {
-                target: QueryTarget::Parent,
-                reply: QueryReply::Rejected
             }
         )
     }
@@ -149,9 +146,6 @@ impl QueryCase {
                 Self::Failure {
                     target: QueryTarget::EmptyRoot,
                     ..
-                } | Self::Failure {
-                    target: QueryTarget::Parent,
-                    reply: QueryReply::Rejected
                 }
             )
     }
@@ -171,12 +165,10 @@ impl QueryTarget {
             Self::Diff => "git diff",
             Self::EmptyRoot => "git commit-tree",
             Self::Gate => "bash -c",
-            Self::Head
-            | Self::MergeParent(_)
-            | Self::Parent
-            | Self::Short
-            | Self::TopLevel
-            | Self::Tree => "git rev-parse",
+            Self::Head | Self::MergeParent(_) | Self::Short | Self::TopLevel | Self::Tree => {
+                "git rev-parse"
+            }
+            Self::Parent => "git cat-file",
             Self::Message => "git show",
             Self::Reset => "git reset",
             Self::Syntax => "bash --norc",
@@ -338,13 +330,20 @@ fn admission_steps(
         ));
     }
     steps.extend([
-        QueryStep::status(
+        QueryStep::output(
             QueryTarget::Parent,
             "git",
-            &["rev-parse", "--quiet", "--verify", &format!("{first}^")],
-            true,
+            &["cat-file", "commit", first],
             repo,
-            if root { 1 << 8 } else { 0 },
+            &format!(
+                "tree {}\n{}author Example <example@example.com> 1 +0000\n\nsubject\n",
+                "c".repeat(SHA_LEN),
+                if root {
+                    String::new()
+                } else {
+                    format!("parent {}\n", "d".repeat(SHA_LEN))
+                },
+            ),
         ),
         QueryStep::output(
             QueryTarget::Short,

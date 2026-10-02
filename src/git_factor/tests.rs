@@ -282,6 +282,17 @@ impl ScriptedRunner {
         )
     }
 
+    /// Arranges a commit-object response with zero or one real parent.
+    fn with_commit_object(self, repo: &Path, sha: &str, parent: Option<&str>) -> Self {
+        let parent_header =
+            parent.map_or_else(String::new, |identity| format!("parent {identity}\n"));
+        let object = format!(
+            "tree {}\n{parent_header}author Example <example@example.com> 1 +0000\n\nsubject\n",
+            "c".repeat(SHA_LEN)
+        );
+        self.with_output("git", &["cat-file", "commit", sha], repo, &object)
+    }
+
     fn with_output(self, bin: &str, args: &[&str], cwd: &Path, stdout: &str) -> Self {
         self.with_output_status(bin, args, cwd, 0, stdout, "")
     }
@@ -927,14 +938,7 @@ fn start_single_head_validation_runner(repo: &Path, sha: &str) -> ScriptedRunner
             repo,
             0,
         )
-        .with_status(
-            "git",
-            &["rev-parse", "--quiet", "--verify", &format!("{sha}^")],
-            &[],
-            true,
-            repo,
-            0,
-        )
+        .with_commit_object(repo, sha, Some(&"d".repeat(SHA_LEN)))
         .with_status(
             "git",
             &["rev-parse", "--quiet", "--verify", &format!("{sha}^2")],
@@ -1217,14 +1221,7 @@ fn start_multi_commit_runner_base(repo: &Path, sha_a: &str, sha_b: &str) -> Scri
             repo,
             1,
         )
-        .with_status(
-            "git",
-            &["rev-parse", "--quiet", "--verify", &format!("{sha_a}^")],
-            &[],
-            true,
-            repo,
-            0,
-        )
+        .with_commit_object(repo, sha_a, Some(&"d".repeat(SHA_LEN)))
         .with_output("git", &["rev-parse", "--short", sha_b], repo, "bbbbbbb\n")
         .with_output(
             "git",
@@ -1281,14 +1278,7 @@ fn start_single_head_runner(repo: &Path, sha: &str, tree: &str, diff_stat: &str)
         "",
         "",
     )
-    .with_status(
-        "git",
-        &["rev-parse", "--quiet", "--verify", &format!("{sha}^")],
-        &[],
-        true,
-        repo,
-        0,
-    )
+    .with_commit_object(repo, sha, Some(&"d".repeat(SHA_LEN)))
     .with_output(
         "git",
         &["rev-parse", concat!("HEAD^", "{", "tree", "}")],
@@ -1337,14 +1327,7 @@ fn start_single_head_root_runner(
                 repo,
                 0,
             )
-            .with_status(
-                "git",
-                &["rev-parse", "--quiet", "--verify", &format!("{sha}^")],
-                &[],
-                true,
-                repo,
-                1,
-            )
+            .with_commit_object(repo, sha, None)
             .with_status(
                 "git",
                 &["rev-parse", "--quiet", "--verify", &format!("{sha}^2")],
@@ -1456,10 +1439,6 @@ fn build_sequence_editor(repo: &Path, sha_a: &str, sha_b: &str, start_head: &str
     .join(" ")
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "range start fixture scripts the entire preflight, sequence-editor, and rebase setup flow"
-)]
 fn start_range_ref_runner(repo: &Path, sha_a: &str, sha_b: &str) -> ScriptedRunner {
     let tree = "0123456789abcdef0123456789abcdef01234567";
     with_start_gate_result(
@@ -1515,14 +1494,7 @@ fn start_range_ref_runner(repo: &Path, sha_a: &str, sha_b: &str) -> ScriptedRunn
                 repo,
                 &format!("{sha_b}\n"),
             )
-            .with_status(
-                "git",
-                &["rev-parse", "--quiet", "--verify", &format!("{sha_a}^")],
-                &[],
-                true,
-                repo,
-                0,
-            )
+            .with_commit_object(repo, sha_a, Some(&"d".repeat(SHA_LEN)))
             .with_output("git", &["rev-parse", "--short", sha_b], repo, "bbbbbbb\n")
             .with_output(
                 "git",
@@ -2844,14 +2816,7 @@ where
         "",
         "",
     )
-    .with_status(
-        "git",
-        &["rev-parse", "--quiet", "--verify", &format!("{sha}^")],
-        &[],
-        true,
-        repo,
-        0,
-    );
+    .with_commit_object(repo, &sha, Some(&"d".repeat(SHA_LEN)));
     let io = TestIo::default();
     let env = TestEnv {
         cwd: repo.to_path_buf(),

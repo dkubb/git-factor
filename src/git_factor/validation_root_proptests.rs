@@ -482,3 +482,23 @@ mod resolve_commit {
         }
     }
 }
+
+mod base_parent_in {
+    use super::super::parent_contracts::{CommitObject, inputs};
+    use proptest::prelude::*;
+
+    proptest! {
+        #[test]
+        fn actual_parent_records_define_the_boundary((commit, reply, expected) in inputs()) {
+            let fixture = CommitObject::new(&commit, reply);
+            let ctx = fixture.context();
+            let actual = super::super::base_parent_in(&ctx, &fixture.commit)
+                .map_err(|error| error.to_string());
+            prop_assert_eq!(actual, expected);
+            prop_assert_eq!(fixture.queries.get(), 1);
+            prop_assert_eq!(fixture.mutations.get(), 0);
+            prop_assert_eq!(fixture.io.out.borrow().clone(), "");
+            prop_assert_eq!(fixture.io.err.borrow().clone(), "");
+        }
+    }
+}

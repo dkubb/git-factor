@@ -704,6 +704,64 @@ EXAMPLES:
     }
 
     #[test]
+    #[expect(
+        clippy::literal_string_with_formatting_args,
+        reason = "Git's tree revision syntax is literal input"
+    )]
+    fn failed_parent_queries_cannot_turn_existing_ancestry_into_a_root() {
+        let dir = init_repo();
+        let repo = dir.path();
+        commit_file(repo, "file.txt", "one\n", "Add initial content");
+        commit_file(repo, "file.txt", "two\n", "Change content");
+        let head = git(repo, &["rev-parse", "HEAD"]);
+        let tree = git(repo, &["rev-parse", "HEAD^{tree}"]);
+        let contents = fs::read(repo.join("file.txt")).or_abort();
+        let index = fs::read(git_dir(repo).join("index")).or_abort();
+        let references = git(repo, &["show-ref"]);
+        let (wrapper, bin) = make_git_wrapper_named(
+            "git",
+            r#"if [ "${1-}" = "rev-parse" ] && [ "${2-}" = "--quiet" ] && [ "${3-}" = "--verify" ]; then
+  case "${4-}" in
+    *^) printf 'parent query refused\n' >&2; exit 128 ;;
+  esac
+fi
+if [ "${1-}" = "cat-file" ] && [ "${2-}" = "commit" ]; then
+  printf 'parent object query refused\n' >&2
+  exit 128
+fi
+"#,
+        );
+        let mut path = OsString::from(bin.as_os_str());
+        path.push(OsStr::new(":"));
+        path.push(env::var_os("PATH").or_abort());
+        let mut command = Command::new(git_factor_bin());
+        command
+            .current_dir(repo)
+            .args(["--exec", "printf ran > gate-ran", "HEAD"])
+            .env("PATH", path)
+            .env_remove("CLAUDECODE")
+            .env_remove("GIT_FACTOR_TRACE_LOG");
+
+        let output = command.output().or_abort();
+
+        assert_eq!(output.status.code(), Some(EXIT_SOFTWARE));
+        assert_eq!(output.stdout.as_slice(), b"");
+        assert_eq!(
+            output.stderr.as_slice(),
+            b"git command failed: parent object query refused\n"
+        );
+        assert_eq!(git(repo, &["rev-parse", "HEAD"]), head);
+        assert_eq!(git(repo, &["rev-parse", "HEAD^{tree}"]), tree);
+        assert_eq!(fs::read(repo.join("file.txt")).or_abort(), contents);
+        assert_eq!(git(repo, &["show-ref"]), references);
+        assert_eq!(fs::read(git_dir(repo).join("index")).or_abort(), index);
+        assert!(!repo.join("gate-ran").exists());
+        assert!(!git_dir(repo).join("factor").exists());
+        assert!(!git_dir(repo).join("rebase-merge").exists());
+        drop(wrapper);
+    }
+
+    #[test]
     fn rejects_commit_ref_when_git_returns_non_hex_40_char_sha() {
         let dir = init_repo();
         let repo = dir.path();
