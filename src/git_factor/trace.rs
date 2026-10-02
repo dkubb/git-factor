@@ -48,9 +48,15 @@ macro_rules! collect_status_paths_inline {
         let mut unstaged = Vec::new();
         let mut untracked = Vec::new();
 
-        if let Some((_code, status, _stderr)) =
-            maybe_git_output($ctx, &["status", "--porcelain=v1", "--untracked-files=all"])
-        {
+        if let Some((_code, status, _stderr)) = maybe_git_output(
+            $ctx,
+            &[
+                "--no-optional-locks",
+                "status",
+                "--porcelain=v1",
+                "--untracked-files=all",
+            ],
+        ) {
             for line in status.lines() {
                 let bytes = line.as_bytes();
                 let &[index_status, worktree_status, ..] = bytes else {
@@ -1168,7 +1174,12 @@ mod tests {
 
             let result = maybe_git_output(
                 &context,
-                &["status", "--porcelain=v1", "--untracked-files=all"],
+                &[
+                    "--no-optional-locks",
+                    "status",
+                    "--porcelain=v1",
+                    "--untracked-files=all",
+                ],
             );
 
             assert_eq!(result, Some((exit_code, String::new(), String::new())));
@@ -1182,7 +1193,12 @@ mod tests {
 
             let result = maybe_git_output(
                 &context,
-                &["status", "--porcelain=v1", "--untracked-files=all"],
+                &[
+                    "--no-optional-locks",
+                    "status",
+                    "--porcelain=v1",
+                    "--untracked-files=all",
+                ],
             );
 
             assert_eq!(
@@ -1199,7 +1215,12 @@ mod tests {
 
             let result = maybe_git_output(
                 &context,
-                &["status", "--porcelain=v1", "--untracked-files=all"],
+                &[
+                    "--no-optional-locks",
+                    "status",
+                    "--porcelain=v1",
+                    "--untracked-files=all",
+                ],
             );
 
             assert_eq!(
@@ -1216,7 +1237,12 @@ mod tests {
 
             let result = maybe_git_output(
                 &context,
-                &["status", "--porcelain=v1", "--untracked-files=all"],
+                &[
+                    "--no-optional-locks",
+                    "status",
+                    "--porcelain=v1",
+                    "--untracked-files=all",
+                ],
             );
 
             assert_eq!(
@@ -1237,7 +1263,12 @@ mod tests {
 
             let result = maybe_git_output(
                 &context,
-                &["status", "--porcelain=v1", "--untracked-files=all"],
+                &[
+                    "--no-optional-locks",
+                    "status",
+                    "--porcelain=v1",
+                    "--untracked-files=all",
+                ],
             );
 
             assert_eq!(result, Some((exit_code, "\n".to_owned(), String::new())));
@@ -1251,7 +1282,12 @@ mod tests {
 
             let result = maybe_git_output(
                 &context,
-                &["status", "--porcelain=v1", "--untracked-files=all"],
+                &[
+                    "--no-optional-locks",
+                    "status",
+                    "--porcelain=v1",
+                    "--untracked-files=all",
+                ],
             );
 
             assert_eq!(
@@ -1272,7 +1308,12 @@ mod tests {
 
             let result = maybe_git_output(
                 &context,
-                &["status", "--porcelain=v1", "--untracked-files=all"],
+                &[
+                    "--no-optional-locks",
+                    "status",
+                    "--porcelain=v1",
+                    "--untracked-files=all",
+                ],
             );
 
             assert_eq!(
@@ -1493,7 +1534,7 @@ mod proptests {
 
                 let result = maybe_git_output(
                     &context,
-                    &["status", "--porcelain=v1", "--untracked-files=all"],
+                    &["--no-optional-locks", "status", "--porcelain=v1", "--untracked-files=all"],
                 );
 
                 prop_assert_eq!(result, Some((exit_code, stdout, stderr_payload)));
@@ -1513,7 +1554,7 @@ mod proptests {
 
                 let result = maybe_git_output(
                     &context,
-                    &["status", "--porcelain=v1", "--untracked-files=all"],
+                    &["--no-optional-locks", "status", "--porcelain=v1", "--untracked-files=all"],
                 );
 
                 prop_assert_eq!(result, Some((exit_code, expected, String::new())));
@@ -1535,7 +1576,7 @@ mod proptests {
 
                 let result = maybe_git_output(
                     &context,
-                    &["status", "--porcelain=v1", "--untracked-files=all"],
+                    &["--no-optional-locks", "status", "--porcelain=v1", "--untracked-files=all"],
                 );
 
                 prop_assert_eq!(result, None);

@@ -362,7 +362,12 @@ fn after_output_io(mut runner: ObservedRunner, repo: &Path, tip: &str) -> Observ
             format!("{}\n", repo.display()),
         ),
         (
-            vec!["status", "--porcelain=v1", "--untracked-files=all"],
+            vec![
+                "--no-optional-locks",
+                "status",
+                "--porcelain=v1",
+                "--untracked-files=all",
+            ],
             String::new(),
         ),
     ] {

@@ -287,7 +287,12 @@ impl LaunchFault {
                     LaunchCall::IsDirectory(PathBuf::from("/contract/launcher/.git/rebase-apply")),
                     LaunchCall::Runner(RecordedCall::output(
                         "git",
-                        &["status", "--porcelain=v1", "--untracked-files=all"],
+                        &[
+                            "--no-optional-locks",
+                            "status",
+                            "--porcelain=v1",
+                            "--untracked-files=all",
+                        ],
                         cwd,
                     )),
                 ]);

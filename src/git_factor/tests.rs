@@ -3958,7 +3958,12 @@ fn write_error_log_includes_trace_path_and_error_sources() {
         )
         .with_output(
             "git",
-            &["status", "--porcelain=v1", "--untracked-files=all"],
+            &[
+                "--no-optional-locks",
+                "status",
+                "--porcelain=v1",
+                "--untracked-files=all",
+            ],
             repo,
             "M  staged.txt\n M unstaged.txt\n?? new.txt\n",
         );
@@ -4031,7 +4036,12 @@ fn write_error_log_includes_false_requires_rebase_and_apply_state() {
         )
         .with_output(
             "git",
-            &["status", "--porcelain=v1", "--untracked-files=all"],
+            &[
+                "--no-optional-locks",
+                "status",
+                "--porcelain=v1",
+                "--untracked-files=all",
+            ],
             repo,
             "",
         );

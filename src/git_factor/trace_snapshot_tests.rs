@@ -226,7 +226,12 @@ impl Arrangement {
         }
         let paths = format!("MM staged-{token}\n M unstaged-{token}\n?? untracked-{token}");
         self.query(
-            &["status", "--porcelain=v1", "--untracked-files=all"],
+            &[
+                "--no-optional-locks",
+                "status",
+                "--porcelain=v1",
+                "--untracked-files=all",
+            ],
             Reply::Present,
             &paths,
         );
