@@ -3118,3 +3118,649 @@ fn cmd_status_propagates_second_current_index_read_failure() {
         "err was: {err:?}"
     );
 }
+
+#[test]
+fn cmd_abort_reports_rebase_hint_when_rebase_still_active() {
+    let dir = TempDir::new().or_abort("tempdir");
+    let repo = dir.path();
+    let git_dir = repo.join(".git");
+    let state_dir = git_dir.join("factor");
+    fs::create_dir_all(&state_dir).or_abort("create factor dir");
+    fs::create_dir_all(git_dir.join("rebase-merge")).or_abort("create rebase-merge");
+
+    let sha = "a".repeat(SHA_LEN);
+    fs::write(state_dir.join("commits"), format!("{sha}\n")).or_abort("write commits");
+    fs::write(state_dir.join("current_index"), "0\n").or_abort("write current index");
+
+    let runner = ScriptedRunner::default()
+        .with_output("git", &["rev-parse", "--git-dir"], repo, ".git\n")
+        .with_status(
+            "git",
+            &["reset", "--hard", "--quiet", &sha],
+            &[],
+            false,
+            repo,
+            0,
+        )
+        .with_status(
+            "git",
+            &["clean", "--force", "--quiet", "-d"],
+            &[],
+            false,
+            repo,
+            0,
+        );
+    let io = TestIo::default();
+    let env = TestEnv {
+        cwd: repo.to_path_buf(),
+    };
+    let ctx = Ctx {
+        runner: &runner,
+        cwd: repo.to_path_buf(),
+        io: &io,
+        env: &env,
+        fs: &REAL_FS,
+    };
+
+    let code = cmd_abort_in(&ctx).or_abort("abort should succeed");
+
+    assert_eq!(code, EXIT_OK);
+    assert_eq!(
+        io.stdout(),
+        concat!(
+            "FACTOR: Session aborted for current commit step.\n",
+            "FACTOR: Rebase still active. To abort full rebase, run: git rebase --abort\n"
+        )
+    );
+    assert!(io.stderr().is_empty(), "stderr should be empty");
+    assert!(
+        !state_dir.exists(),
+        "factor state dir should be removed after abort"
+    );
+}
+
+#[test]
+fn cmd_abort_errors_when_no_active_session() {
+    let dir = TempDir::new().or_abort("tempdir");
+    let repo = dir.path();
+    let runner =
+        ScriptedRunner::default().with_output("git", &["rev-parse", "--git-dir"], repo, ".git\n");
+    let io = TestIo::default();
+    let env = TestEnv {
+        cwd: repo.to_path_buf(),
+    };
+    let ctx = Ctx {
+        runner: &runner,
+        cwd: repo.to_path_buf(),
+        io: &io,
+        env: &env,
+        fs: &REAL_FS,
+    };
+
+    let err = cmd_abort_in(&ctx).err_or_abort("expected no active session");
+    assert!(
+        matches!(err, FactorError::NoActiveSession),
+        "err was: {err:?}"
+    );
+}
+
+#[test]
+fn cmd_abort_io_failures_cover_output_paths() {
+    let dir = TempDir::new().or_abort("tempdir");
+    let repo = dir.path();
+    let git_dir = repo.join(".git");
+    let state_dir = git_dir.join("factor");
+    fs::create_dir_all(&state_dir).or_abort("create factor dir");
+    fs::create_dir_all(git_dir.join("rebase-merge")).or_abort("create rebase-merge");
+
+    let sha = "a".repeat(SHA_LEN);
+    fs::write(state_dir.join("commits"), format!("{sha}\n")).or_abort("write commits");
+    fs::write(state_dir.join("current_index"), "0\n").or_abort("write current index");
+
+    let base_runner = ScriptedRunner::default()
+        .with_output("git", &["rev-parse", "--git-dir"], repo, ".git\n")
+        .with_status(
+            "git",
+            &["reset", "--hard", "--quiet", &sha],
+            &[],
+            false,
+            repo,
+            0,
+        )
+        .with_status(
+            "git",
+            &["clean", "--force", "--quiet", "-d"],
+            &[],
+            false,
+            repo,
+            0,
+        );
+    let env = TestEnv {
+        cwd: repo.to_path_buf(),
+    };
+
+    for fail_at in 1..=4 {
+        fs::create_dir_all(&state_dir).or_abort("recreate factor dir");
+        fs::write(state_dir.join("commits"), format!("{sha}\n")).or_abort("rewrite commits");
+        fs::write(state_dir.join("current_index"), "0\n").or_abort("rewrite current index");
+
+        let runner = NthRunnerFailure::new(base_runner.clone(), usize::MAX);
+        let io = NthIoFailure::new(fail_at);
+        let ctx = Ctx {
+            runner: &runner,
+            cwd: repo.to_path_buf(),
+            io: &io,
+            env: &env,
+            fs: &REAL_FS,
+        };
+
+        let err = cmd_abort_in(&ctx).err_or_abort("expected io failure");
+        assert!(
+            matches!(&err, FactorError::Io(inner) if inner.to_string().contains("io fail")),
+            "err was: {err:?}"
+        );
+    }
+}
+
+#[test]
+fn cmd_abort_runner_failures_cover_internal_question_mark_paths() {
+    let dir = TempDir::new().or_abort("tempdir");
+    let repo = dir.path();
+    let git_dir = repo.join(".git");
+    let state_dir = git_dir.join("factor");
+    fs::create_dir_all(&state_dir).or_abort("create factor dir");
+
+    let sha = "a".repeat(SHA_LEN);
+    let base_runner = ScriptedRunner::default()
+        .with_output("git", &["rev-parse", "--git-dir"], repo, ".git\n")
+        .with_status(
+            "git",
+            &["reset", "--hard", "--quiet", &sha],
+            &[],
+            false,
+            repo,
+            0,
+        )
+        .with_status(
+            "git",
+            &["clean", "--force", "--quiet", "-d"],
+            &[],
+            false,
+            repo,
+            0,
+        );
+    let io = TestIo::default();
+    let env = TestEnv {
+        cwd: repo.to_path_buf(),
+    };
+
+    for fail_at in [2, 3, 4] {
+        fs::create_dir_all(&state_dir).or_abort("recreate factor dir");
+        fs::write(state_dir.join("commits"), format!("{sha}\n")).or_abort("write commits");
+        fs::write(state_dir.join("current_index"), "0\n").or_abort("write current index");
+
+        let runner = NthRunnerFailure::new(base_runner.clone(), fail_at);
+        let ctx = Ctx {
+            runner: &runner,
+            cwd: repo.to_path_buf(),
+            io: &io,
+            env: &env,
+            fs: &REAL_FS,
+        };
+
+        let err = cmd_abort_in(&ctx).err_or_abort("expected forced runner failure");
+        assert!(is_forced_runner_failure(&err), "err was: {err:?}");
+    }
+}
+
+#[test]
+fn cmd_abort_errors_when_current_commit_state_is_missing() {
+    let dir = TempDir::new().or_abort("tempdir");
+    let repo = dir.path();
+    let git_dir = repo.join(".git");
+    let state_dir = git_dir.join("factor");
+    fs::create_dir_all(&state_dir).or_abort("create factor dir");
+    fs::write(state_dir.join("current_index"), "0\n").or_abort("write current index");
+
+    let runner =
+        ScriptedRunner::default().with_output("git", &["rev-parse", "--git-dir"], repo, ".git\n");
+    let io = TestIo::default();
+    let env = TestEnv {
+        cwd: repo.to_path_buf(),
+    };
+    let ctx = Ctx {
+        runner: &runner,
+        cwd: repo.to_path_buf(),
+        io: &io,
+        env: &env,
+        fs: &REAL_FS,
+    };
+
+    let err = cmd_abort_in(&ctx).err_or_abort("expected missing state file to fail");
+    assert!(
+        matches!(&err, FactorError::StateRead(inner) if inner.kind() == io::ErrorKind::NotFound),
+        "err was: {err:?}"
+    );
+}
+
+#[test]
+fn cmd_abort_propagates_start_head_state_read_error() {
+    let dir = TempDir::new().or_abort("tempdir");
+    let repo = dir.path();
+    let state_dir = repo.join(".git").join("factor");
+    fs::create_dir_all(&state_dir).or_abort("create factor dir");
+    fs::write(
+        state_dir.join("commits"),
+        format!("{}\n", "a".repeat(SHA_LEN)),
+    )
+    .or_abort("write commits");
+    fs::create_dir_all(state_dir.join("start_head")).or_abort("create invalid start_head");
+
+    let runner =
+        ScriptedRunner::default().with_output("git", &["rev-parse", "--git-dir"], repo, ".git\n");
+    let io = TestIo::default();
+    let env = TestEnv {
+        cwd: repo.to_path_buf(),
+    };
+    let ctx = Ctx {
+        runner: &runner,
+        cwd: repo.to_path_buf(),
+        io: &io,
+        env: &env,
+        fs: &REAL_FS,
+    };
+
+    let err = cmd_abort_in(&ctx).err_or_abort("expected start_head read failure");
+    assert!(
+        matches!(&err, FactorError::StateRead(inner) if inner.kind() != io::ErrorKind::NotFound),
+        "err was: {err:?}"
+    );
+}
+
+#[test]
+fn cmd_abort_propagates_requires_rebase_state_read_error() {
+    let dir = TempDir::new().or_abort("tempdir");
+    let repo = dir.path();
+    let state_dir = repo.join(".git").join("factor");
+    fs::create_dir_all(&state_dir).or_abort("create factor dir");
+    fs::write(
+        state_dir.join("commits"),
+        format!("{}\n", "a".repeat(SHA_LEN)),
+    )
+    .or_abort("write commits");
+    fs::create_dir_all(state_dir.join("requires_rebase"))
+        .or_abort("create invalid requires_rebase");
+
+    let runner =
+        ScriptedRunner::default().with_output("git", &["rev-parse", "--git-dir"], repo, ".git\n");
+    let io = TestIo::default();
+    let env = TestEnv {
+        cwd: repo.to_path_buf(),
+    };
+    let ctx = Ctx {
+        runner: &runner,
+        cwd: repo.to_path_buf(),
+        io: &io,
+        env: &env,
+        fs: &REAL_FS,
+    };
+
+    let err = cmd_abort_in(&ctx).err_or_abort("expected requires_rebase read failure");
+    assert!(
+        matches!(&err, FactorError::StateRead(inner) if inner.kind() != io::ErrorKind::NotFound),
+        "err was: {err:?}"
+    );
+}
+
+#[test]
+fn cmd_abort_propagates_started_rebase_state_read_error() {
+    let dir = TempDir::new().or_abort("tempdir");
+    let repo = dir.path();
+    let state_dir = repo.join(".git").join("factor");
+    fs::create_dir_all(&state_dir).or_abort("create factor dir");
+    fs::write(
+        state_dir.join("commits"),
+        format!("{}\n", "a".repeat(SHA_LEN)),
+    )
+    .or_abort("write commits");
+    fs::write(state_dir.join("requires_rebase"), "false\n").or_abort("write requires_rebase");
+    fs::create_dir_all(state_dir.join("started_rebase")).or_abort("create invalid started_rebase");
+
+    let runner =
+        ScriptedRunner::default().with_output("git", &["rev-parse", "--git-dir"], repo, ".git\n");
+    let io = TestIo::default();
+    let env = TestEnv {
+        cwd: repo.to_path_buf(),
+    };
+    let ctx = Ctx {
+        runner: &runner,
+        cwd: repo.to_path_buf(),
+        io: &io,
+        env: &env,
+        fs: &REAL_FS,
+    };
+
+    let err = cmd_abort_in(&ctx).err_or_abort("expected started_rebase read failure");
+    assert!(
+        matches!(&err, FactorError::StateRead(inner) if inner.kind() != io::ErrorKind::NotFound),
+        "err was: {err:?}"
+    );
+}
+
+#[test]
+fn cmd_abort_omits_rebase_hint_when_rebase_is_not_active() {
+    let dir = TempDir::new().or_abort("tempdir");
+    let repo = dir.path();
+    let git_dir = repo.join(".git");
+    let state_dir = git_dir.join("factor");
+    fs::create_dir_all(&state_dir).or_abort("create factor dir");
+
+    let sha = "a".repeat(SHA_LEN);
+    fs::write(state_dir.join("commits"), format!("{sha}\n")).or_abort("write commits");
+    fs::write(state_dir.join("current_index"), "0\n").or_abort("write current index");
+
+    let runner = ScriptedRunner::default()
+        .with_output("git", &["rev-parse", "--git-dir"], repo, ".git\n")
+        .with_status(
+            "git",
+            &["reset", "--hard", "--quiet", &sha],
+            &[],
+            false,
+            repo,
+            0,
+        )
+        .with_status(
+            "git",
+            &["clean", "--force", "--quiet", "-d"],
+            &[],
+            false,
+            repo,
+            0,
+        );
+    let io = TestIo::default();
+    let env = TestEnv {
+        cwd: repo.to_path_buf(),
+    };
+    let ctx = Ctx {
+        runner: &runner,
+        cwd: repo.to_path_buf(),
+        io: &io,
+        env: &env,
+        fs: &REAL_FS,
+    };
+
+    let code = cmd_abort_in(&ctx).or_abort("abort should succeed");
+    assert_eq!(code, EXIT_OK);
+    assert_eq!(
+        io.stdout(),
+        "FACTOR: Session aborted for current commit step.\n"
+    );
+    assert!(io.stderr().is_empty(), "stderr should be empty");
+}
+
+#[test]
+fn cmd_abort_runs_rebase_abort_when_started_rebase_is_true() {
+    let dir = TempDir::new().or_abort("tempdir");
+    let repo = dir.path();
+    let git_dir = repo.join(".git");
+    let state_dir = git_dir.join("factor");
+    fs::create_dir_all(&state_dir).or_abort("create factor dir");
+    fs::create_dir_all(git_dir.join("rebase-merge")).or_abort("create rebase-merge");
+
+    let sha = "a".repeat(SHA_LEN);
+    fs::write(state_dir.join("commits"), format!("{sha}\n")).or_abort("write commits");
+    fs::write(state_dir.join("current_index"), "0\n").or_abort("write current index");
+    fs::write(state_dir.join("started_rebase"), "true\n").or_abort("write started_rebase");
+
+    let runner = with_git_dir_outputs(ScriptedRunner::default(), repo, 4)
+        .with_status(
+            "git",
+            &["rebase", "--abort"],
+            &[("GIT_EDITOR", "false"), ("GIT_SEQUENCE_EDITOR", "false")],
+            false,
+            repo,
+            0,
+        )
+        .with_status(
+            "git",
+            &["reset", "--hard", "--quiet", &sha],
+            &[],
+            false,
+            repo,
+            0,
+        )
+        .with_status(
+            "git",
+            &["clean", "--force", "--quiet", "-d"],
+            &[],
+            false,
+            repo,
+            0,
+        );
+    let io = TestIo::default();
+    let env = TestEnv {
+        cwd: repo.to_path_buf(),
+    };
+    let ctx = Ctx {
+        runner: &runner,
+        cwd: repo.to_path_buf(),
+        io: &io,
+        env: &env,
+        fs: &REAL_FS,
+    };
+
+    let code = cmd_abort_in(&ctx).or_abort("abort should succeed");
+
+    assert_eq!(code, EXIT_OK);
+    assert_eq!(
+        io.stdout(),
+        concat!(
+            "FACTOR: Session aborted for current commit step.\n",
+            "FACTOR: Rebase still active. To abort full rebase, run: git rebase --abort\n"
+        )
+    );
+    assert!(io.stderr().is_empty(), "stderr should be empty");
+}
+
+#[test]
+fn cmd_abort_errors_when_state_dir_removal_fails() {
+    let dir = TempDir::new().or_abort("tempdir");
+    let repo = dir.path();
+    let git_dir = repo.join(".git");
+    let state_dir = git_dir.join("factor");
+    fs::create_dir_all(&state_dir).or_abort("create factor dir");
+
+    let sha = "a".repeat(SHA_LEN);
+    fs::write(state_dir.join("commits"), format!("{sha}\n")).or_abort("write commits");
+    fs::write(state_dir.join("current_index"), "0\n").or_abort("write current index");
+
+    let runner = ScriptedRunner::default()
+        .with_output("git", &["rev-parse", "--git-dir"], repo, ".git\n")
+        .with_status(
+            "git",
+            &["reset", "--hard", "--quiet", &sha],
+            &[],
+            false,
+            repo,
+            0,
+        )
+        .with_status(
+            "git",
+            &["clean", "--force", "--quiet", "-d"],
+            &[],
+            false,
+            repo,
+            0,
+        );
+    let io = TestIo::default();
+    let env = TestEnv {
+        cwd: repo.to_path_buf(),
+    };
+    let ctx = Ctx {
+        runner: &runner,
+        cwd: repo.to_path_buf(),
+        io: &io,
+        env: &env,
+        fs: &FailingRemoveDirAllFs,
+    };
+
+    let err = cmd_abort_in(&ctx).err_or_abort("expected cleanup failure");
+    assert!(
+        matches!(&err, FactorError::GitCommand(msg) if msg.contains("failed to remove factor state path")),
+        "err was: {err:?}"
+    );
+    assert!(io.stdout().is_empty(), "stdout should be empty");
+    assert!(io.stderr().is_empty(), "stderr should be empty");
+    assert!(
+        state_dir.exists(),
+        "state dir should remain when cleanup fails"
+    );
+}
+
+#[test]
+fn cmd_abort_errors_when_cleanup_leaves_state_path_behind() {
+    let dir = TempDir::new().or_abort("tempdir");
+    let repo = dir.path();
+    let git_dir = repo.join(".git");
+    let state_dir = git_dir.join("factor");
+    fs::create_dir_all(&state_dir).or_abort("create factor dir");
+
+    let sha = "a".repeat(SHA_LEN);
+    fs::write(state_dir.join("commits"), format!("{sha}\n")).or_abort("write commits");
+    fs::write(state_dir.join("current_index"), "0\n").or_abort("write current index");
+
+    let runner = ScriptedRunner::default()
+        .with_output("git", &["rev-parse", "--git-dir"], repo, ".git\n")
+        .with_status(
+            "git",
+            &["reset", "--hard", "--quiet", &sha],
+            &[],
+            false,
+            repo,
+            0,
+        )
+        .with_status(
+            "git",
+            &["clean", "--force", "--quiet", "-d"],
+            &[],
+            false,
+            repo,
+            0,
+        );
+    let io = TestIo::default();
+    let env = TestEnv {
+        cwd: repo.to_path_buf(),
+    };
+    let ctx = Ctx {
+        runner: &runner,
+        cwd: repo.to_path_buf(),
+        io: &io,
+        env: &env,
+        fs: &StickyStatePathFs,
+    };
+
+    let err = cmd_abort_in(&ctx).err_or_abort("expected persistent-state-path failure");
+    assert!(
+        matches!(&err, FactorError::GitCommand(msg) if msg.contains("still exists after cleanup")),
+        "err was: {err:?}"
+    );
+    assert!(io.stdout().is_empty(), "stdout should be empty");
+    assert!(io.stderr().is_empty(), "stderr should be empty");
+}
+
+#[test]
+fn cmd_abort_uses_start_head_and_skips_rebase_abort_when_rebase_is_not_active() {
+    let dir = TempDir::new().or_abort("tempdir");
+    let repo = dir.path();
+    let git_dir = repo.join(".git");
+    let state_dir = git_dir.join("factor");
+    fs::create_dir_all(&state_dir).or_abort("create factor dir");
+
+    let current = "a".repeat(SHA_LEN);
+    let start_head = "b".repeat(SHA_LEN);
+    fs::write(state_dir.join("commits"), format!("{current}\n")).or_abort("write commits");
+    fs::write(state_dir.join("current_index"), "0\n").or_abort("write current index");
+    fs::write(state_dir.join("started_rebase"), "true\n").or_abort("write started_rebase");
+    fs::write(state_dir.join("start_head"), format!("{start_head}\n")).or_abort("write start_head");
+
+    let runner = ScriptedRunner::default()
+        .with_output("git", &["rev-parse", "--git-dir"], repo, ".git\n")
+        .with_status(
+            "git",
+            &["reset", "--hard", "--quiet", &start_head],
+            &[],
+            false,
+            repo,
+            0,
+        )
+        .with_status(
+            "git",
+            &["clean", "--force", "--quiet", "-d"],
+            &[],
+            false,
+            repo,
+            0,
+        );
+    let io = TestIo::default();
+    let env = TestEnv {
+        cwd: repo.to_path_buf(),
+    };
+    let ctx = Ctx {
+        runner: &runner,
+        cwd: repo.to_path_buf(),
+        io: &io,
+        env: &env,
+        fs: &REAL_FS,
+    };
+
+    let code = cmd_abort_in(&ctx).or_abort("abort should succeed");
+    assert_eq!(code, EXIT_OK);
+    assert_eq!(
+        io.stdout(),
+        "FACTOR: Session aborted for current commit step.\n"
+    );
+    assert!(io.stderr().is_empty(), "stderr should be empty");
+}
+
+#[test]
+fn cmd_abort_propagates_rebase_abort_nonzero_exit() {
+    let dir = TempDir::new().or_abort("tempdir");
+    let repo = dir.path();
+    let git_dir = repo.join(".git");
+    let state_dir = git_dir.join("factor");
+    fs::create_dir_all(&state_dir).or_abort("create factor dir");
+    fs::create_dir_all(git_dir.join("rebase-merge")).or_abort("create rebase-merge");
+
+    let sha = "a".repeat(SHA_LEN);
+    fs::write(state_dir.join("commits"), format!("{sha}\n")).or_abort("write commits");
+    fs::write(state_dir.join("current_index"), "0\n").or_abort("write current index");
+    fs::write(state_dir.join("started_rebase"), "true\n").or_abort("write started_rebase");
+
+    let runner = ScriptedRunner::default()
+        .with_output("git", &["rev-parse", "--git-dir"], repo, ".git\n")
+        .with_status(
+            "git",
+            &["rebase", "--abort"],
+            &[("GIT_EDITOR", "false"), ("GIT_SEQUENCE_EDITOR", "false")],
+            false,
+            repo,
+            1,
+        );
+    let io = TestIo::default();
+    let env = TestEnv {
+        cwd: repo.to_path_buf(),
+    };
+    let ctx = Ctx {
+        runner: &runner,
+        cwd: repo.to_path_buf(),
+        io: &io,
+        env: &env,
+        fs: &REAL_FS,
+    };
+
+    let err = cmd_abort_in(&ctx).err_or_abort("expected rebase --abort to fail");
+    assert!(
+        matches!(&err, FactorError::GitCommand(msg) if msg.contains("git rebase failed (exit")),
+        "err was: {err:?}"
+    );
+}
