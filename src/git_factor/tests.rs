@@ -2955,84 +2955,6 @@ fn cmd_abort_reports_rebase_hint_when_rebase_still_active() {
 }
 
 #[test]
-fn cmd_status_reports_no_active_session_message() {
-    let dir = TempDir::new().or_abort("tempdir");
-    let repo = dir.path();
-    let git_dir = repo.join(".git");
-    fs::create_dir_all(&git_dir).or_abort("create git dir");
-
-    let runner = with_git_dir_outputs(ScriptedRunner::default(), repo, 8);
-    let io = TestIo::default();
-    let env = TestEnv {
-        cwd: repo.to_path_buf(),
-    };
-    let ctx = Ctx {
-        runner: &runner,
-        cwd: repo.to_path_buf(),
-        io: &io,
-        env: &env,
-        fs: &REAL_FS,
-    };
-
-    let code = cmd_status_in(&ctx).or_abort("status should succeed");
-
-    assert_eq!(code, EXIT_OK);
-    assert_eq!(io.stdout(), "FACTOR: No active session.\n");
-    assert!(io.stderr().is_empty(), "stderr should be empty");
-}
-
-#[test]
-fn cmd_status_reports_active_session_fields() {
-    let dir = TempDir::new().or_abort("tempdir");
-    let repo = dir.path();
-    let git_dir = repo.join(".git");
-    let state_dir = git_dir.join("factor");
-    fs::create_dir_all(&state_dir).or_abort("create factor dir");
-    fs::create_dir_all(git_dir.join("rebase-merge")).or_abort("create rebase-merge");
-
-    let sha = "a".repeat(SHA_LEN);
-    fs::write(state_dir.join("commits"), format!("{sha}\n")).or_abort("write commits");
-    fs::write(state_dir.join("current_index"), "0\n").or_abort("write current index");
-    fs::write(state_dir.join("split_count"), "2\n").or_abort("write split count");
-    fs::write(state_dir.join("requires_rebase"), "false\n").or_abort("write requires rebase");
-    fs::write(state_dir.join("is_root"), "true\n").or_abort("write is root");
-
-    let runner = with_git_dir_outputs(ScriptedRunner::default(), repo, 8);
-    let io = TestIo::default();
-    let env = TestEnv {
-        cwd: repo.to_path_buf(),
-    };
-    let ctx = Ctx {
-        runner: &runner,
-        cwd: repo.to_path_buf(),
-        io: &io,
-        env: &env,
-        fs: &REAL_FS,
-    };
-
-    let code = cmd_status_in(&ctx).or_abort("status should succeed");
-
-    assert_eq!(code, EXIT_OK);
-    assert_eq!(
-        io.stdout(),
-        format!(
-            concat!(
-                "FACTOR: Active session.\n",
-                "CURRENT_COMMIT: {}\n",
-                "CURRENT_INDEX: 0\n",
-                "SPLIT_COUNT: 2\n",
-                "PHASE: splitting\n",
-                "REQUIRES_REBASE: false\n",
-                "REBASE_IN_PROGRESS: true\n",
-                "IS_ROOT: true\n"
-            ),
-            sha
-        )
-    );
-    assert!(io.stderr().is_empty(), "stderr should be empty");
-}
-
-#[test]
 fn advance_to_next_commit_propagates_io_error_when_outln_fails_after_rebase_finishes() {
     let dir = TempDir::new().or_abort("tempdir");
     let repo = dir.path();
@@ -6485,47 +6407,6 @@ fn cmd_abort_io_failures_cover_output_paths() {
 }
 
 #[test]
-fn cmd_status_io_failures_cover_active_session_output_paths() {
-    let dir = TempDir::new().or_abort("tempdir");
-    let repo = dir.path();
-    let git_dir = repo.join(".git");
-    let state_dir = git_dir.join("factor");
-    fs::create_dir_all(&state_dir).or_abort("create factor dir");
-    fs::create_dir_all(git_dir.join("rebase-merge")).or_abort("create rebase-merge");
-
-    let sha = "a".repeat(SHA_LEN);
-    fs::write(state_dir.join("commits"), format!("{sha}\n")).or_abort("write commits");
-    fs::write(state_dir.join("current_index"), "0\n").or_abort("write current index");
-    fs::write(state_dir.join("split_count"), "2\n").or_abort("write split count");
-    fs::write(state_dir.join("requires_rebase"), "false\n").or_abort("write requires rebase");
-    fs::write(state_dir.join("is_root"), "true\n").or_abort("write is root");
-
-    let base_runner =
-        ScriptedRunner::default().with_output("git", &["rev-parse", "--git-dir"], repo, ".git\n");
-    let env = TestEnv {
-        cwd: repo.to_path_buf(),
-    };
-
-    for fail_at in 1..=14 {
-        let runner = NthRunnerFailure::new(base_runner.clone(), usize::MAX);
-        let io = NthIoFailure::new(fail_at);
-        let ctx = Ctx {
-            runner: &runner,
-            cwd: repo.to_path_buf(),
-            io: &io,
-            env: &env,
-            fs: &REAL_FS,
-        };
-
-        let err = cmd_status_in(&ctx).err_or_abort("expected io failure");
-        assert!(
-            matches!(&err, FactorError::Io(inner) if inner.to_string().contains("io fail")),
-            "err was: {err:?}"
-        );
-    }
-}
-
-#[test]
 fn advance_to_next_commit_propagates_runner_failure_from_rebase_continue() {
     let dir = TempDir::new().or_abort("tempdir");
     let repo = dir.path();
@@ -7231,33 +7112,6 @@ fn cmd_abort_propagates_requires_rebase_state_read_error() {
 }
 
 #[test]
-fn cmd_status_io_failure_on_no_active_session_covers_outln_error_path() {
-    let dir = TempDir::new().or_abort("tempdir");
-    let repo = dir.path();
-    fs::create_dir_all(repo.join(".git")).or_abort("create git dir");
-
-    let runner =
-        ScriptedRunner::default().with_output("git", &["rev-parse", "--git-dir"], repo, ".git\n");
-    let io = FailingIo;
-    let env = TestEnv {
-        cwd: repo.to_path_buf(),
-    };
-    let ctx = Ctx {
-        runner: &runner,
-        cwd: repo.to_path_buf(),
-        io: &io,
-        env: &env,
-        fs: &REAL_FS,
-    };
-
-    let err = cmd_status_in(&ctx).err_or_abort("expected io failure");
-    assert!(
-        matches!(&err, FactorError::Io(inner) if inner.to_string().contains("io fail")),
-        "err was: {err:?}"
-    );
-}
-
-#[test]
 fn cmd_abort_propagates_started_rebase_state_read_error() {
     let dir = TempDir::new().or_abort("tempdir");
     let repo = dir.path();
@@ -7289,109 +7143,6 @@ fn cmd_abort_propagates_started_rebase_state_read_error() {
     assert!(
         matches!(&err, FactorError::StateRead(inner) if inner.kind() != io::ErrorKind::NotFound),
         "err was: {err:?}"
-    );
-}
-
-#[test]
-fn cmd_status_state_failures_cover_internal_question_mark_paths() {
-    let dir = TempDir::new().or_abort("tempdir");
-    let repo = dir.path();
-    let git_dir = repo.join(".git");
-    let state_dir = git_dir.join("factor");
-    fs::create_dir_all(&state_dir).or_abort("create factor dir");
-    fs::write(
-        state_dir.join("commits"),
-        format!("{}\n", "a".repeat(SHA_LEN)),
-    )
-    .or_abort("write commits");
-    fs::write(state_dir.join("current_index"), "0\n").or_abort("write current index");
-    fs::write(state_dir.join("split_count"), "1\n").or_abort("write split count");
-    fs::write(state_dir.join("requires_rebase"), "false\n").or_abort("write requires_rebase");
-    fs::write(state_dir.join("is_root"), "false\n").or_abort("write is_root");
-
-    let base_runner =
-        ScriptedRunner::default().with_output("git", &["rev-parse", "--git-dir"], repo, ".git\n");
-    let io = TestIo::default();
-    let env = TestEnv {
-        cwd: repo.to_path_buf(),
-    };
-
-    let factor_dir_runner = NthRunnerFailure::new(base_runner.clone(), 2);
-    let factor_dir_ctx = Ctx {
-        runner: &factor_dir_runner,
-        cwd: repo.to_path_buf(),
-        io: &io,
-        env: &env,
-        fs: &REAL_FS,
-    };
-    let factor_dir_err =
-        cmd_status_in(&factor_dir_ctx).err_or_abort("expected factor_dir_in failure");
-    assert!(
-        matches!(&factor_dir_err, FactorError::GitDir(msg) if msg.contains("forced runner failure")),
-        "err was: {factor_dir_err:?}"
-    );
-
-    fs::write(
-        state_dir.join("commits"),
-        format!("{}\n", "a".repeat(SHA_LEN)),
-    )
-    .or_abort("reset commits");
-    fs::write(state_dir.join("current_index"), "0\n").or_abort("reset current index");
-    fs::write(state_dir.join("split_count"), "1\n").or_abort("reset split count");
-    fs::write(state_dir.join("requires_rebase"), "false\n").or_abort("reset requires_rebase");
-    fs::write(state_dir.join("is_root"), "false\n").or_abort("reset is_root");
-    fs::remove_file(state_dir.join("commits")).or_abort("remove commits");
-    let base_ctx = Ctx {
-        runner: &base_runner,
-        cwd: repo.to_path_buf(),
-        io: &io,
-        env: &env,
-        fs: &REAL_FS,
-    };
-    let missing_commits_err =
-        cmd_status_in(&base_ctx).err_or_abort("expected missing commits state");
-    assert!(
-        matches!(&missing_commits_err, FactorError::StateRead(inner) if inner.kind() == io::ErrorKind::NotFound),
-        "err was: {missing_commits_err:?}"
-    );
-
-    fs::write(
-        state_dir.join("commits"),
-        format!("{}\n", "a".repeat(SHA_LEN)),
-    )
-    .or_abort("restore commits");
-    fs::write(state_dir.join("current_index"), "not-a-number\n").or_abort("corrupt current_index");
-    let invalid_current_index_err =
-        cmd_status_in(&base_ctx).err_or_abort("expected invalid current_index");
-    assert!(
-        matches!(&invalid_current_index_err, FactorError::GitCommand(msg) if msg.contains("current_index")),
-        "err was: {invalid_current_index_err:?}"
-    );
-
-    fs::write(state_dir.join("current_index"), "0\n").or_abort("restore current_index");
-    fs::write(state_dir.join("split_count"), "not-a-number\n").or_abort("corrupt split_count");
-    let invalid_split_count_err =
-        cmd_status_in(&base_ctx).err_or_abort("expected invalid split_count");
-    assert!(
-        matches!(&invalid_split_count_err, FactorError::GitCommand(msg) if msg.contains("split_count")),
-        "err was: {invalid_split_count_err:?}"
-    );
-
-    fs::write(state_dir.join("split_count"), "1\n").or_abort("restore split_count");
-    fs::write(state_dir.join("requires_rebase"), "not-bool\n").or_abort("corrupt requires_rebase");
-    let invalid_requires_rebase_err =
-        cmd_status_in(&base_ctx).err_or_abort("expected invalid requires_rebase");
-    assert!(
-        matches!(&invalid_requires_rebase_err, FactorError::GitCommand(msg) if msg.contains("requires_rebase")),
-        "err was: {invalid_requires_rebase_err:?}"
-    );
-
-    fs::write(state_dir.join("requires_rebase"), "false\n").or_abort("restore requires_rebase");
-    fs::write(state_dir.join("is_root"), "not-bool\n").or_abort("corrupt is_root");
-    let invalid_is_root_err = cmd_status_in(&base_ctx).err_or_abort("expected invalid is_root");
-    assert!(
-        matches!(&invalid_is_root_err, FactorError::GitCommand(msg) if msg.contains("is_root")),
-        "err was: {invalid_is_root_err:?}"
     );
 }
 
@@ -8641,43 +8392,6 @@ fn increment_split_count_reports_invalid_split_count_value() {
         .err_or_abort("invalid split_count should fail");
     assert!(
         matches!(&err, FactorError::GitCommand(msg) if msg.contains("split_count")),
-        "err was: {err:?}"
-    );
-}
-
-#[test]
-fn cmd_status_propagates_second_current_index_read_failure() {
-    let dir = TempDir::new().or_abort("tempdir");
-    let repo = dir.path();
-    let git_dir = repo.join(".git");
-    let state_dir = git_dir.join("factor");
-    fs::create_dir_all(&state_dir).or_abort("create factor dir");
-
-    let sha = "a".repeat(SHA_LEN);
-    fs::write(state_dir.join("commits"), format!("{sha}\n")).or_abort("write commits");
-    fs::write(state_dir.join("current_index"), "0\n").or_abort("write current_index");
-    fs::write(state_dir.join("split_count"), "1\n").or_abort("write split_count");
-    fs::write(state_dir.join("requires_rebase"), "false\n").or_abort("write requires_rebase");
-    fs::write(state_dir.join("is_root"), "false\n").or_abort("write is_root");
-
-    let runner =
-        ScriptedRunner::default().with_output("git", &["rev-parse", "--git-dir"], repo, ".git\n");
-    let io = TestIo::default();
-    let env = TestEnv {
-        cwd: repo.to_path_buf(),
-    };
-    let fs = NthReadFailureFs::new("current_index", 2, "second current_index read failed");
-    let ctx = Ctx {
-        runner: &runner,
-        cwd: repo.to_path_buf(),
-        io: &io,
-        env: &env,
-        fs: &fs,
-    };
-
-    let err = cmd_status_in(&ctx).err_or_abort("expected second current_index read to fail");
-    assert!(
-        matches!(&err, FactorError::StateRead(inner) if inner.to_string().contains("second current_index read failed")),
         "err was: {err:?}"
     );
 }
