@@ -2800,3 +2800,35 @@ fn cmd_start_stops_after_gate_failure_recovery_hint_write_failure() {
     // Only net contents/layout inside this tempdir, excluding factor state.
     assert_eq!(fixture.direct_files_after(), fixture.direct_files_before);
 }
+
+#[test]
+fn cmd_start_refuses_post_gate_worktree_query_before_journal_creation() {
+    use crate::git_factor::tests::start_contracts::query;
+    use crate::git_factor::tests::start_contracts::query::{QueryCase, QueryReply, QueryTarget};
+
+    let selected = NonEmpty::new(CommitSha::new("a".repeat(SHA_LEN)).or_abort("admitted SHA"));
+    let case = QueryCase::Failure {
+        target: QueryTarget::Worktree,
+        reply: QueryReply::Rejected,
+    };
+    let fixture = query::direct_start(&selected, false, &case, "gate out", "gate err");
+    let ctx = fixture.ctx();
+
+    let result = cmd_start_with_resolved_in(&ctx, &fixture.exec, &fixture.state, &fixture.selected);
+
+    assert_eq!(
+        result.map_err(|err| err.to_string()),
+        Err(concat!(
+            "git command failed: git status --porcelain=v1 produced unexpected ",
+            "output (exit 128)\nSTDERR:\nselected query refused"
+        )
+        .to_owned())
+    );
+    assert_eq!(fixture.io.stdout(), "gate out");
+    assert_eq!(fixture.io.stderr(), "gate err");
+    assert_eq!(fixture.observed_journal(), None);
+    assert_eq!(fixture.observed_calls(), fixture.expected_calls);
+    assert_eq!(fixture.remaining_keys(), Vec::<String>::new());
+    // Only net contents/layout inside this tempdir, excluding factor state.
+    assert_eq!(fixture.direct_files_after(), fixture.direct_files_before);
+}
