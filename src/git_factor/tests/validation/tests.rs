@@ -1,67 +1,65 @@
 mod validate_exec_syntax {
     use super::*;
 
-    mod root {
-        use super::super::*;
+    #[test]
+    fn validate_exec_syntax_reports_spawn_failure_as_git_command() {
         use crate::git_factor::tests::{ScriptedRunner, TestEnv, TestIo};
 
-        #[test]
-        fn validate_exec_syntax_reports_spawn_failure_as_git_command() {
-            let dir = TempDir::new().or_abort("tempdir");
-            let repo = dir.path();
+        let dir = TempDir::new().or_abort("tempdir");
+        let repo = dir.path();
 
-            let runner = ScriptedRunner::default();
-            let io = TestIo::default();
-            let env = TestEnv {
-                cwd: repo.to_path_buf(),
-            };
-            let ctx = Ctx {
-                runner: &runner,
-                cwd: repo.to_path_buf(),
-                io: &io,
-                env: &env,
-                fs: &REAL_FS,
-            };
+        let runner = ScriptedRunner::default();
+        let io = TestIo::default();
+        let env = TestEnv {
+            cwd: repo.to_path_buf(),
+        };
+        let ctx = Ctx {
+            runner: &runner,
+            cwd: repo.to_path_buf(),
+            io: &io,
+            env: &env,
+            fs: &REAL_FS,
+        };
 
-            let err = validate_exec_syntax(&ctx, "echo hi").err_or_abort("expected spawn failure");
-            assert!(
-                matches!(&err, FactorError::GitCommand(msg) if msg.contains("bash syntax check:") && msg.contains("unexpected status call")),
-                "err was: {err:?}"
-            );
-        }
+        let err = validate_exec_syntax(&ctx, "echo hi").err_or_abort("expected spawn failure");
+        assert!(
+            matches!(&err, FactorError::GitCommand(msg) if msg.contains("bash syntax check:") && msg.contains("unexpected status call")),
+            "err was: {err:?}"
+        );
+    }
 
-        #[test]
-        fn validate_exec_syntax_returns_invalid_exec_syntax_on_nonzero_status() {
-            let dir = TempDir::new().or_abort("tempdir");
-            let repo = dir.path();
-            let command = "if )";
-            let runner = ScriptedRunner::default().with_status(
-                "bash",
-                &["--norc", "--noprofile", "-n", "-c", command],
-                &[],
-                true,
-                repo,
-                2,
-            );
-            let io = TestIo::default();
-            let env = TestEnv {
-                cwd: repo.to_path_buf(),
-            };
-            let ctx = Ctx {
-                runner: &runner,
-                cwd: repo.to_path_buf(),
-                io: &io,
-                env: &env,
-                fs: &REAL_FS,
-            };
+    #[test]
+    fn validate_exec_syntax_returns_invalid_exec_syntax_on_nonzero_status() {
+        use crate::git_factor::tests::{ScriptedRunner, TestEnv, TestIo};
 
-            let err =
-                validate_exec_syntax(&ctx, command).err_or_abort("expected invalid exec syntax");
-            assert!(
-                matches!(&err, FactorError::InvalidExecSyntax(found) if found == command),
-                "err was: {err:?}"
-            );
-        }
+        let dir = TempDir::new().or_abort("tempdir");
+        let repo = dir.path();
+        let command = "if )";
+        let runner = ScriptedRunner::default().with_status(
+            "bash",
+            &["--norc", "--noprofile", "-n", "-c", command],
+            &[],
+            true,
+            repo,
+            2,
+        );
+        let io = TestIo::default();
+        let env = TestEnv {
+            cwd: repo.to_path_buf(),
+        };
+        let ctx = Ctx {
+            runner: &runner,
+            cwd: repo.to_path_buf(),
+            io: &io,
+            env: &env,
+            fs: &REAL_FS,
+        };
+
+        let err = validate_exec_syntax(&ctx, command).err_or_abort("expected invalid exec syntax");
+        assert!(
+            matches!(&err, FactorError::InvalidExecSyntax(found) if found == command),
+            "err was: {err:?}"
+        );
     }
 
     #[test]
