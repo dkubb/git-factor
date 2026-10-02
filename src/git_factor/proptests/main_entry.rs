@@ -177,3 +177,43 @@ proptest! {
         prop_assert_eq!(&fixture.direct_files_after(), &fixture.direct_files_before);
     }
 }
+
+proptest! {
+    #[test]
+    fn refuses_initial_state_creation_after_passing_gate(
+        shas in prop::collection::vec(
+            string_regex("[0-9a-f]{40}").or_abort("SHA strategy"), 1..=4,
+        ),
+        root in any::<bool>(),
+        stdout in string_regex("[a-z]{0,12}").or_abort("stdout strategy"),
+        stderr in string_regex("[a-z]{0,12}").or_abort("stderr strategy"),
+    ) {
+        use crate::git_factor::tests::start_contracts::state_creation;
+
+        let selected = NonEmpty::from_vec(
+            shas.into_iter().map(|sha| CommitSha::new(sha).or_abort("admitted SHA")).collect(),
+        ).or_abort("nonempty generated span");
+        let fixture = state_creation::direct_start(&selected, root, &stdout, &stderr);
+        let fault = state_creation::RefusingStateCreationFs::default();
+        let mut ctx = fixture.ctx();
+        ctx.fs = &fault;
+
+        let result = cmd_start_with_resolved_in(
+            &ctx, &fixture.exec, &fixture.state, &fixture.selected,
+        );
+
+        prop_assert_eq!(
+            result.map_err(|err| err.to_string()),
+            Err("failed to write state: factor state creation refused".to_owned()),
+        );
+        prop_assert_eq!(fixture.io.stdout(), stdout);
+        prop_assert_eq!(fixture.io.stderr(), stderr);
+        prop_assert_eq!(fixture.observed_journal(), None);
+        prop_assert_eq!(&fixture.observed_calls(), &fixture.expected_calls);
+        prop_assert_eq!(fixture.remaining_keys(), Vec::<String>::new());
+        let attempts = fault.attempts.borrow().clone();
+        prop_assert_eq!(attempts, vec![fixture.state.as_path().to_path_buf()]);
+        // Only net contents/layout inside this tempdir, excluding factor state.
+        prop_assert_eq!(&fixture.direct_files_after(), &fixture.direct_files_before);
+    }
+}

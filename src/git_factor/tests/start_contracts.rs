@@ -4,6 +4,9 @@ pub(in crate::git_factor) mod query;
 #[path = "start_replay_contracts.rs"]
 pub(in crate::git_factor) mod replay;
 
+#[path = "start_state_creation_contracts.rs"]
+pub(in crate::git_factor) mod state_creation;
+
 use super::*;
 use alloc::collections::BTreeMap;
 use core::cell::Cell;
@@ -114,10 +117,6 @@ struct ObservedRunner {
 }
 
 impl ObservedRunner {
-    #[expect(
-        clippy::single_call_fn,
-        reason = "pre-gate request script in production order, apart from expected-output literals"
-    )]
     fn admission(
         repo: &Path,
         shas: &NonEmpty<CommitSha>,
