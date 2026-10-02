@@ -3915,3 +3915,39 @@ fn run_start_rebase_preserves_begin_executable_failure_boundary() {
     assert_eq!(fixture.remaining_executable_replies(), 0);
     assert_eq!(fixture.remaining_keys(), Vec::<String>::new());
 }
+
+#[test]
+fn cmd_start_refuses_non_ancestor_before_gate_or_journal() {
+    use crate::git_factor::tests::start_contracts::query;
+    use crate::git_factor::tests::start_contracts::query::{
+        QueryCase, QueryPosition, QueryReply, QueryTarget,
+    };
+
+    let selected = NonEmpty::from_vec(vec![
+        CommitSha::new("a".repeat(SHA_LEN)).or_abort("first SHA"),
+        CommitSha::new("b".repeat(SHA_LEN)).or_abort("second SHA"),
+    ])
+    .or_abort("nonempty span");
+    let case = QueryCase::Failure {
+        target: QueryTarget::Ancestor(QueryPosition::First),
+        reply: QueryReply::Rejected,
+    };
+    let fixture = query::direct_start(&selected, false, &case, "gate out", "gate err");
+    let ctx = fixture.ctx();
+
+    let result = cmd_start_with_resolved_in(&ctx, &fixture.exec, &fixture.state, &fixture.selected);
+
+    assert_eq!(
+        result.map_err(|err| err.to_string()),
+        Err(
+            "commit aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa is not an ancestor of HEAD".to_owned()
+        )
+    );
+    assert_eq!(fixture.io.stdout(), "");
+    assert_eq!(fixture.io.stderr(), "");
+    assert_eq!(fixture.observed_journal(), None);
+    assert_eq!(fixture.observed_calls(), fixture.expected_calls);
+    assert_eq!(fixture.remaining_keys(), Vec::<String>::new());
+    // Only net contents/layout inside this tempdir, excluding factor state.
+    assert_eq!(fixture.direct_files_after(), fixture.direct_files_before);
+}
