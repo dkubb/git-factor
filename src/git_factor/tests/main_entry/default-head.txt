@@ -1,0 +1,19 @@
+FACTOR: Split session started for aaaaaaa.
+ORIGINAL MESSAGE: subject
+UNSTAGED:
+  file | 1 +
+   1 file changed, 1 insertion(+)
+
+NEXT: Stage changes for the first atomic commit, then run:
+  git factor --continue --message "type: description"
+
+Run git factor -h for command help or git-factor --help for the full workflow guide.
+
+HINTS:
+  - Find the ONE smallest addition nothing depends on
+  - Target 15-30 lines (50 max)
+  - Message: single concrete action, no "and"/"or"
+  - Verify: git log --oneline | wc -l
+  - NEVER use git commit. ONLY use git factor --continue.
+  REMAINING:  1 file changed, 1 insertion(+)
+  RECOVERY: git factor --abort

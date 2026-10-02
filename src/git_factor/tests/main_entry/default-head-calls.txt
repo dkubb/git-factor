@@ -1,0 +1,17 @@
+output git ["rev-parse", "--git-dir"]
+output git ["rev-parse", "--git-dir"]
+output git ["status", "--porcelain=v1"]
+output git ["rev-parse", "--verify", "HEAD"]
+output git ["rev-parse", "--verify", "HEAD"]
+status git ["merge-base", "--is-ancestor", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "HEAD"] [] quiet=true
+output git ["cat-file", "commit", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]
+output git ["rev-parse", "--short", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]
+output git ["show", "--format=%B", "--no-patch", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]
+status bash ["--norc", "--noprofile", "-n", "-c", "true"] [] quiet=true
+output bash ["-c", "true"]
+output git ["status", "--porcelain=v1"]
+output git ["rev-parse", "HEAD^{tree}"]
+status git ["reset", "--quiet", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa^"] [] quiet=false
+output git ["diff", "--stat"]
+output git ["ls-files", "--others", "--exclude-standard"]
+output git ["rev-parse", "--show-toplevel"]

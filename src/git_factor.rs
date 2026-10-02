@@ -2216,13 +2216,7 @@ fn run_with_args_vec(ctx: &Ctx<'_>, args: Vec<OsString>) -> Result<i32, FactorEr
     }
 
     if cli.retry() {
-        if cli.continue_flag()
-            || cli.finish()
-            || has_start_args()
-            || !cli.message().is_empty()
-            || cli.abort()
-            || cli.status()
-        {
+        if cli.continue_flag() || cli.finish() || has_start_args() || !cli.message().is_empty() {
             return Err(FactorError::Usage(non_empty_msg(
                 "--retry cannot be combined with other options".to_owned(),
             )));
@@ -2245,26 +2239,21 @@ fn run_with_args_vec(ctx: &Ctx<'_>, args: Vec<OsString>) -> Result<i32, FactorEr
                 "--continue cannot be combined with --exec or COMMIT".to_owned(),
             )));
         }
-        if cli.message().is_empty() {
-            if !is_factor_active_in(ctx) {
-                return Err(FactorError::Usage(non_empty_msg(
-                    "--continue requires --message <MSG>".to_owned(),
-                )));
-            }
-            let session = Session::from_active(ctx)?;
-            if session.phase(SessionPhase::Splitting)? == SessionPhase::PendingStart {
-                return cmd_continue_pending_start_in(ctx);
-            }
+        if let Some(messages) = NonEmpty::from_vec(cli.message().to_vec()) {
+            return cmd_continue_in(ctx, &messages);
+        }
+        if !is_factor_active_in(ctx) {
             return Err(FactorError::Usage(non_empty_msg(
                 "--continue requires --message <MSG>".to_owned(),
             )));
         }
-        let messages = NonEmpty::from_vec(cli.message().to_vec()).ok_or_else(|| {
-            FactorError::Usage(non_empty_msg(
-                "--continue requires --message <MSG>".to_owned(),
-            ))
-        })?;
-        return cmd_continue_in(ctx, &messages);
+        let session = Session::from_active(ctx)?;
+        if session.phase(SessionPhase::Splitting)? == SessionPhase::PendingStart {
+            return cmd_continue_pending_start_in(ctx);
+        }
+        return Err(FactorError::Usage(non_empty_msg(
+            "--continue requires --message <MSG>".to_owned(),
+        )));
     }
 
     let exec = NonEmpty::from_vec(cli.exec().to_vec()).ok_or_else(|| {

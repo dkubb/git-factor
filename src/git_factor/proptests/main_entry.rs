@@ -1,14 +1,23 @@
 use super::*;
+use crate::exit_codes::{EXIT_OK, EXIT_SOFTWARE, EXIT_USAGE};
 use crate::git_factor::tests::abort_contracts;
 use crate::git_factor::tests::continue_contracts;
+use crate::git_factor::tests::dispatch_contracts::{
+    HeadResolutionFault, ReopenFault, default_head_failure, default_head_success, dirty_route,
+    parser, parser_write_failure, refusal, reopen_failure, supplied_commit_failure,
+    supplied_commit_success,
+};
 use crate::git_factor::tests::start_contracts::launcher::{LaunchFault, LaunchFixture};
 use crate::git_factor::tests::start_contracts::replay;
 use crate::git_factor::tests::start_contracts::{DirectStart, GateCase, query};
 use crate::git_factor::tests::status_contracts;
 use crate::git_factor::tests::verify_public_abort_fallback_refusal;
 use crate::git_factor::tests::verify_public_status_phase_refusal;
+use core::iter::repeat_n;
 use core::num::{NonZeroU8, NonZeroUsize};
 use core::ops::RangeInclusive;
+use proptest::collection::vec as generated_bytes;
+use proptest::prelude::*;
 
 proptest! {
     #[test]
@@ -932,5 +941,272 @@ proptest! {
         prop_assert_eq!(fixture.journal(), journal);
         prop_assert_eq!(fixture.protected_bytes(), bytes);
         prop_assert_eq!(fixture.full_effect_requests(), fixture.expected_effect_requests());
+    }
+}
+
+proptest! {
+    #[test]
+    fn public_continue_routes_generated_no_message_active_phases(
+        original in string_regex("[0-9a-f]{40}").or_abort("original identity"),
+        pending in any::<bool>(),
+    ) {
+        use continue_contracts::{Continuation, ContinueCase, ContinueState};
+        let fixture = if pending {
+            Continuation::with_state(&original, ContinueState::Pending)
+        } else {
+            Continuation::new(&original, 0, ContinueCase::Remainder)
+        };
+        let journal = fixture.journal();
+        let bytes = fixture.protected_bytes();
+        let args = ["git-factor", "--continue"].map(OsString::from);
+        let (expected_code, stderr) = if pending {
+            (EXIT_SOFTWARE, concat!(
+                "git command failed: baseline commit must be fully clean before opening the split session\n",
+                "STATUS:\nM  file.txt\n",
+            ))
+        } else {
+            (EXIT_USAGE, "--continue requires --message <MSG>\n")
+        };
+
+        let code = main_entry_with_vec(fixture.ctx().io, Ok(fixture.ctx()), &args);
+
+        prop_assert_eq!(code, expected_code);
+        prop_assert_eq!(fixture.stdout(), "");
+        prop_assert_eq!(fixture.stderr(), stderr);
+        prop_assert_eq!(fixture.journal(), journal);
+        prop_assert_eq!(fixture.protected_bytes(), bytes);
+        prop_assert_eq!(fixture.effect_requests(), Vec::<Vec<String>>::new());
+    }
+}
+
+proptest! {
+    #[test]
+    fn message_text_never_overrides_query_or_retry(
+        operation in prop::sample::select(vec!["--status", "--retry"]),
+        message in "[a-zA-Z][a-zA-Z0-9 ]{0,40}",
+    ) {
+        let diagnostic = match operation {
+            "--status" => "--status cannot be combined with other options",
+            _ => "--retry cannot be combined with other options",
+        };
+        refusal(&[operation, "--message", &message], diagnostic);
+    }
+
+    #[test]
+    fn gate_text_never_overrides_explicit_operation(
+        operation in prop::sample::select(vec!["--abort", "--status", "--retry", "--finish", "--continue"]),
+        gate in "[a-zA-Z][a-zA-Z0-9 ]{0,40}",
+    ) {
+        let diagnostic = match operation {
+            "--abort" => "--abort cannot be combined with other options",
+            "--status" => "--status cannot be combined with other options",
+            "--retry" => "--retry cannot be combined with other options",
+            "--finish" => "--finish cannot be combined with --continue, --exec, or COMMIT",
+            _ => "--continue cannot be combined with --exec or COMMIT",
+        };
+        refusal(&[operation, "--exec", &gate], diagnostic);
+    }
+}
+
+proptest! {
+    #[test]
+    fn help_spelling_preserves_the_complete_stream(explicit in any::<bool>()) {
+        let arguments: &[&str] = if explicit { &["--help"] } else { &[] };
+        parser(arguments, EXIT_OK, include_str!("../tests/main_entry/help.txt"), "");
+    }
+}
+
+proptest! {
+    #[test]
+    fn hidden_preflight_index_does_not_bypass_cleanliness(index in any::<usize>()) {
+        dirty_route(&["rebase-exec-preflight", &index.to_string(), "true"], EXIT_SOFTWARE, "git command failed: cannot run the start gate because the repository is not clean\nSTATUS:\n M unrelated", &["git rev-parse --git-dir", "git status --porcelain=v1", "git rev-parse --git-dir"]);
+    }
+}
+
+proptest! {
+    #[test]
+    fn parser_write_failures_preserve_user_bytes(
+        arguments in prop::sample::select(vec![vec!["--help"], vec!["--not-real"], Vec::<&str>::new()]),
+    ) {
+        parser_write_failure(&arguments);
+    }
+}
+
+proptest! {
+    #[test]
+    fn incompatible_operation_inputs_preserve_the_public_refusal(
+        case in prop::sample::select(vec![
+            ("abort","--status","--abort cannot be combined with other options"),
+            ("abort","--continue","--abort cannot be combined with other options"),
+            ("abort","--retry","--abort cannot be combined with other options"),
+            ("abort","--finish","--abort cannot be combined with other options"),
+            ("abort","--exec","--abort cannot be combined with other options"),
+            ("abort","HEAD","--abort cannot be combined with other options"),
+            ("status","--continue","--status cannot be combined with other options"),
+            ("status","--retry","--status cannot be combined with other options"),
+            ("status","--finish","--status cannot be combined with other options"),
+            ("status","--exec","--status cannot be combined with other options"),
+            ("status","HEAD","--status cannot be combined with other options"),
+            ("status","--message","--status cannot be combined with other options"),
+            ("retry","--continue","--retry cannot be combined with other options"),
+            ("retry","--finish","--retry cannot be combined with other options"),
+            ("retry","--exec","--retry cannot be combined with other options"),
+            ("retry","HEAD","--retry cannot be combined with other options"),
+            ("retry","--message","--retry cannot be combined with other options"),
+            ("finish","--continue","--finish cannot be combined with --continue, --exec, or COMMIT"),
+            ("finish","--exec","--finish cannot be combined with --continue, --exec, or COMMIT"),
+            ("finish","HEAD","--finish cannot be combined with --continue, --exec, or COMMIT"),
+            ("continue","--exec","--continue cannot be combined with --exec or COMMIT"),
+            ("continue","HEAD","--continue cannot be combined with --exec or COMMIT")
+        ]),
+        value in "[a-zA-Z][a-zA-Z0-9 ]{0,40}",
+    ) {
+        let (operation, other, diagnostic) = case;
+        let flag = format!("--{operation}");
+        let mut arguments = vec![flag.as_str(), other];
+        if matches!(other, "--exec" | "--message") { arguments.push(&value); }
+        refusal(&arguments, diagnostic);
+    }
+
+    #[test]
+    fn implicit_head_success_preserves_selected_identity(
+        sha in "[0-9a-f]{40}",
+    ) {
+        default_head_success(&sha);
+    }
+
+    #[test]
+    fn implicit_head_resolution_faults_preserve_the_public_error(
+        fault in prop::sample::select(vec![HeadResolutionFault::LaunchFailure, HeadResolutionFault::NonzeroExit]),
+    ) {
+        default_head_failure(fault);
+    }
+
+    #[test]
+    fn unknown_flags_preserve_the_exact_parser_error(suffix in "[0-9]{1,12}") {
+        let flag = format!("--zzzzzzzzzz-{suffix}");
+        let diagnostic = format!("error: unexpected argument '{flag}' found\n\n  tip: to pass '{flag}' as a value, use '-- {flag}'\n\nUsage: git-factor [OPTIONS] [COMMIT]...\n\nFor more information, try '--help'.\n");
+        parser(&[&flag], EXIT_USAGE, "", &diagnostic);
+    }
+
+    #[test]
+    fn version_spelling_preserves_the_exact_stream(explicit in any::<bool>()) {
+        let flag = if explicit { "--version" } else { "-v" };
+        parser(&[flag], EXIT_OK, "git-factor 0.1.0\n", "");
+    }
+
+    #[test]
+    fn begin_index_and_root_flag_do_not_bypass_cleanliness(index in any::<usize>(), root in any::<bool>()) {
+        dirty_route(&["rebase-exec-begin", &index.to_string(), "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", if root { "true" } else { "false" }, "true", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"], EXIT_SOFTWARE, "git command failed: cannot begin the factor session because the repository is not clean\nSTATUS:\n M unrelated", &["git status --porcelain=v1", "git rev-parse --git-dir"]);
+    }
+
+    #[test]
+    fn default_head_gate_text_does_not_bypass_cleanliness(gate in "[a-zA-Z][a-zA-Z0-9 ]{0,40}") {
+        dirty_route(&["--exec", &gate], EXIT_SOFTWARE, "git command failed: working tree must be clean before starting; stash, commit, or remove local changes\nSTATUS:\n M unrelated", &["git rev-parse --git-dir", "git rev-parse --git-dir", "git status --porcelain=v1", "git rev-parse --git-dir"]);
+    }
+
+    #[test]
+    fn retry_and_continue_require_a_session(operation in prop::sample::select(vec!["--retry", "--continue"])) {
+        let diagnostic = if operation == "--retry" { "no active factor session" } else { "--continue requires --message <MSG>" };
+        dirty_route(&[operation], EXIT_USAGE, diagnostic, &["git rev-parse --git-dir"]);
+    }
+}
+
+proptest! {
+    #[test]
+    fn callback_arity_is_refused_before_any_route(
+        begin in any::<bool>(),
+        count in prop::sample::select(vec![usize::MIN, 1, 3, 4, 6, 7]),
+    ) {
+        let command = if begin { "rebase-exec-begin" } else { "rebase-exec-preflight" };
+        let diagnostic = if begin { "rebase-exec-begin requires exactly five arguments: current-index, start-head, is-root, exec-command, and commits" } else { "rebase-exec-preflight requires exactly two arguments: current-index and exec-command" };
+        let mut arguments = vec![command];
+        arguments.extend(repeat_n("argument", count));
+        refusal(&arguments, diagnostic);
+    }
+
+    #[test]
+    fn commit_without_gate_is_refused_before_any_route(commit in "[a-zA-Z][a-zA-Z0-9_-]{0,40}") {
+        refusal(&[&commit], "--exec <COMMAND> is required when starting a factor session");
+    }
+
+    #[test]
+    fn baseline_message_without_an_operation_is_refused(
+        gate in "[a-zA-Z][a-zA-Z0-9 ]{0,40}",
+        message in "[a-zA-Z][a-zA-Z0-9 ]{0,40}",
+    ) {
+        refusal(&["--exec", &gate, "--message", &message], "--message can only be used with --continue or --finish");
+    }
+}
+
+proptest! {
+    #[test]
+    fn parser_suggestions_preserve_the_exact_stream(flag in prop::sample::select(vec!["--not-iu", "--continu"])) {
+        let diagnostic = format!("error: unexpected argument '{flag}' found\n\n  tip: a similar argument exists: '--continue'\n\nUsage: git-factor --continue [COMMIT]...\n\nFor more information, try '--help'.\n");
+        parser(&[flag], EXIT_USAGE, "", &diagnostic);
+    }
+}
+
+proptest! {
+    #[test]
+    fn finish_message_presence_preserves_the_session_requirement(
+        message in prop::option::of("[a-zA-Z][a-zA-Z0-9 ]{0,40}"),
+    ) {
+        let arguments = message.as_deref().map_or_else(
+            || vec!["--finish"],
+            |text| vec!["--finish", "--message", text],
+        );
+        dirty_route(&arguments, EXIT_USAGE, "no active factor session", &["git rev-parse --git-dir"]);
+    }
+}
+
+proptest! {
+    #[test]
+    fn continue_without_message_preserves_generated_session_reopen_failures(
+        fault in prop_oneof![Just(ReopenFault::GitDirectory), Just(ReopenFault::PhaseEncoding), Just(ReopenFault::PhaseValue)],
+        sha in "[0-9a-f]{40}",
+        phase_suffix in "[a-z]{1,16}",
+        user_bytes in generated_bytes(any::<u8>(), 0..32),
+    ) {
+        reopen_failure(fault, &sha, &format!("unsupported-{phase_suffix}"), &user_bytes);
+    }
+}
+
+proptest! {
+    #[test]
+    fn supplied_commit_starts_generated_selected_pools(
+        sha in "[0-9a-f]{40}", revision_suffix in "[a-z]{1,16}",
+    ) {
+        supplied_commit_success(&sha, &format!("topic-{revision_suffix}"));
+    }
+
+    #[test]
+    fn message_only_without_exec_preserves_generated_refusals(
+        message in "[a-zA-Z][a-zA-Z0-9 ]{0,40}",
+    ) {
+        refusal(&["--message", &message], "--exec <COMMAND> is required when starting a factor session");
+    }
+}
+
+proptest! {
+    #[test]
+    fn supplied_commit_preparation_preserves_generated_dirty_refusals(
+        revision_suffix in "[a-z]{1,16}",
+    ) {
+        dirty_route(
+            &["--exec", "true", &format!("topic-{revision_suffix}")],
+            EXIT_SOFTWARE,
+            "git command failed: working tree must be clean before starting; stash, commit, or remove local changes\nSTATUS:\n M unrelated",
+            &["git rev-parse --git-dir", "git rev-parse --git-dir", "git status --porcelain=v1", "git rev-parse --git-dir"],
+        );
+    }
+
+    #[test]
+    fn supplied_commit_resolution_preserves_generated_rejections(
+        revision_suffix in "[a-z]{1,16}",
+        rejected_exit in RangeInclusive::<u8>::new(1, u8::MAX),
+        user_bytes in generated_bytes(any::<u8>(), 0..32),
+    ) {
+        supplied_commit_failure(&format!("topic-{revision_suffix}"), rejected_exit, &user_bytes);
     }
 }
