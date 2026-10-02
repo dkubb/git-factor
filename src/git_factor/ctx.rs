@@ -242,3 +242,15 @@ impl Ctx<'_> {
         self.io.outln(line).map_err(FactorError::Io)
     }
 }
+
+#[cfg(test)]
+#[path = "ctx/status_contracts.rs"]
+mod status_contracts;
+
+#[cfg(test)]
+#[path = "ctx/status_units.rs"]
+mod tests;
+
+#[cfg(test)]
+#[path = "ctx/status_properties.rs"]
+mod proptests;
