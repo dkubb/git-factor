@@ -747,7 +747,12 @@ mod tests {
 
             let stdout = match *args {
                 ["rev-parse", "--git-dir"] => b".git\n".to_vec(),
-                ["status", "--porcelain=v1", "--untracked-files=all"] => Vec::new(),
+                [
+                    "--no-optional-locks",
+                    "status",
+                    "--porcelain=v1",
+                    "--untracked-files=all",
+                ] => Vec::new(),
                 _ => b"deadbeef\n".to_vec(),
             };
 

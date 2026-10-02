@@ -12,7 +12,15 @@ pub(in crate::git_factor::trace) enum CommandObservation {
 
 impl Runner for CommandObservation {
     fn output(&self, bin: &str, args: &[&str], _cwd: &Path) -> io::Result<Output> {
-        if bin != "git" || args != ["status", "--porcelain=v1", "--untracked-files=all"] {
+        if bin != "git"
+            || args
+                != [
+                    "--no-optional-locks",
+                    "status",
+                    "--porcelain=v1",
+                    "--untracked-files=all",
+                ]
+        {
             return Err(io::Error::other("unexpected command observation"));
         }
         match self.clone() {

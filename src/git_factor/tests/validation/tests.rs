@@ -477,7 +477,7 @@ mod resolve_commit {
                 )
                 .to_owned(),
                 concat!(
-                    r#"output git ["status", "--porcelain=v1", "--untracked-files=all"]"#,
+                    r#"output git ["--no-optional-locks", "status", "--porcelain=v1", "--untracked-files=all"]"#,
                     r#" cwd="/contract/repository""#,
                 )
                 .to_owned(),

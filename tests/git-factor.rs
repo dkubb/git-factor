@@ -2337,6 +2337,116 @@ fi
     }
 
     #[test]
+    #[cfg(unix)]
+    #[expect(
+        clippy::literal_string_with_formatting_args,
+        reason = "Git's tree revision syntax is literal input"
+    )]
+    fn status_trace_preserves_raw_index_after_ignored_hardlink_creation() {
+        use core::time::Duration;
+        use std::os::unix::fs::MetadataExt as _;
+        use std::thread::sleep;
+
+        let dir = init_repo();
+        let repo = dir.path();
+        git(repo, &["config", "core.trustctime", "true"]);
+        commit_file(
+            repo,
+            ".gitignore",
+            "ignored-link\nunrelated.txt\n",
+            "Add ignores",
+        );
+        commit_file(repo, "tracked.txt", "tracked bytes\n", "Add tracked file");
+        // Cache a clean stat entry before changing only the tracked inode's ctime.
+        git(repo, &["status", "--porcelain=v1", "--untracked-files=all"]);
+        fs::write(repo.join("unrelated.txt"), b"unrelated user bytes\n").or_abort();
+        let original = fs::metadata(repo.join("tracked.txt")).or_abort();
+        // Git builds may compare ctime only at whole-second resolution.
+        sleep(Duration::from_millis(1100));
+        fs::hard_link(repo.join("tracked.txt"), repo.join("ignored-link")).or_abort();
+        let linked = fs::metadata(repo.join("tracked.txt")).or_abort();
+        let alias = fs::metadata(repo.join("ignored-link")).or_abort();
+        assert_eq!((linked.dev(), linked.ino()), (alias.dev(), alias.ino()));
+        assert_eq!(original.modified().or_abort(), linked.modified().or_abort());
+        assert_ne!(original.ctime(), linked.ctime());
+        let index_path = git_dir(repo).join("index");
+        let index_before = fs::read(&index_path).or_abort();
+        let head = git(repo, &["rev-parse", "HEAD"]);
+        let tree = git(repo, &["rev-parse", "HEAD^{tree}"]);
+        let refs = git(repo, &["show-ref"]);
+        let snapshot_git_dir = git(repo, &["rev-parse", "--absolute-git-dir"]);
+        let snapshot_toplevel = git(repo, &["rev-parse", "--show-toplevel"]);
+        let (wrapper_dir, wrapper_bin) = make_git_wrapper_named("git", "");
+        let path = format!("{}:{}", wrapper_bin.display(), env::var("PATH").or_abort());
+        let trace_dir = TempDir::new().or_abort();
+        let trace_path = trace_dir.path().join("status.jsonl");
+
+        let output = Command::new(git_factor_bin())
+            .current_dir(repo)
+            .env_remove("CLAUDECODE")
+            .env("PATH", path)
+            .env("GIT_FACTOR_TRACE_LOG", &trace_path)
+            .args(["--status"])
+            .output()
+            .or_abort();
+
+        assert_eq!(output.status.code(), Some(EXIT_OK));
+        assert_eq!(output.stdout.as_slice(), b"FACTOR: No active session.\n");
+        assert_eq!(output.stderr.as_slice(), b"");
+        assert_eq!(fs::read(&index_path).or_abort(), index_before);
+        assert_eq!(
+            (
+                git(repo, &["rev-parse", "HEAD"]),
+                git(repo, &["rev-parse", "HEAD^{tree}"]),
+                git(repo, &["show-ref"])
+            ),
+            (head.clone(), tree.clone(), refs)
+        );
+        assert_eq!(
+            fs::read(repo.join("tracked.txt")).or_abort(),
+            b"tracked bytes\n"
+        );
+        assert_eq!(
+            fs::read(repo.join("ignored-link")).or_abort(),
+            b"tracked bytes\n"
+        );
+        assert_eq!(
+            fs::read(repo.join("unrelated.txt")).or_abort(),
+            b"unrelated user bytes\n"
+        );
+        assert!(!git_dir(repo).join("factor").exists());
+        let trace = fs::read_to_string(trace_path).or_abort();
+        let notes = trace
+            .lines()
+            .filter(|line| line.contains("\"event\":\"factor_cmd_status\""))
+            .collect::<Vec<_>>();
+        assert_eq!(notes.len(), 1);
+        let note = notes.first().or_abort();
+        let without_prefix = note.strip_prefix("{\"ts_unix_ms\":").or_abort();
+        let (timestamp, fields) = without_prefix.split_once(',').or_abort();
+        assert!(timestamp.parse::<u64>().or_abort() > 0);
+        let expected = format!(
+            concat!(
+                "\"event\":\"factor_cmd_status\",",
+                "\"state_head\":\"{head}\",\"state_head_tree\":\"{tree}\",",
+                "\"state_git_dir\":\"{git_dir}\",\"state_toplevel\":\"{toplevel}\",",
+                "\"state_staged_paths\":[],\"state_unstaged_paths\":[],\"state_untracked_paths\":[],",
+                "\"state_factor_current_index\":null,\"state_factor_split_count\":null,",
+                "\"state_factor_requires_rebase\":null,\"state_factor_expected_tree\":null,",
+                "\"state_factor_current_commit\":null,\"state_rebase_state\":null,",
+                "\"state_rebase_msgnum\":null,\"state_rebase_end\":null,",
+                "\"state_rebase_todo_head\":null,\"state_rebase_done_tail\":null}}",
+            ),
+            head = head,
+            tree = tree,
+            git_dir = snapshot_git_dir,
+            toplevel = snapshot_toplevel
+        );
+        assert_eq!(fields, expected);
+        drop(wrapper_dir);
+    }
+
+    #[test]
     fn status_trace_collects_paths_and_ignores_short_status_lines() {
         let dir = init_repo();
         let repo = dir.path();
@@ -2344,7 +2454,7 @@ fi
 
         let (wrap_dir, wrap_bin) = make_git_wrapper_named(
             "git",
-            r#"if [ "${1-}" = "status" ] && [ "${2-}" = "--porcelain=v1" ] && [ "${3-}" = "--untracked-files=all" ]; then
+            r#"if [ "${1-}" = "--no-optional-locks" ] && [ "${2-}" = "status" ] && [ "${3-}" = "--porcelain=v1" ] && [ "${4-}" = "--untracked-files=all" ]; then
   printf ' M unstaged.txt\n'
   printf 'M\n'
   printf 'A  staged.txt\n'
@@ -2388,7 +2498,7 @@ fi
 
         let (wrap_dir, wrap_bin) = make_git_wrapper_named(
             "git",
-            r#"if [ "${1-}" = "status" ] && [ "${2-}" = "--porcelain=v1" ] && [ "${3-}" = "--untracked-files=all" ]; then
+            r#"if [ "${1-}" = "--no-optional-locks" ] && [ "${2-}" = "status" ] && [ "${3-}" = "--porcelain=v1" ] && [ "${4-}" = "--untracked-files=all" ]; then
   printf 'MM\n??\n M\nMM \n'
   printf ' M unstaged.txt\n'
   printf '?? \n'
