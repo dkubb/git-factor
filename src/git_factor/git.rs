@@ -304,6 +304,91 @@ pub(in crate::git_factor) fn run_git_with(
 
 #[cfg(test)]
 mod tests {
+    mod git_output {
+        use super::*;
+
+        #[test]
+        fn successful_output_is_lossy_decoded_and_trimmed() {
+            let runner = OutputOnlyRunner {
+                output: Some(Output {
+                    status: ExitStatus::from_raw(0),
+                    stdout: b" \tresult\xff\r\n".to_vec(),
+                    stderr: b"ignored successful stderr".to_vec(),
+                }),
+                ..OutputOnlyRunner::default()
+            };
+            let environment = TestEnv {
+                cwd: PathBuf::from("."),
+                trace_log: None,
+            };
+            let io = BufferIo::default();
+            let ctx = arrange_query_context(&runner, &environment, &io);
+
+            let result = super::super::git_output(&ctx, &["rev-parse", "--short", "HEAD"]);
+
+            assert_eq!(result.or_abort("query succeeds"), "result\u{fffd}");
+        }
+
+        #[test]
+        fn spawn_failure_preserves_command_and_diagnostic() {
+            let runner = OutputOnlyRunner {
+                fail_output: true,
+                ..OutputOnlyRunner::default()
+            };
+            let environment = TestEnv {
+                cwd: PathBuf::from("."),
+                trace_log: None,
+            };
+            let io = BufferIo::default();
+            let ctx = arrange_query_context(&runner, &environment, &io);
+
+            let result = super::super::git_output(&ctx, &["rev-parse", "--short", "HEAD"]);
+
+            let error = result.err_or_abort("query cannot spawn");
+            assert!(
+                matches!(
+                    &error,
+                    FactorError::GitCommand(message)
+                        if message.as_str() == "git rev-parse: forced output failure"
+                ),
+                "unexpected error: {error:?}"
+            );
+        }
+        #[test]
+        fn nonempty_stderr_is_preserved() {
+            let exit_code: i32 = 42;
+            let runner = OutputOnlyRunner {
+                output: Some(Output {
+                    status: ExitStatus::from_raw(
+                        exit_code
+                            .checked_shl(u8::BITS)
+                            .or_abort("native wait-status shift count is below the i32 width"),
+                    ),
+                    stdout: Vec::new(),
+                    stderr: b" \tfatal: query failed\r\n".to_vec(),
+                }),
+                ..OutputOnlyRunner::default()
+            };
+            let environment = TestEnv {
+                cwd: PathBuf::from("."),
+                trace_log: None,
+            };
+            let io = BufferIo::default();
+            let ctx = arrange_query_context(&runner, &environment, &io);
+
+            let result = super::super::git_output(&ctx, &["rev-parse", "--short", "HEAD"]);
+
+            let error = result.err_or_abort("captured query must fail");
+            assert!(
+                matches!(
+                    &error,
+                    FactorError::GitCommand(message) if message.as_str() == "fatal: query failed"
+                ),
+                "unexpected error: {error:?}"
+            );
+        }
+    }
+
     use super::*;
     use std::env;
     use std::ffi::OsString;
@@ -313,9 +398,13 @@ mod tests {
     use std::sync::{Mutex, PoisonError};
     use tempfile::TempDir;
 
-    struct TestEnv {
-        cwd: PathBuf,
-        trace_log: Option<OsString>,
+    #[expect(
+        clippy::field_scoped_visibility_modifiers,
+        reason = "private unit and property providers share these arrange-only fixture fields"
+    )]
+    pub(in crate::git_factor::git) struct TestEnv {
+        pub(in crate::git_factor::git) cwd: PathBuf,
+        pub(in crate::git_factor::git) trace_log: Option<OsString>,
     }
 
     impl Env for TestEnv {
@@ -363,7 +452,7 @@ mod tests {
     }
 
     #[derive(Default)]
-    struct BufferIo {
+    pub(in crate::git_factor::git) struct BufferIo {
         stderr: Mutex<String>,
         stdout: Mutex<String>,
     }
@@ -442,9 +531,13 @@ mod tests {
     }
 
     #[derive(Default)]
-    struct OutputOnlyRunner {
-        fail_output: bool,
-        output: Option<Output>,
+    #[expect(
+        clippy::field_scoped_visibility_modifiers,
+        reason = "private unit and property providers share these arrange-only fixture fields"
+    )]
+    pub(in crate::git_factor::git) struct OutputOnlyRunner {
+        pub(in crate::git_factor::git) fail_output: bool,
+        pub(in crate::git_factor::git) output: Option<Output>,
     }
 
     impl Runner for OutputOnlyRunner {
@@ -530,6 +623,20 @@ mod tests {
                 return Err(io::Error::other("unexpected envs"));
             }
             Ok(ExitStatus::from_raw(0))
+        }
+    }
+
+    pub(in crate::git_factor::git) fn arrange_query_context<'context>(
+        runner: &'context OutputOnlyRunner,
+        environment: &'context TestEnv,
+        io: &'context BufferIo,
+    ) -> Ctx<'context> {
+        Ctx {
+            cwd: environment.cwd.clone(),
+            runner,
+            env: environment,
+            io,
+            fs: &REAL_FS,
         }
     }
 
@@ -1830,6 +1937,100 @@ mod tests {
 
 #[cfg(test)]
 mod proptests {
+    mod git_output {
+        use super::super::tests::{BufferIo, OutputOnlyRunner, TestEnv, arrange_query_context};
+        use super::*;
+        use std::os::unix::process::ExitStatusExt as _;
+
+        proptest! {
+            #[test]
+            fn preserves_success_bytes_or_spawn_failure(
+                reply in prop_oneof![
+                    Just(None),
+                    vec(any::<u8>(), 0..64).prop_map(Some),
+                ],
+            ) {
+                // A spawn failure carries no unused stdout world. Success bytes independently
+                // determine the exact lossy-decoded, trimmed public response.
+                let expected_reply = reply.as_deref().map(|bytes| {
+                    String::from_utf8_lossy(bytes).trim().to_owned()
+                });
+                let runner = OutputOnlyRunner {
+                    fail_output: reply.is_none(),
+                    output: reply.map(|stdout| Output {
+                        status: ExitStatus::from_raw(0),
+                        stdout,
+                        stderr: b"ignored successful stderr".to_vec(),
+                    }),
+                };
+                let environment = TestEnv {
+                    cwd: PathBuf::from("."),
+                    trace_log: None,
+                };
+                let io = BufferIo::default();
+                let ctx = arrange_query_context(&runner, &environment, &io);
+
+                let result = super::super::git_output(&ctx, &["rev-parse", "--short", "HEAD"]);
+
+                if let Some(expected) = expected_reply {
+                    let Ok(actual) = result else {
+                        return Err(TestCaseError::fail(format!(
+                            "successful output rejected: {result:?}"
+                        )));
+                    };
+                    prop_assert_eq!(actual, expected);
+                } else {
+                    let Err(FactorError::GitCommand(message)) = result else {
+                        return Err(TestCaseError::fail(format!(
+                            "expected spawn diagnostic, observed {result:?}"
+                        )));
+                    };
+                    prop_assert_eq!(
+                        message.as_str(),
+                        "git rev-parse: forced output failure",
+                    );
+                }
+            }
+
+            #[test]
+            fn nonempty_stderr_takes_precedence_over_status(
+                exit_code in 1..=u8::MAX,
+                message in "[A-Za-z0-9_]{1,40}",
+                prefix in "[ \t\r\n]{0,8}",
+                suffix in "[ \t\r\n]{0,8}",
+            ) {
+                let raw_status = i32::from(exit_code)
+                    .checked_shl(u8::BITS)
+                    .or_abort("native wait-status shift count is below the i32 width");
+                let status = ExitStatus::from_raw(raw_status);
+                let diagnostic = format!("{prefix}{message}{suffix}");
+                let runner = OutputOnlyRunner {
+                    output: Some(Output {
+                        status,
+                        stdout: Vec::new(),
+                        stderr: diagnostic.into_bytes(),
+                    }),
+                    ..OutputOnlyRunner::default()
+                };
+                let environment = TestEnv {
+                    cwd: PathBuf::from("."),
+                    trace_log: None,
+                };
+                let io = BufferIo::default();
+                let ctx = arrange_query_context(&runner, &environment, &io);
+
+                let result = super::super::git_output(&ctx, &["rev-parse", "--short", "HEAD"]);
+
+                let Err(FactorError::GitCommand(error_message)) = result else {
+                    return Err(TestCaseError::fail(format!(
+                        "expected GitCommand, observed {result:?}"
+                    )));
+                };
+                prop_assert_eq!(error_message.as_str(), message.as_str());
+            }
+        }
+    }
+
     use core::fmt::Write as _;
 
     use proptest::collection::vec;
