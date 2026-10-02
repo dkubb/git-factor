@@ -247,7 +247,7 @@ impl Fs for NthReadFailureFs {
 }
 
 #[derive(Clone, Default)]
-struct ScriptedRunner {
+pub(in crate::git_factor) struct ScriptedRunner {
     outputs: RefCell<HashMap<String, VecDeque<Output>>>,
     statuses: RefCell<HashMap<String, VecDeque<ExitStatus>>>,
 }
@@ -317,7 +317,7 @@ impl ScriptedRunner {
         self
     }
 
-    fn with_status(
+    pub(in crate::git_factor) fn with_status(
         self,
         bin: &str,
         args: &[&str],
@@ -487,8 +487,12 @@ impl Runner for BashStatusFailureRunner {
     }
 }
 
-struct TestEnv {
-    cwd: PathBuf,
+#[expect(
+    clippy::field_scoped_visibility_modifiers,
+    reason = "sibling canonical validation tests construct the shared root env fixture"
+)]
+pub(in crate::git_factor) struct TestEnv {
+    pub(in crate::git_factor) cwd: PathBuf,
 }
 
 impl Env for TestEnv {
@@ -543,7 +547,7 @@ impl Env for ClaudeCodeEnv {
 }
 
 #[derive(Default)]
-struct TestIo {
+pub(in crate::git_factor) struct TestIo {
     stderr: Mutex<String>,
     stdout: Mutex<String>,
 }
@@ -4904,31 +4908,6 @@ fn main_entry_is_callable() {
 }
 
 #[test]
-fn validate_exec_syntax_reports_spawn_failure_as_git_command() {
-    let dir = TempDir::new().or_abort("tempdir");
-    let repo = dir.path();
-
-    let runner = ScriptedRunner::default();
-    let io = TestIo::default();
-    let env = TestEnv {
-        cwd: repo.to_path_buf(),
-    };
-    let ctx = Ctx {
-        runner: &runner,
-        cwd: repo.to_path_buf(),
-        io: &io,
-        env: &env,
-        fs: &REAL_FS,
-    };
-
-    let err = validate_exec_syntax(&ctx, "echo hi").err_or_abort("expected spawn failure");
-    assert!(
-        matches!(&err, FactorError::GitCommand(msg) if msg.contains("bash syntax check:") && msg.contains("unexpected status call")),
-        "err was: {err:?}"
-    );
-}
-
-#[test]
 fn validate_ancestor_returns_not_ancestor_on_nonzero_status() {
     let dir = TempDir::new().or_abort("tempdir");
     let repo = dir.path();
@@ -4958,38 +4937,6 @@ fn validate_ancestor_returns_not_ancestor_on_nonzero_status() {
     let err = validate_ancestor(&ctx, &commit).err_or_abort("expected not-ancestor error");
     assert!(
         matches!(&err, FactorError::NotAncestor(found) if found.as_str() == commit.as_str()),
-        "err was: {err:?}"
-    );
-}
-
-#[test]
-fn validate_exec_syntax_returns_invalid_exec_syntax_on_nonzero_status() {
-    let dir = TempDir::new().or_abort("tempdir");
-    let repo = dir.path();
-    let command = "if )";
-    let runner = ScriptedRunner::default().with_status(
-        "bash",
-        &["--norc", "--noprofile", "-n", "-c", command],
-        &[],
-        true,
-        repo,
-        2,
-    );
-    let io = TestIo::default();
-    let env = TestEnv {
-        cwd: repo.to_path_buf(),
-    };
-    let ctx = Ctx {
-        runner: &runner,
-        cwd: repo.to_path_buf(),
-        io: &io,
-        env: &env,
-        fs: &REAL_FS,
-    };
-
-    let err = validate_exec_syntax(&ctx, command).err_or_abort("expected invalid exec syntax");
-    assert!(
-        matches!(&err, FactorError::InvalidExecSyntax(found) if found == command),
         "err was: {err:?}"
     );
 }

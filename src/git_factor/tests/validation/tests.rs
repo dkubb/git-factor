@@ -1,3 +1,129 @@
+mod validate_exec_syntax {
+    use super::*;
+
+    mod root {
+        use super::super::*;
+        use crate::git_factor::tests::{ScriptedRunner, TestEnv, TestIo};
+
+        #[test]
+        fn validate_exec_syntax_reports_spawn_failure_as_git_command() {
+            let dir = TempDir::new().or_abort("tempdir");
+            let repo = dir.path();
+
+            let runner = ScriptedRunner::default();
+            let io = TestIo::default();
+            let env = TestEnv {
+                cwd: repo.to_path_buf(),
+            };
+            let ctx = Ctx {
+                runner: &runner,
+                cwd: repo.to_path_buf(),
+                io: &io,
+                env: &env,
+                fs: &REAL_FS,
+            };
+
+            let err = validate_exec_syntax(&ctx, "echo hi").err_or_abort("expected spawn failure");
+            assert!(
+                matches!(&err, FactorError::GitCommand(msg) if msg.contains("bash syntax check:") && msg.contains("unexpected status call")),
+                "err was: {err:?}"
+            );
+        }
+
+        #[test]
+        fn validate_exec_syntax_returns_invalid_exec_syntax_on_nonzero_status() {
+            let dir = TempDir::new().or_abort("tempdir");
+            let repo = dir.path();
+            let command = "if )";
+            let runner = ScriptedRunner::default().with_status(
+                "bash",
+                &["--norc", "--noprofile", "-n", "-c", command],
+                &[],
+                true,
+                repo,
+                2,
+            );
+            let io = TestIo::default();
+            let env = TestEnv {
+                cwd: repo.to_path_buf(),
+            };
+            let ctx = Ctx {
+                runner: &runner,
+                cwd: repo.to_path_buf(),
+                io: &io,
+                env: &env,
+                fs: &REAL_FS,
+            };
+
+            let err =
+                validate_exec_syntax(&ctx, command).err_or_abort("expected invalid exec syntax");
+            assert!(
+                matches!(&err, FactorError::InvalidExecSyntax(found) if found == command),
+                "err was: {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_exec_syntax_wraps_command_status_io_error() {
+        struct ExecSyntaxIoErrorRunner;
+
+        impl Runner for ExecSyntaxIoErrorRunner {
+            fn output(&self, _bin: &str, _args: &[&str], _cwd: &Path) -> io::Result<Output> {
+                Err(io::Error::other("output should not be called"))
+            }
+
+            fn status(
+                &self,
+                _bin: &str,
+                _args: &[&str],
+                _envs: &[(&str, &str)],
+                _quiet: bool,
+                _cwd: &Path,
+            ) -> io::Result<ExitStatus> {
+                Err(io::Error::other("forced bash syntax status io failure"))
+            }
+        }
+
+        let dir = TempDir::new().or_abort("tempdir");
+        let runner = ExecSyntaxIoErrorRunner;
+        let env = TestEnv {
+            cwd: dir.path().to_path_buf(),
+        };
+        let ctx = Ctx {
+            runner: &runner,
+            cwd: dir.path().to_path_buf(),
+            io: &REAL_IO,
+            env: &env,
+            fs: &REAL_FS,
+        };
+        let output_err = runner
+            .output("git", &["status"], dir.path())
+            .err_or_abort("output method should fail");
+        assert!(
+            output_err
+                .to_string()
+                .contains("output should not be called"),
+            "unexpected output error: {output_err}"
+        );
+
+        let err = validate_exec_syntax(&ctx, "echo ok").err_or_abort("status io error should fail");
+        let message = git_command_message(&err).or_abort("expected GitCommand");
+        assert!(
+            message.contains("forced bash syntax status io failure"),
+            "unexpected error: {err:?}"
+        );
+    }
+
+    #[test]
+    fn validate_exec_syntax_returns_ok_for_valid_shell_command() {
+        let dir = TempDir::new().or_abort("tempdir");
+        let ctx = ctx_for(dir.path());
+        validate_exec_syntax(&ctx, "echo ok")
+            .or_abort("valid shell command should pass syntax check");
+    }
+}
+
 mod validate_not_merge {
     use super::super::parent_contracts::{CommitObject, Reply};
 
@@ -2280,64 +2406,6 @@ fn validate_ancestor_returns_ok_for_head_commit() {
     let ctx = ctx_for(dir.path());
     let head = resolve_head_commit(&ctx).or_abort("resolve");
     validate_ancestor(&ctx, &head).or_abort("HEAD should be ancestor of HEAD");
-}
-
-#[test]
-fn validate_exec_syntax_wraps_command_status_io_error() {
-    struct ExecSyntaxIoErrorRunner;
-
-    impl Runner for ExecSyntaxIoErrorRunner {
-        fn output(&self, _bin: &str, _args: &[&str], _cwd: &Path) -> io::Result<Output> {
-            Err(io::Error::other("output should not be called"))
-        }
-
-        fn status(
-            &self,
-            _bin: &str,
-            _args: &[&str],
-            _envs: &[(&str, &str)],
-            _quiet: bool,
-            _cwd: &Path,
-        ) -> io::Result<ExitStatus> {
-            Err(io::Error::other("forced bash syntax status io failure"))
-        }
-    }
-
-    let dir = TempDir::new().or_abort("tempdir");
-    let runner = ExecSyntaxIoErrorRunner;
-    let env = TestEnv {
-        cwd: dir.path().to_path_buf(),
-    };
-    let ctx = Ctx {
-        runner: &runner,
-        cwd: dir.path().to_path_buf(),
-        io: &REAL_IO,
-        env: &env,
-        fs: &REAL_FS,
-    };
-    let output_err = runner
-        .output("git", &["status"], dir.path())
-        .err_or_abort("output method should fail");
-    assert!(
-        output_err
-            .to_string()
-            .contains("output should not be called"),
-        "unexpected output error: {output_err}"
-    );
-
-    let err = validate_exec_syntax(&ctx, "echo ok").err_or_abort("status io error should fail");
-    let message = git_command_message(&err).or_abort("expected GitCommand");
-    assert!(
-        message.contains("forced bash syntax status io failure"),
-        "unexpected error: {err:?}"
-    );
-}
-
-#[test]
-fn validate_exec_syntax_returns_ok_for_valid_shell_command() {
-    let dir = TempDir::new().or_abort("tempdir");
-    let ctx = ctx_for(dir.path());
-    validate_exec_syntax(&ctx, "echo ok").or_abort("valid shell command should pass syntax check");
 }
 
 #[test]
