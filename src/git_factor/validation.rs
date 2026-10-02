@@ -119,6 +119,7 @@ pub(in crate::git_factor) fn remove_empty_root_in(ctx: &Ctx<'_>) -> Result<(), F
             "--empty",
             "drop",
             "--interactive",
+            "--no-update-refs",
             "--quiet",
             "--root",
         ],

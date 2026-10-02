@@ -3040,6 +3040,57 @@ fi
     }
 
     #[test]
+    fn finish_preserves_branch_created_before_empty_root_cleanup() {
+        let dir = init_repo();
+        let repo = dir.path();
+        write_file(repo, "first.txt", "first\n");
+        write_file(repo, "second.txt", "second\n");
+        git(repo, &["add", "first.txt", "second.txt"]);
+        git(repo, &["commit", "--message", "Add root changes"]);
+        let original_tree = git(repo, &["rev-parse", "HEAD^{tree}"]);
+        let original_branch = git(repo, &["symbolic-ref", "HEAD"]);
+        git(repo, &["config", "rebase.updateRefs", "true"]);
+
+        // Arrange the root split before its final empty-root cleanup rebase.
+        start_session(repo);
+        git(repo, &["add", "first.txt"]);
+        let submitted = Command::new(git_factor_bin())
+            .current_dir(repo)
+            .args(["--continue", "--message", "Add first change"])
+            .output()
+            .or_abort();
+        assert_eq!(submitted.status.code(), Some(EXIT_OK));
+        let accepted = git(repo, &["rev-parse", "HEAD"]);
+        git(repo, &["branch", "other", accepted.as_str()]);
+        assert!(!git_dir(repo).join("rebase-merge").exists());
+        let empty_root = git(repo, &["rev-list", "--max-parents=0", "HEAD"]);
+        assert_eq!(git(repo, &["ls-tree", empty_root.as_str()]), "");
+
+        let finished = Command::new(git_factor_bin())
+            .current_dir(repo)
+            .args(["--finish"])
+            .output()
+            .or_abort();
+
+        assert_eq!(finished.status.code(), Some(EXIT_OK));
+        assert_eq!(
+            finished.stdout,
+            b"FACTOR: Complete. Final commit split into 2 commits.\n",
+        );
+        assert_eq!(finished.stderr, b"");
+        assert_eq!(git(repo, &["rev-parse", "refs/heads/other"]), accepted);
+        assert_eq!(git(repo, &["rev-parse", "HEAD^{tree}"]), original_tree);
+        assert_eq!(git(repo, &["write-tree"]), original_tree);
+        assert_eq!(git(repo, &["symbolic-ref", "HEAD"]), original_branch);
+        assert_eq!(git(repo, &["status", "--porcelain"]), "");
+        assert_eq!(git(repo, &["rev-list", "--count", "HEAD"]), "2");
+        assert_eq!(git(repo, &["log", "-1", "--format=%s"]), "Add root changes");
+        assert!(!git_dir(repo).join("factor").exists());
+        assert!(!git_dir(repo).join("rebase-merge").exists());
+        assert!(!git_dir(repo).join("rebase-apply").exists());
+    }
+
+    #[test]
     fn finish_ignores_exec_gate_and_completes_session() {
         let dir = init_repo();
         let repo = dir.path();
@@ -3705,7 +3756,7 @@ fi
 
         let (wrap_dir, wrap_bin) = make_git_wrapper_named(
             "git",
-            r#"if [ "${1-}" = "rebase" ] && [ "${2-}" = "--empty" ] && [ "${3-}" = "drop" ] && [ "${4-}" = "--interactive" ] && [ "${5-}" = "--quiet" ] && [ "${6-}" = "--root" ]; then
+            r#"if [ "${1-}" = "rebase" ] && [ "${2-}" = "--empty" ] && [ "${3-}" = "drop" ] && [ "${4-}" = "--interactive" ] && [ "${5-}" = "--no-update-refs" ] && [ "${6-}" = "--quiet" ] && [ "${7-}" = "--root" ]; then
   exit 77
 fi
 "#,
