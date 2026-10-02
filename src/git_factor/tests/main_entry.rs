@@ -3933,3 +3933,1521 @@ fn cmd_start_refuses_non_ancestor_before_gate_or_journal() {
     // Only net contents/layout inside this tempdir, excluding factor state.
     assert_eq!(fixture.direct_files_after(), fixture.direct_files_before);
 }
+
+#[test]
+fn public_continue_completes_a_staged_atom() {
+    let fixture = super::continue_contracts::Continuation::new(
+        &"a".repeat(SHA_LEN),
+        0,
+        super::continue_contracts::ContinueCase::Complete,
+    );
+    let before = fixture.protected_bytes();
+    let args = ["git-factor", "--continue", "--message", "test: message"].map(OsString::from);
+
+    let code = main_entry_with_vec(fixture.ctx().io, Ok(fixture.ctx()), &args);
+
+    assert_eq!(code, EXIT_OK);
+    assert_eq!(
+        fixture.stdout(),
+        "FACTOR: Complete. Final commit split into 1 commits.\n"
+    );
+    assert_eq!(fixture.stderr(), "");
+    assert_eq!(fixture.journal(), fixture.expected_journal());
+    assert_eq!(fixture.protected_bytes(), before);
+    assert_eq!(
+        fixture.full_effect_requests(),
+        fixture.expected_effect_requests()
+    );
+    assert_eq!(
+        fixture.effect_requests(),
+        vec![
+            vec!["git", "diff", "--quiet", "--staged"],
+            vec!["git", "checkout", "--quiet", "--", "."],
+            vec!["git", "clean", "--force", "--quiet", "-d"],
+            vec!["git", "checkout-index", "--all", "--force", "--quiet"],
+            vec!["bash", "-c", "true"],
+            vec!["git", "commit", "--quiet", "--message", "test: message"],
+        ]
+        .into_iter()
+        .map(|call| call.into_iter().map(str::to_owned).collect::<Vec<_>>())
+        .collect::<Vec<_>>()
+    );
+    assert!(!fixture.session_active());
+}
+
+#[test]
+fn public_continue_preserves_selection_after_no_staged_changes() {
+    let fixture = super::continue_contracts::Continuation::new(
+        &"a".repeat(SHA_LEN),
+        0,
+        super::continue_contracts::ContinueCase::NoStaged,
+    );
+    let before = fixture.protected_bytes();
+    let args = ["git-factor", "--continue", "--message", "test: message"].map(OsString::from);
+
+    let code = main_entry_with_vec(fixture.ctx().io, Ok(fixture.ctx()), &args);
+
+    assert_eq!(code, EXIT_USAGE);
+    assert_eq!(fixture.stdout(), "");
+    assert_eq!(
+        fixture.stderr(),
+        "no staged changes to commit\nNEXT: stage exactly one atomic change, then rerun:\n  git factor --continue --message \"type: description\"\n"
+    );
+    assert_eq!(fixture.journal(), fixture.expected_journal());
+    assert_eq!(fixture.protected_bytes(), before);
+    assert_eq!(
+        fixture.full_effect_requests(),
+        fixture.expected_effect_requests()
+    );
+    assert!(
+        !fixture
+            .effect_requests()
+            .iter()
+            .any(|call| call.first().is_some_and(|bin| bin == "git")
+                && call.get(1).is_some_and(|arg| arg == "commit"))
+    );
+}
+
+#[test]
+fn public_continue_preserves_selection_after_gate_failure() {
+    let fixture = super::continue_contracts::Continuation::new(
+        &"a".repeat(SHA_LEN),
+        0,
+        super::continue_contracts::ContinueCase::GateRejected,
+    );
+    let before = fixture.protected_bytes();
+    let args = ["git-factor", "--continue", "--message", "test: message"].map(OsString::from);
+
+    let code = main_entry_with_vec(fixture.ctx().io, Ok(fixture.ctx()), &args);
+
+    assert_eq!(code, EXIT_TEMPFAIL);
+    assert_eq!(
+        fixture.stdout(),
+        "FACTOR: Exec gate failed. No commit created.\nEXEC: true\nCODE: 7\n\nNEXT: Adjust staged changes so the exec gate passes, then retry:\n  git factor --continue --message \"type: description\"\n"
+    );
+    assert_eq!(fixture.stderr(), "exec gate failed: true (exit code 7)\n");
+    assert_eq!(fixture.journal(), fixture.expected_journal());
+    assert_eq!(fixture.protected_bytes(), before);
+    assert_eq!(
+        fixture.full_effect_requests(),
+        fixture.expected_effect_requests()
+    );
+    assert!(
+        !fixture
+            .effect_requests()
+            .iter()
+            .any(|call| call.first().is_some_and(|bin| bin == "git")
+                && call.get(1).is_some_and(|arg| arg == "commit"))
+    );
+}
+
+#[test]
+fn public_continue_preserves_selection_after_gate_spawn_failure() {
+    let fixture = super::continue_contracts::Continuation::new(
+        &"a".repeat(SHA_LEN),
+        0,
+        super::continue_contracts::ContinueCase::GateSpawn,
+    );
+    let before = fixture.protected_bytes();
+    let args = ["git-factor", "--continue", "--message", "test: message"].map(OsString::from);
+
+    let code = main_entry_with_vec(fixture.ctx().io, Ok(fixture.ctx()), &args);
+
+    assert_eq!(code, EXIT_SOFTWARE);
+    assert_eq!(fixture.stdout(), "");
+    assert_eq!(
+        fixture.stderr(),
+        "git command failed: bash -c: gate spawn denied\n"
+    );
+    assert_eq!(fixture.journal(), fixture.expected_journal());
+    assert_eq!(fixture.protected_bytes(), before);
+    assert_eq!(
+        fixture.full_effect_requests(),
+        fixture.expected_effect_requests()
+    );
+    assert!(
+        !fixture
+            .effect_requests()
+            .iter()
+            .any(|call| call.first().is_some_and(|bin| bin == "git")
+                && call.get(1).is_some_and(|arg| arg == "commit"))
+    );
+}
+
+#[test]
+fn public_continue_preserves_selection_after_pre_gate_dirty_work() {
+    let fixture = super::continue_contracts::Continuation::new(
+        &"a".repeat(SHA_LEN),
+        0,
+        super::continue_contracts::ContinueCase::PreGateDirty,
+    );
+    let before = fixture.protected_bytes();
+    let args = ["git-factor", "--continue", "--message", "test: message"].map(OsString::from);
+
+    let code = main_entry_with_vec(fixture.ctx().io, Ok(fixture.ctx()), &args);
+
+    assert_eq!(code, EXIT_SOFTWARE);
+    assert_eq!(fixture.stdout(), "");
+    assert_eq!(
+        fixture.stderr(),
+        "git command failed: continue gate requires staged changes only; remove unstaged or untracked changes first\nSTATUS:\n M file.txt\n"
+    );
+    assert_eq!(fixture.journal(), fixture.expected_journal());
+    assert_eq!(fixture.protected_bytes(), before);
+    assert_eq!(
+        fixture.full_effect_requests(),
+        fixture.expected_effect_requests()
+    );
+    assert!(
+        !fixture
+            .effect_requests()
+            .iter()
+            .any(|call| call.first().is_some_and(|bin| bin == "git")
+                && call.get(1).is_some_and(|arg| arg == "commit"))
+    );
+}
+
+#[test]
+fn public_continue_preserves_selection_after_post_gate_dirty_work() {
+    let fixture = super::continue_contracts::Continuation::new(
+        &"a".repeat(SHA_LEN),
+        0,
+        super::continue_contracts::ContinueCase::PostGateDirty,
+    );
+    let before = fixture.protected_bytes();
+    let args = ["git-factor", "--continue", "--message", "test: message"].map(OsString::from);
+
+    let code = main_entry_with_vec(fixture.ctx().io, Ok(fixture.ctx()), &args);
+
+    assert_eq!(code, EXIT_SOFTWARE);
+    assert_eq!(fixture.stdout(), "");
+    assert_eq!(
+        fixture.stderr(),
+        "git command failed: exec gate must not leave unstaged or untracked changes behind\nSTATUS:\n M file.txt\n"
+    );
+    assert_eq!(fixture.journal(), fixture.expected_journal());
+    assert_eq!(fixture.protected_bytes(), before);
+    assert_eq!(
+        fixture.full_effect_requests(),
+        fixture.expected_effect_requests()
+    );
+    assert!(
+        !fixture
+            .effect_requests()
+            .iter()
+            .any(|call| call.first().is_some_and(|bin| bin == "git")
+                && call.get(1).is_some_and(|arg| arg == "commit"))
+    );
+}
+
+#[test]
+fn public_continue_replays_the_remainder() {
+    let fixture = super::continue_contracts::Continuation::new(
+        &"a".repeat(SHA_LEN),
+        0,
+        super::continue_contracts::ContinueCase::Remainder,
+    );
+    let before = fixture.protected_bytes();
+    let args = ["git-factor", "--continue", "--message", "test: message"].map(OsString::from);
+
+    let code = main_entry_with_vec(fixture.ctx().io, Ok(fixture.ctx()), &args);
+
+    assert_eq!(code, EXIT_OK);
+    assert_eq!(fixture.stdout(), fixture.expected_stdout());
+    assert_eq!(fixture.stderr(), "");
+    assert_eq!(fixture.journal(), fixture.expected_journal());
+    assert_eq!(fixture.protected_bytes(), before);
+    assert_eq!(
+        fixture.full_effect_requests(),
+        fixture.expected_effect_requests()
+    );
+}
+
+#[test]
+fn public_continue_reports_staged_status_failure() {
+    use super::continue_contracts::{Continuation, ContinueFault};
+    let fixture = Continuation::with_fault(&"a".repeat(SHA_LEN), ContinueFault::StagedStatus);
+    let before = fixture.protected_bytes();
+    let args = ["git-factor", "--continue", "--message", "test: message"].map(OsString::from);
+
+    let code = main_entry_with_vec(fixture.ctx().io, Ok(fixture.ctx()), &args);
+
+    assert_eq!(code, EXIT_SOFTWARE);
+    assert_eq!(fixture.stdout(), "");
+    assert_eq!(
+        fixture.stderr(),
+        Continuation::fault_stderr(ContinueFault::StagedStatus)
+    );
+    assert_eq!(fixture.journal(), fixture.expected_journal());
+    assert_eq!(fixture.protected_bytes(), before);
+    assert_eq!(
+        fixture.full_effect_requests(),
+        fixture.expected_effect_requests()
+    );
+}
+
+#[test]
+fn public_continue_reports_checkout_failure() {
+    use super::continue_contracts::{Continuation, ContinueFault};
+    let fixture = Continuation::with_fault(&"a".repeat(SHA_LEN), ContinueFault::Checkout);
+    let before = fixture.protected_bytes();
+    let args = ["git-factor", "--continue", "--message", "test: message"].map(OsString::from);
+
+    let code = main_entry_with_vec(fixture.ctx().io, Ok(fixture.ctx()), &args);
+
+    assert_eq!(code, EXIT_SOFTWARE);
+    assert_eq!(fixture.stdout(), "");
+    assert_eq!(
+        fixture.stderr(),
+        Continuation::fault_stderr(ContinueFault::Checkout)
+    );
+    assert_eq!(fixture.journal(), fixture.expected_journal());
+    assert_eq!(fixture.protected_bytes(), before);
+    assert_eq!(
+        fixture.full_effect_requests(),
+        fixture.expected_effect_requests()
+    );
+}
+
+#[test]
+fn public_continue_reports_clean_failure() {
+    use super::continue_contracts::{Continuation, ContinueFault};
+    let fixture = Continuation::with_fault(&"a".repeat(SHA_LEN), ContinueFault::Clean);
+    let before = fixture.protected_bytes();
+    let args = ["git-factor", "--continue", "--message", "test: message"].map(OsString::from);
+
+    let code = main_entry_with_vec(fixture.ctx().io, Ok(fixture.ctx()), &args);
+
+    assert_eq!(code, EXIT_SOFTWARE);
+    assert_eq!(fixture.stdout(), "");
+    assert_eq!(
+        fixture.stderr(),
+        Continuation::fault_stderr(ContinueFault::Clean)
+    );
+    assert_eq!(fixture.journal(), fixture.expected_journal());
+    assert_eq!(fixture.protected_bytes(), before);
+    assert_eq!(
+        fixture.full_effect_requests(),
+        fixture.expected_effect_requests()
+    );
+}
+
+#[test]
+fn public_continue_reports_checkout_index_failure() {
+    use super::continue_contracts::{Continuation, ContinueFault};
+    let fixture = Continuation::with_fault(&"a".repeat(SHA_LEN), ContinueFault::CheckoutIndex);
+    let before = fixture.protected_bytes();
+    let args = ["git-factor", "--continue", "--message", "test: message"].map(OsString::from);
+
+    let code = main_entry_with_vec(fixture.ctx().io, Ok(fixture.ctx()), &args);
+
+    assert_eq!(code, EXIT_SOFTWARE);
+    assert_eq!(fixture.stdout(), "");
+    assert_eq!(
+        fixture.stderr(),
+        Continuation::fault_stderr(ContinueFault::CheckoutIndex)
+    );
+    assert_eq!(fixture.journal(), fixture.expected_journal());
+    assert_eq!(fixture.protected_bytes(), before);
+    assert_eq!(
+        fixture.full_effect_requests(),
+        fixture.expected_effect_requests()
+    );
+}
+
+#[test]
+fn public_continue_reports_deleted_paths_failure() {
+    use super::continue_contracts::{Continuation, ContinueFault};
+    let fixture = Continuation::with_fault(&"a".repeat(SHA_LEN), ContinueFault::DeletedPaths);
+    let before = fixture.protected_bytes();
+    let args = ["git-factor", "--continue", "--message", "test: message"].map(OsString::from);
+
+    let code = main_entry_with_vec(fixture.ctx().io, Ok(fixture.ctx()), &args);
+
+    assert_eq!(code, EXIT_SOFTWARE);
+    assert_eq!(fixture.stdout(), "");
+    assert_eq!(
+        fixture.stderr(),
+        Continuation::fault_stderr(ContinueFault::DeletedPaths)
+    );
+    assert_eq!(fixture.journal(), fixture.expected_journal());
+    assert_eq!(fixture.protected_bytes(), before);
+    assert_eq!(
+        fixture.full_effect_requests(),
+        fixture.expected_effect_requests()
+    );
+}
+
+#[test]
+fn public_continue_reports_before_status_failure() {
+    use super::continue_contracts::{Continuation, ContinueFault};
+    let fixture = Continuation::with_fault(&"a".repeat(SHA_LEN), ContinueFault::BeforeStatus);
+    let before = fixture.protected_bytes();
+    let args = ["git-factor", "--continue", "--message", "test: message"].map(OsString::from);
+
+    let code = main_entry_with_vec(fixture.ctx().io, Ok(fixture.ctx()), &args);
+
+    assert_eq!(code, EXIT_SOFTWARE);
+    assert_eq!(fixture.stdout(), "");
+    assert_eq!(
+        fixture.stderr(),
+        Continuation::fault_stderr(ContinueFault::BeforeStatus)
+    );
+    assert_eq!(fixture.journal(), fixture.expected_journal());
+    assert_eq!(fixture.protected_bytes(), before);
+    assert_eq!(
+        fixture.full_effect_requests(),
+        fixture.expected_effect_requests()
+    );
+}
+
+#[test]
+fn public_continue_reports_after_status_failure() {
+    use super::continue_contracts::{Continuation, ContinueFault};
+    let fixture = Continuation::with_fault(&"a".repeat(SHA_LEN), ContinueFault::AfterStatus);
+    let before = fixture.protected_bytes();
+    let args = ["git-factor", "--continue", "--message", "test: message"].map(OsString::from);
+
+    let code = main_entry_with_vec(fixture.ctx().io, Ok(fixture.ctx()), &args);
+
+    assert_eq!(code, EXIT_SOFTWARE);
+    assert_eq!(fixture.stdout(), "");
+    assert_eq!(
+        fixture.stderr(),
+        Continuation::fault_stderr(ContinueFault::AfterStatus)
+    );
+    assert_eq!(fixture.journal(), fixture.expected_journal());
+    assert_eq!(fixture.protected_bytes(), before);
+    assert_eq!(
+        fixture.full_effect_requests(),
+        fixture.expected_effect_requests()
+    );
+}
+
+#[test]
+fn public_continue_reports_metadata_failure() {
+    use super::continue_contracts::{Continuation, ContinueFault};
+    let fixture = Continuation::with_fault(&"a".repeat(SHA_LEN), ContinueFault::Metadata);
+    let before = fixture.protected_bytes();
+    let args = ["git-factor", "--continue", "--message", "test: message"].map(OsString::from);
+
+    let code = main_entry_with_vec(fixture.ctx().io, Ok(fixture.ctx()), &args);
+
+    assert_eq!(code, EXIT_SOFTWARE);
+    assert_eq!(fixture.stdout(), "");
+    assert_eq!(
+        fixture.stderr(),
+        Continuation::fault_stderr(ContinueFault::Metadata)
+    );
+    assert_eq!(fixture.journal(), fixture.expected_journal());
+    assert_eq!(fixture.protected_bytes(), before);
+    assert_eq!(
+        fixture.full_effect_requests(),
+        fixture.expected_effect_requests()
+    );
+}
+
+#[test]
+fn public_continue_reports_commit_failure() {
+    use super::continue_contracts::{Continuation, ContinueFault};
+    let fixture = Continuation::with_fault(&"a".repeat(SHA_LEN), ContinueFault::Commit);
+    let before = fixture.protected_bytes();
+    let args = ["git-factor", "--continue", "--message", "test: message"].map(OsString::from);
+
+    let code = main_entry_with_vec(fixture.ctx().io, Ok(fixture.ctx()), &args);
+
+    assert_eq!(code, EXIT_SOFTWARE);
+    assert_eq!(fixture.stdout(), "");
+    assert_eq!(
+        fixture.stderr(),
+        Continuation::fault_stderr(ContinueFault::Commit)
+    );
+    assert_eq!(fixture.journal(), fixture.expected_journal());
+    assert_eq!(fixture.protected_bytes(), before);
+    assert_eq!(
+        fixture.full_effect_requests(),
+        fixture.expected_effect_requests()
+    );
+}
+
+#[test]
+fn public_continue_reports_head_tree_failure() {
+    use super::continue_contracts::{Continuation, ContinueFault};
+    let fixture = Continuation::with_fault(&"a".repeat(SHA_LEN), ContinueFault::HeadTree);
+    let before = fixture.protected_bytes();
+    let args = ["git-factor", "--continue", "--message", "test: message"].map(OsString::from);
+
+    let code = main_entry_with_vec(fixture.ctx().io, Ok(fixture.ctx()), &args);
+
+    assert_eq!(code, EXIT_SOFTWARE);
+    assert_eq!(fixture.stdout(), "");
+    assert_eq!(
+        fixture.stderr(),
+        Continuation::fault_stderr(ContinueFault::HeadTree)
+    );
+    assert_eq!(fixture.journal(), fixture.expected_journal());
+    assert_eq!(fixture.protected_bytes(), before);
+    assert_eq!(
+        fixture.full_effect_requests(),
+        fixture.expected_effect_requests()
+    );
+}
+
+#[test]
+fn public_continue_reports_restore_failure() {
+    use super::continue_contracts::{Continuation, ContinueFault};
+    let fixture = Continuation::with_fault(&"a".repeat(SHA_LEN), ContinueFault::Restore);
+    let before = fixture.protected_bytes();
+    let args = ["git-factor", "--continue", "--message", "test: message"].map(OsString::from);
+
+    let code = main_entry_with_vec(fixture.ctx().io, Ok(fixture.ctx()), &args);
+
+    assert_eq!(code, EXIT_SOFTWARE);
+    assert_eq!(fixture.stdout(), "");
+    assert_eq!(
+        fixture.stderr(),
+        Continuation::fault_stderr(ContinueFault::Restore)
+    );
+    assert_eq!(fixture.journal(), fixture.expected_journal());
+    assert_eq!(fixture.protected_bytes(), before);
+    assert_eq!(
+        fixture.full_effect_requests(),
+        fixture.expected_effect_requests()
+    );
+}
+
+#[test]
+fn public_continue_reports_restored_tree_failure() {
+    use super::continue_contracts::{Continuation, ContinueFault};
+    let fixture = Continuation::with_fault(&"a".repeat(SHA_LEN), ContinueFault::RestoredTree);
+    let before = fixture.protected_bytes();
+    let args = ["git-factor", "--continue", "--message", "test: message"].map(OsString::from);
+
+    let code = main_entry_with_vec(fixture.ctx().io, Ok(fixture.ctx()), &args);
+
+    assert_eq!(code, EXIT_SOFTWARE);
+    assert_eq!(fixture.stdout(), "");
+    assert_eq!(
+        fixture.stderr(),
+        Continuation::fault_stderr(ContinueFault::RestoredTree)
+    );
+    assert_eq!(fixture.journal(), fixture.expected_journal());
+    assert_eq!(fixture.protected_bytes(), before);
+    assert_eq!(
+        fixture.full_effect_requests(),
+        fixture.expected_effect_requests()
+    );
+}
+
+#[test]
+fn public_continue_reports_reset_failure() {
+    use super::continue_contracts::{Continuation, ContinueFault};
+    let fixture = Continuation::with_fault(&"a".repeat(SHA_LEN), ContinueFault::Reset);
+    let before = fixture.protected_bytes();
+    let args = ["git-factor", "--continue", "--message", "test: message"].map(OsString::from);
+
+    let code = main_entry_with_vec(fixture.ctx().io, Ok(fixture.ctx()), &args);
+
+    assert_eq!(code, EXIT_SOFTWARE);
+    assert_eq!(fixture.stdout(), "");
+    assert_eq!(
+        fixture.stderr(),
+        Continuation::fault_stderr(ContinueFault::Reset)
+    );
+    assert_eq!(fixture.journal(), fixture.expected_journal());
+    assert_eq!(fixture.protected_bytes(), before);
+    assert_eq!(
+        fixture.full_effect_requests(),
+        fixture.expected_effect_requests()
+    );
+}
+
+#[test]
+fn public_continue_reports_diff_stat_failure() {
+    use super::continue_contracts::{Continuation, ContinueFault};
+    let fixture = Continuation::with_fault(&"a".repeat(SHA_LEN), ContinueFault::DiffStat);
+    let before = fixture.protected_bytes();
+    let args = ["git-factor", "--continue", "--message", "test: message"].map(OsString::from);
+
+    let code = main_entry_with_vec(fixture.ctx().io, Ok(fixture.ctx()), &args);
+
+    assert_eq!(code, EXIT_SOFTWARE);
+    assert_eq!(fixture.stdout(), "");
+    assert_eq!(
+        fixture.stderr(),
+        Continuation::fault_stderr(ContinueFault::DiffStat)
+    );
+    assert_eq!(fixture.journal(), fixture.expected_journal());
+    assert_eq!(fixture.protected_bytes(), before);
+    assert_eq!(
+        fixture.full_effect_requests(),
+        fixture.expected_effect_requests()
+    );
+}
+
+#[test]
+fn public_continue_reports_untracked_failure() {
+    use super::continue_contracts::{Continuation, ContinueFault};
+    let fixture = Continuation::with_fault(&"a".repeat(SHA_LEN), ContinueFault::Untracked);
+    let before = fixture.protected_bytes();
+    let args = ["git-factor", "--continue", "--message", "test: message"].map(OsString::from);
+
+    let code = main_entry_with_vec(fixture.ctx().io, Ok(fixture.ctx()), &args);
+
+    assert_eq!(code, EXIT_SOFTWARE);
+    assert_eq!(fixture.stdout(), "");
+    assert_eq!(
+        fixture.stderr(),
+        Continuation::fault_stderr(ContinueFault::Untracked)
+    );
+    assert_eq!(fixture.journal(), fixture.expected_journal());
+    assert_eq!(fixture.protected_bytes(), before);
+    assert_eq!(
+        fixture.full_effect_requests(),
+        fixture.expected_effect_requests()
+    );
+}
+
+#[test]
+fn public_continue_refuses_absent() {
+    use super::continue_contracts::{Continuation, ContinueState};
+    let fixture = Continuation::with_state(&"a".repeat(SHA_LEN), ContinueState::Absent);
+    let journal = fixture.journal();
+    let bytes = fixture.protected_bytes();
+    let args = ["git-factor", "--continue", "--message", "test: message"].map(OsString::from);
+
+    let code = main_entry_with_vec(fixture.ctx().io, Ok(fixture.ctx()), &args);
+
+    assert_eq!(code, EXIT_USAGE);
+    assert_eq!(fixture.stdout(), "");
+    assert_eq!(fixture.stderr(), "no active factor session\n");
+    assert_eq!(fixture.journal(), journal);
+    assert_eq!(fixture.protected_bytes(), bytes);
+    assert_eq!(fixture.full_effect_requests(), Vec::new());
+}
+
+#[test]
+fn public_continue_refuses_pending() {
+    use super::continue_contracts::{Continuation, ContinueState};
+    let fixture = Continuation::with_state(&"a".repeat(SHA_LEN), ContinueState::Pending);
+    let journal = fixture.journal();
+    let bytes = fixture.protected_bytes();
+    let args = ["git-factor", "--continue", "--message", "test: message"].map(OsString::from);
+
+    let code = main_entry_with_vec(fixture.ctx().io, Ok(fixture.ctx()), &args);
+
+    assert_eq!(code, EXIT_USAGE);
+    assert_eq!(fixture.stdout(), "");
+    assert_eq!(
+        fixture.stderr(),
+        "run 'git factor --continue' with no --message to begin splitting this commit\n"
+    );
+    assert_eq!(fixture.journal(), journal);
+    assert_eq!(fixture.protected_bytes(), bytes);
+    assert_eq!(fixture.full_effect_requests(), Vec::new());
+}
+
+#[test]
+fn public_continue_refuses_rebase_required() {
+    use super::continue_contracts::{Continuation, ContinueState};
+    let fixture = Continuation::with_state(&"a".repeat(SHA_LEN), ContinueState::RebaseRequired);
+    let journal = fixture.journal();
+    let bytes = fixture.protected_bytes();
+    let args = ["git-factor", "--continue", "--message", "test: message"].map(OsString::from);
+
+    let code = main_entry_with_vec(fixture.ctx().io, Ok(fixture.ctx()), &args);
+
+    assert_eq!(code, EXIT_SOFTWARE);
+    assert_eq!(fixture.stdout(), "");
+    assert_eq!(
+        fixture.stderr(),
+        "git command failed: no rebase in progress\n"
+    );
+    assert_eq!(fixture.journal(), journal);
+    assert_eq!(fixture.protected_bytes(), bytes);
+    assert_eq!(fixture.full_effect_requests(), Vec::new());
+}
+
+#[test]
+fn public_continue_refuses_index_outside_span() {
+    use super::continue_contracts::{Continuation, ContinueState};
+    let fixture = Continuation::with_state(&"a".repeat(SHA_LEN), ContinueState::IndexOutsideSpan);
+    let journal = fixture.journal();
+    let bytes = fixture.protected_bytes();
+    let args = ["git-factor", "--continue", "--message", "test: message"].map(OsString::from);
+
+    let code = main_entry_with_vec(fixture.ctx().io, Ok(fixture.ctx()), &args);
+
+    assert_eq!(code, EXIT_SOFTWARE);
+    assert_eq!(fixture.stdout(), "");
+    assert_eq!(
+        fixture.stderr(),
+        "git command failed: commit index 1 out of range (have 1 commits)\n"
+    );
+    assert_eq!(fixture.journal(), journal);
+    assert_eq!(fixture.protected_bytes(), bytes);
+    assert_eq!(fixture.full_effect_requests(), Vec::new());
+}
+
+#[test]
+fn public_continue_reports_counter_overflow_after_commit() {
+    use super::continue_contracts::Continuation;
+    let fixture = Continuation::with_counter_overflow(&"a".repeat(SHA_LEN));
+    let journal = fixture.journal();
+    let bytes = fixture.protected_bytes();
+    let args = ["git-factor", "--continue", "--message", "test: message"].map(OsString::from);
+
+    let code = main_entry_with_vec(fixture.ctx().io, Ok(fixture.ctx()), &args);
+
+    assert_eq!(code, EXIT_SOFTWARE);
+    assert_eq!(fixture.stdout(), "");
+    assert_eq!(
+        fixture.stderr(),
+        "git command failed: split_count overflow\n"
+    );
+    assert_eq!(fixture.journal(), journal);
+    assert_eq!(fixture.protected_bytes(), bytes);
+    assert_eq!(
+        fixture.full_effect_requests(),
+        fixture.expected_effect_requests()
+    );
+    assert_eq!(
+        fixture.effect_requests(),
+        vec![
+            vec!["git", "diff", "--quiet", "--staged"],
+            vec!["git", "checkout", "--quiet", "--", "."],
+            vec!["git", "clean", "--force", "--quiet", "-d"],
+            vec!["git", "checkout-index", "--all", "--force", "--quiet"],
+            vec!["bash", "-c", "true"],
+            vec!["git", "commit", "--quiet", "--message", "test: message"],
+        ]
+        .into_iter()
+        .map(|call| call.into_iter().map(str::to_owned).collect::<Vec<_>>())
+        .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn public_continue_reports_read_commits_state_failure() {
+    use super::continue_contracts::{Continuation, ContinueFileFault};
+    let fixture =
+        Continuation::with_file_fault(&"a".repeat(SHA_LEN), ContinueFileFault::ReadCommits);
+    let journal = fixture.journal();
+    let bytes = fixture.protected_bytes();
+    let args = ["git-factor", "--continue", "--message", "test: message"].map(OsString::from);
+
+    let code = main_entry_with_vec(fixture.ctx().io, Ok(fixture.ctx()), &args);
+
+    assert_eq!(code, EXIT_SOFTWARE);
+    assert_eq!(fixture.stdout(), "");
+    assert_eq!(
+        fixture.stderr(),
+        "failed to read state: continuation state read denied\n"
+    );
+    assert!(fixture.file_fault_observed());
+    assert_eq!(fixture.journal(), journal);
+    assert_eq!(fixture.protected_bytes(), bytes);
+    assert_eq!(
+        fixture.full_effect_requests(),
+        fixture.expected_effect_requests()
+    );
+}
+
+#[test]
+fn public_continue_reports_read_phase_state_failure() {
+    use super::continue_contracts::{Continuation, ContinueFileFault};
+    let fixture = Continuation::with_file_fault(&"a".repeat(SHA_LEN), ContinueFileFault::ReadPhase);
+    let journal = fixture.journal();
+    let bytes = fixture.protected_bytes();
+    let args = ["git-factor", "--continue", "--message", "test: message"].map(OsString::from);
+
+    let code = main_entry_with_vec(fixture.ctx().io, Ok(fixture.ctx()), &args);
+
+    assert_eq!(code, EXIT_SOFTWARE);
+    assert_eq!(fixture.stdout(), "");
+    assert_eq!(
+        fixture.stderr(),
+        "failed to read state: continuation state read denied\n"
+    );
+    assert!(fixture.file_fault_observed());
+    assert_eq!(fixture.journal(), journal);
+    assert_eq!(fixture.protected_bytes(), bytes);
+    assert_eq!(
+        fixture.full_effect_requests(),
+        fixture.expected_effect_requests()
+    );
+}
+
+#[test]
+fn public_continue_reports_read_requires_state_failure() {
+    use super::continue_contracts::{Continuation, ContinueFileFault};
+    let fixture =
+        Continuation::with_file_fault(&"a".repeat(SHA_LEN), ContinueFileFault::ReadRequires);
+    let journal = fixture.journal();
+    let bytes = fixture.protected_bytes();
+    let args = ["git-factor", "--continue", "--message", "test: message"].map(OsString::from);
+
+    let code = main_entry_with_vec(fixture.ctx().io, Ok(fixture.ctx()), &args);
+
+    assert_eq!(code, EXIT_SOFTWARE);
+    assert_eq!(fixture.stdout(), "");
+    assert_eq!(
+        fixture.stderr(),
+        "failed to read state: continuation state read denied\n"
+    );
+    assert!(fixture.file_fault_observed());
+    assert_eq!(fixture.journal(), journal);
+    assert_eq!(fixture.protected_bytes(), bytes);
+    assert_eq!(
+        fixture.full_effect_requests(),
+        fixture.expected_effect_requests()
+    );
+}
+
+#[test]
+fn public_continue_reports_read_index_state_failure() {
+    use super::continue_contracts::{Continuation, ContinueFileFault};
+    let fixture = Continuation::with_file_fault(&"a".repeat(SHA_LEN), ContinueFileFault::ReadIndex);
+    let journal = fixture.journal();
+    let bytes = fixture.protected_bytes();
+    let args = ["git-factor", "--continue", "--message", "test: message"].map(OsString::from);
+
+    let code = main_entry_with_vec(fixture.ctx().io, Ok(fixture.ctx()), &args);
+
+    assert_eq!(code, EXIT_SOFTWARE);
+    assert_eq!(fixture.stdout(), "");
+    assert_eq!(
+        fixture.stderr(),
+        "failed to read state: continuation state read denied\n"
+    );
+    assert!(fixture.file_fault_observed());
+    assert_eq!(fixture.journal(), journal);
+    assert_eq!(fixture.protected_bytes(), bytes);
+    assert_eq!(
+        fixture.full_effect_requests(),
+        fixture.expected_effect_requests()
+    );
+}
+
+#[test]
+fn public_continue_reports_read_exec_state_failure() {
+    use super::continue_contracts::{Continuation, ContinueFileFault};
+    let fixture = Continuation::with_file_fault(&"a".repeat(SHA_LEN), ContinueFileFault::ReadExec);
+    let journal = fixture.journal();
+    let bytes = fixture.protected_bytes();
+    let args = ["git-factor", "--continue", "--message", "test: message"].map(OsString::from);
+
+    let code = main_entry_with_vec(fixture.ctx().io, Ok(fixture.ctx()), &args);
+
+    assert_eq!(code, EXIT_SOFTWARE);
+    assert_eq!(fixture.stdout(), "");
+    assert_eq!(
+        fixture.stderr(),
+        "failed to read state: continuation state read denied\n"
+    );
+    assert!(fixture.file_fault_observed());
+    assert_eq!(fixture.journal(), journal);
+    assert_eq!(fixture.protected_bytes(), bytes);
+    assert_eq!(
+        fixture.full_effect_requests(),
+        fixture.expected_effect_requests()
+    );
+}
+
+#[test]
+fn public_continue_reports_read_count_state_failure() {
+    use super::continue_contracts::{Continuation, ContinueFileFault};
+    let fixture = Continuation::with_file_fault(&"a".repeat(SHA_LEN), ContinueFileFault::ReadCount);
+    let journal = fixture.journal();
+    let bytes = fixture.protected_bytes();
+    let args = ["git-factor", "--continue", "--message", "test: message"].map(OsString::from);
+
+    let code = main_entry_with_vec(fixture.ctx().io, Ok(fixture.ctx()), &args);
+
+    assert_eq!(code, EXIT_SOFTWARE);
+    assert_eq!(fixture.stdout(), "");
+    assert_eq!(
+        fixture.stderr(),
+        "failed to read state: continuation state read denied\n"
+    );
+    assert!(fixture.file_fault_observed());
+    assert_eq!(fixture.journal(), journal);
+    assert_eq!(fixture.protected_bytes(), bytes);
+    assert_eq!(
+        fixture.full_effect_requests(),
+        fixture.expected_effect_requests()
+    );
+}
+
+#[test]
+fn public_continue_reports_read_expected_state_failure() {
+    use super::continue_contracts::{Continuation, ContinueFileFault};
+    let fixture =
+        Continuation::with_file_fault(&"a".repeat(SHA_LEN), ContinueFileFault::ReadExpected);
+    let mut journal = fixture.journal();
+    journal.insert("split_count".to_owned(), "1\n".to_owned());
+    let bytes = fixture.protected_bytes();
+    let args = ["git-factor", "--continue", "--message", "test: message"].map(OsString::from);
+
+    let code = main_entry_with_vec(fixture.ctx().io, Ok(fixture.ctx()), &args);
+
+    assert_eq!(code, EXIT_SOFTWARE);
+    assert_eq!(fixture.stdout(), "");
+    assert_eq!(
+        fixture.stderr(),
+        "git command failed: expected tree fallback denied\n"
+    );
+    assert!(fixture.file_fault_observed());
+    assert_eq!(fixture.journal(), journal);
+    assert_eq!(fixture.protected_bytes(), bytes);
+    assert_eq!(
+        fixture.full_effect_requests(),
+        fixture.expected_effect_requests()
+    );
+}
+
+#[test]
+fn public_continue_reports_write_count_state_failure() {
+    use super::continue_contracts::{Continuation, ContinueFileFault};
+    let fixture =
+        Continuation::with_file_fault(&"a".repeat(SHA_LEN), ContinueFileFault::WriteCount);
+    let journal = fixture.journal();
+    let bytes = fixture.protected_bytes();
+    let args = ["git-factor", "--continue", "--message", "test: message"].map(OsString::from);
+
+    let code = main_entry_with_vec(fixture.ctx().io, Ok(fixture.ctx()), &args);
+
+    assert_eq!(code, EXIT_SOFTWARE);
+    assert_eq!(fixture.stdout(), "");
+    assert_eq!(
+        fixture.stderr(),
+        "failed to write state: continuation state write denied\n"
+    );
+    assert!(fixture.file_fault_observed());
+    assert_eq!(fixture.journal(), journal);
+    assert_eq!(fixture.protected_bytes(), bytes);
+    assert_eq!(
+        fixture.full_effect_requests(),
+        fixture.expected_effect_requests()
+    );
+}
+
+#[test]
+fn public_continue_reports_complete_write_failure() {
+    use super::continue_contracts::{Continuation, ContinueWrite};
+    let fixture = Continuation::with_write(&"a".repeat(SHA_LEN), ContinueWrite::Complete);
+    let bytes = fixture.protected_bytes();
+    let args = ["git-factor", "--continue", "--message", "test: message"].map(OsString::from);
+
+    let code = main_entry_with_vec(fixture.ctx().io, Ok(fixture.ctx()), &args);
+
+    assert_eq!(code, EXIT_SOFTWARE);
+    assert_eq!(fixture.stdout(), ContinueWrite::Complete.prefix());
+    assert_eq!(
+        fixture.stderr(),
+        "failed to write output: continuation output denied\n"
+    );
+    assert!(fixture.write_observed());
+    assert_eq!(fixture.journal(), fixture.expected_journal());
+    assert_eq!(fixture.protected_bytes(), bytes);
+    assert_eq!(
+        fixture.full_effect_requests(),
+        fixture.expected_effect_requests()
+    );
+    assert!(!fixture.session_active());
+}
+
+#[test]
+fn public_continue_reports_gate_banner_write_failure() {
+    use super::continue_contracts::{Continuation, ContinueWrite};
+    let fixture = Continuation::with_write(&"a".repeat(SHA_LEN), ContinueWrite::GateBanner);
+    let bytes = fixture.protected_bytes();
+    let args = ["git-factor", "--continue", "--message", "test: message"].map(OsString::from);
+
+    let code = main_entry_with_vec(fixture.ctx().io, Ok(fixture.ctx()), &args);
+
+    assert_eq!(code, EXIT_SOFTWARE);
+    assert_eq!(fixture.stdout(), ContinueWrite::GateBanner.prefix());
+    assert_eq!(
+        fixture.stderr(),
+        "failed to write output: continuation output denied\n"
+    );
+    assert!(fixture.write_observed());
+    assert_eq!(fixture.journal(), fixture.expected_journal());
+    assert_eq!(fixture.protected_bytes(), bytes);
+    assert_eq!(
+        fixture.full_effect_requests(),
+        fixture.expected_effect_requests()
+    );
+}
+
+#[test]
+fn public_continue_reports_gate_command_write_failure() {
+    use super::continue_contracts::{Continuation, ContinueWrite};
+    let fixture = Continuation::with_write(&"a".repeat(SHA_LEN), ContinueWrite::GateCommand);
+    let bytes = fixture.protected_bytes();
+    let args = ["git-factor", "--continue", "--message", "test: message"].map(OsString::from);
+
+    let code = main_entry_with_vec(fixture.ctx().io, Ok(fixture.ctx()), &args);
+
+    assert_eq!(code, EXIT_SOFTWARE);
+    assert_eq!(fixture.stdout(), ContinueWrite::GateCommand.prefix());
+    assert_eq!(
+        fixture.stderr(),
+        "failed to write output: continuation output denied\n"
+    );
+    assert!(fixture.write_observed());
+    assert_eq!(fixture.journal(), fixture.expected_journal());
+    assert_eq!(fixture.protected_bytes(), bytes);
+    assert_eq!(
+        fixture.full_effect_requests(),
+        fixture.expected_effect_requests()
+    );
+}
+
+#[test]
+fn public_continue_reports_gate_code_write_failure() {
+    use super::continue_contracts::{Continuation, ContinueWrite};
+    let fixture = Continuation::with_write(&"a".repeat(SHA_LEN), ContinueWrite::GateCode);
+    let bytes = fixture.protected_bytes();
+    let args = ["git-factor", "--continue", "--message", "test: message"].map(OsString::from);
+
+    let code = main_entry_with_vec(fixture.ctx().io, Ok(fixture.ctx()), &args);
+
+    assert_eq!(code, EXIT_SOFTWARE);
+    assert_eq!(fixture.stdout(), ContinueWrite::GateCode.prefix());
+    assert_eq!(
+        fixture.stderr(),
+        "failed to write output: continuation output denied\n"
+    );
+    assert!(fixture.write_observed());
+    assert_eq!(fixture.journal(), fixture.expected_journal());
+    assert_eq!(fixture.protected_bytes(), bytes);
+    assert_eq!(
+        fixture.full_effect_requests(),
+        fixture.expected_effect_requests()
+    );
+}
+
+#[test]
+fn public_continue_reports_gate_separator_write_failure() {
+    use super::continue_contracts::{Continuation, ContinueWrite};
+    let fixture = Continuation::with_write(&"a".repeat(SHA_LEN), ContinueWrite::GateSeparator);
+    let bytes = fixture.protected_bytes();
+    let args = ["git-factor", "--continue", "--message", "test: message"].map(OsString::from);
+
+    let code = main_entry_with_vec(fixture.ctx().io, Ok(fixture.ctx()), &args);
+
+    assert_eq!(code, EXIT_SOFTWARE);
+    assert_eq!(fixture.stdout(), ContinueWrite::GateSeparator.prefix());
+    assert_eq!(
+        fixture.stderr(),
+        "failed to write output: continuation output denied\n"
+    );
+    assert!(fixture.write_observed());
+    assert_eq!(fixture.journal(), fixture.expected_journal());
+    assert_eq!(fixture.protected_bytes(), bytes);
+    assert_eq!(
+        fixture.full_effect_requests(),
+        fixture.expected_effect_requests()
+    );
+}
+
+#[test]
+fn public_continue_reports_gate_next_write_failure() {
+    use super::continue_contracts::{Continuation, ContinueWrite};
+    let fixture = Continuation::with_write(&"a".repeat(SHA_LEN), ContinueWrite::GateNext);
+    let bytes = fixture.protected_bytes();
+    let args = ["git-factor", "--continue", "--message", "test: message"].map(OsString::from);
+
+    let code = main_entry_with_vec(fixture.ctx().io, Ok(fixture.ctx()), &args);
+
+    assert_eq!(code, EXIT_SOFTWARE);
+    assert_eq!(fixture.stdout(), ContinueWrite::GateNext.prefix());
+    assert_eq!(
+        fixture.stderr(),
+        "failed to write output: continuation output denied\n"
+    );
+    assert!(fixture.write_observed());
+    assert_eq!(fixture.journal(), fixture.expected_journal());
+    assert_eq!(fixture.protected_bytes(), bytes);
+    assert_eq!(
+        fixture.full_effect_requests(),
+        fixture.expected_effect_requests()
+    );
+}
+
+#[test]
+fn public_continue_reports_gate_usage_write_failure() {
+    use super::continue_contracts::{Continuation, ContinueWrite};
+    let fixture = Continuation::with_write(&"a".repeat(SHA_LEN), ContinueWrite::GateUsage);
+    let bytes = fixture.protected_bytes();
+    let args = ["git-factor", "--continue", "--message", "test: message"].map(OsString::from);
+
+    let code = main_entry_with_vec(fixture.ctx().io, Ok(fixture.ctx()), &args);
+
+    assert_eq!(code, EXIT_SOFTWARE);
+    assert_eq!(fixture.stdout(), ContinueWrite::GateUsage.prefix());
+    assert_eq!(
+        fixture.stderr(),
+        "failed to write output: continuation output denied\n"
+    );
+    assert!(fixture.write_observed());
+    assert_eq!(fixture.journal(), fixture.expected_journal());
+    assert_eq!(fixture.protected_bytes(), bytes);
+    assert_eq!(
+        fixture.full_effect_requests(),
+        fixture.expected_effect_requests()
+    );
+}
+
+#[test]
+fn public_continue_reports_remainder_write_failure() {
+    use super::continue_contracts::{Continuation, ContinueWrite};
+    let fixture = Continuation::with_write(&"a".repeat(SHA_LEN), ContinueWrite::Remainder);
+    let bytes = fixture.protected_bytes();
+    let args = ["git-factor", "--continue", "--message", "test: message"].map(OsString::from);
+
+    let code = main_entry_with_vec(fixture.ctx().io, Ok(fixture.ctx()), &args);
+
+    assert_eq!(code, EXIT_SOFTWARE);
+    assert_eq!(fixture.stdout(), ContinueWrite::Remainder.prefix());
+    assert_eq!(
+        fixture.stderr(),
+        "failed to write output: continuation output denied\n"
+    );
+    assert!(fixture.write_observed());
+    assert_eq!(fixture.journal(), fixture.expected_journal());
+    assert_eq!(fixture.protected_bytes(), bytes);
+    assert_eq!(
+        fixture.full_effect_requests(),
+        fixture.expected_effect_requests()
+    );
+}
+
+#[test]
+fn public_continue_applies_staged_deletions_before_the_gate() {
+    use super::continue_contracts::Continuation;
+    let fixture = Continuation::with_deleted(&"a".repeat(SHA_LEN), 0);
+    let bytes = fixture.protected_bytes();
+    assert!(fixture.deleted_exists());
+    let args = ["git-factor", "--continue", "--message", "test: message"].map(OsString::from);
+
+    let code = main_entry_with_vec(fixture.ctx().io, Ok(fixture.ctx()), &args);
+
+    assert_eq!(code, EXIT_OK);
+    assert_eq!(
+        fixture.stdout(),
+        "FACTOR: Complete. Final commit split into 1 commits.\n"
+    );
+    assert_eq!(fixture.stderr(), "");
+    assert!(!fixture.deleted_exists());
+    assert_eq!(fixture.journal(), fixture.expected_journal());
+    assert_eq!(fixture.protected_bytes(), bytes);
+    assert_eq!(
+        fixture.full_effect_requests(),
+        fixture.expected_effect_requests()
+    );
+    assert!(!fixture.session_active());
+    assert_eq!(
+        fixture.deleted_requests(),
+        vec![PathBuf::from("deleted.txt")]
+    );
+}
+
+#[test]
+fn public_continue_reports_read_count_after_commit_state_failure() {
+    use super::continue_contracts::{Continuation, ContinueFileFault};
+    let fixture = Continuation::with_file_fault(
+        &"a".repeat(SHA_LEN),
+        ContinueFileFault::ReadCountAfterCommit,
+    );
+    let mut journal = fixture.journal();
+    journal.insert("split_count".to_owned(), "1\n".to_owned());
+    let bytes = fixture.protected_bytes();
+    let args = ["git-factor", "--continue", "--message", "test: message"].map(OsString::from);
+
+    let code = main_entry_with_vec(fixture.ctx().io, Ok(fixture.ctx()), &args);
+
+    assert_eq!(code, EXIT_SOFTWARE);
+    assert_eq!(fixture.stdout(), "");
+    assert_eq!(
+        fixture.stderr(),
+        "failed to read state: continuation state read denied\n"
+    );
+    assert!(fixture.file_fault_observed());
+    assert_eq!(fixture.journal(), journal);
+    assert_eq!(fixture.protected_bytes(), bytes);
+    assert_eq!(
+        fixture.full_effect_requests(),
+        fixture.expected_effect_requests()
+    );
+}
+
+#[test]
+fn public_continue_reports_active_session_directory_query_failure() {
+    use super::continue_contracts::{Continuation, ContinueFault};
+    let fixture = Continuation::with_fault(&"a".repeat(SHA_LEN), ContinueFault::SessionDir);
+    let journal = fixture.journal();
+    let bytes = fixture.protected_bytes();
+    let args = ["git-factor", "--continue", "--message", "test: message"].map(OsString::from);
+
+    let code = main_entry_with_vec(fixture.ctx().io, Ok(fixture.ctx()), &args);
+
+    assert_eq!(code, EXIT_DATAERR);
+    assert_eq!(fixture.stdout(), "");
+    assert_eq!(
+        fixture.stderr(),
+        "failed to determine git directory: continuation query denied\n"
+    );
+    assert_eq!(fixture.journal(), journal);
+    assert_eq!(fixture.protected_bytes(), bytes);
+    assert_eq!(
+        fixture.full_effect_requests(),
+        fixture.expected_effect_requests()
+    );
+}
+
+#[test]
+fn public_continue_prioritizes_failed_rehydration_after_gate_rejected() {
+    use super::continue_contracts::{Continuation, ContinueRecoveryFailure};
+    let fixture = Continuation::with_recovery_failure(
+        &"a".repeat(SHA_LEN),
+        ContinueRecoveryFailure::GateRejected,
+    );
+    let journal = fixture.journal();
+    let bytes = fixture.protected_bytes();
+    let args = ["git-factor", "--continue", "--message", "test: message"].map(OsString::from);
+
+    let code = main_entry_with_vec(fixture.ctx().io, Ok(fixture.ctx()), &args);
+
+    assert_eq!(code, EXIT_SOFTWARE);
+    assert_eq!(fixture.stdout(), "");
+    assert_eq!(
+        fixture.stderr(),
+        "git command failed: git write-tree: continuation query denied\n"
+    );
+    assert_eq!(fixture.journal(), journal);
+    assert_eq!(fixture.protected_bytes(), bytes);
+    assert_eq!(
+        fixture.full_effect_requests(),
+        fixture.expected_effect_requests()
+    );
+}
+
+#[test]
+fn public_continue_prioritizes_failed_rehydration_after_gate_spawn() {
+    use super::continue_contracts::{Continuation, ContinueRecoveryFailure};
+    let fixture = Continuation::with_recovery_failure(
+        &"a".repeat(SHA_LEN),
+        ContinueRecoveryFailure::GateSpawn,
+    );
+    let journal = fixture.journal();
+    let bytes = fixture.protected_bytes();
+    let args = ["git-factor", "--continue", "--message", "test: message"].map(OsString::from);
+
+    let code = main_entry_with_vec(fixture.ctx().io, Ok(fixture.ctx()), &args);
+
+    assert_eq!(code, EXIT_SOFTWARE);
+    assert_eq!(fixture.stdout(), "");
+    assert_eq!(
+        fixture.stderr(),
+        "git command failed: git write-tree: continuation query denied\n"
+    );
+    assert_eq!(fixture.journal(), journal);
+    assert_eq!(fixture.protected_bytes(), bytes);
+    assert_eq!(
+        fixture.full_effect_requests(),
+        fixture.expected_effect_requests()
+    );
+}
+
+#[test]
+fn public_continue_prioritizes_failed_rehydration_after_post_gate_dirty() {
+    use super::continue_contracts::{Continuation, ContinueRecoveryFailure};
+    let fixture = Continuation::with_recovery_failure(
+        &"a".repeat(SHA_LEN),
+        ContinueRecoveryFailure::PostGateDirty,
+    );
+    let journal = fixture.journal();
+    let bytes = fixture.protected_bytes();
+    let args = ["git-factor", "--continue", "--message", "test: message"].map(OsString::from);
+
+    let code = main_entry_with_vec(fixture.ctx().io, Ok(fixture.ctx()), &args);
+
+    assert_eq!(code, EXIT_SOFTWARE);
+    assert_eq!(fixture.stdout(), "");
+    assert_eq!(
+        fixture.stderr(),
+        "git command failed: git write-tree: continuation query denied\n"
+    );
+    assert_eq!(fixture.journal(), journal);
+    assert_eq!(fixture.protected_bytes(), bytes);
+    assert_eq!(
+        fixture.full_effect_requests(),
+        fixture.expected_effect_requests()
+    );
+}
+
+#[test]
+fn public_continue_rejects_malformed_head_tree_after_commit() {
+    use super::continue_contracts::Continuation;
+    let fixture = Continuation::with_invalid_tree(&"a".repeat(SHA_LEN), "not-a-tree", false);
+    let mut journal = fixture.journal();
+    journal.insert("split_count".to_owned(), "1\n".to_owned());
+    let bytes = fixture.protected_bytes();
+    let args = ["git-factor", "--continue", "--message", "test: message"].map(OsString::from);
+
+    let code = main_entry_with_vec(fixture.ctx().io, Ok(fixture.ctx()), &args);
+
+    assert_eq!(code, EXIT_SOFTWARE);
+    assert_eq!(fixture.stdout(), "");
+    assert_eq!(
+        fixture.stderr(),
+        "git command failed: invalid tree hash: 'not-a-tree'\n"
+    );
+    assert_eq!(fixture.journal(), journal);
+    assert_eq!(fixture.protected_bytes(), bytes);
+    assert_eq!(
+        fixture.full_effect_requests(),
+        fixture.expected_effect_requests()
+    );
+}
+
+#[test]
+fn public_continue_rejects_malformed_expected_tree_after_commit() {
+    use super::continue_contracts::Continuation;
+    let fixture = Continuation::with_invalid_tree(&"a".repeat(SHA_LEN), "not-a-tree", true);
+    let mut journal = fixture.journal();
+    journal.insert("split_count".to_owned(), "1\n".to_owned());
+    let bytes = fixture.protected_bytes();
+    let args = ["git-factor", "--continue", "--message", "test: message"].map(OsString::from);
+
+    let code = main_entry_with_vec(fixture.ctx().io, Ok(fixture.ctx()), &args);
+
+    assert_eq!(code, EXIT_SOFTWARE);
+    assert_eq!(fixture.stdout(), "");
+    assert_eq!(
+        fixture.stderr(),
+        "git command failed: invalid tree hash: 'not-a-tree'\n"
+    );
+    assert_eq!(fixture.journal(), journal);
+    assert_eq!(fixture.protected_bytes(), bytes);
+    assert_eq!(
+        fixture.full_effect_requests(),
+        fixture.expected_effect_requests()
+    );
+}
+
+#[test]
+fn public_continue_admits_required_active_rebase_before_no_staged_refusal() {
+    use crate::git_factor::tests::continue_contracts::Continuation;
+
+    let fixture = Continuation::with_active_rebase(&"a".repeat(SHA_LEN), true);
+    let before_journal = fixture.journal();
+    let before_bytes = fixture.protected_bytes();
+    let args = ["git-factor", "--continue", "--message", "test: message"].map(OsString::from);
+
+    let code = main_entry_with_vec(fixture.ctx().io, Ok(fixture.ctx()), &args);
+
+    assert_eq!(code, EXIT_USAGE);
+    assert_eq!(fixture.stdout(), "");
+    assert_eq!(
+        fixture.stderr(),
+        concat!(
+            "no staged changes to commit\n",
+            "NEXT: stage exactly one atomic change, then rerun:\n",
+            "  git factor --continue --message \"type: description\"\n",
+        )
+    );
+    assert_eq!(fixture.journal(), before_journal);
+    assert_eq!(fixture.protected_bytes(), before_bytes);
+    assert_eq!(
+        fixture.full_effect_requests(),
+        fixture.expected_effect_requests()
+    );
+}
+
+#[test]
+fn public_continue_completes_the_last_admitted_split_count() {
+    let fixture = super::continue_contracts::Continuation::new(
+        &"a".repeat(SHA_LEN),
+        254,
+        super::continue_contracts::ContinueCase::Complete,
+    );
+    let before = fixture.protected_bytes();
+    let args = ["git-factor", "--continue", "--message", "test: message"].map(OsString::from);
+
+    let code = main_entry_with_vec(fixture.ctx().io, Ok(fixture.ctx()), &args);
+
+    assert_eq!(code, EXIT_OK);
+    assert_eq!(
+        fixture.stdout(),
+        "FACTOR: Complete. Final commit split into 255 commits.\n"
+    );
+    assert_eq!(fixture.stderr(), "");
+    assert_eq!(fixture.journal(), fixture.expected_journal());
+    assert_eq!(fixture.protected_bytes(), before);
+    assert_eq!(
+        fixture.full_effect_requests(),
+        fixture.expected_effect_requests()
+    );
+    assert_eq!(
+        fixture.effect_requests(),
+        vec![
+            vec!["git", "diff", "--quiet", "--staged"],
+            vec!["git", "checkout", "--quiet", "--", "."],
+            vec!["git", "clean", "--force", "--quiet", "-d"],
+            vec!["git", "checkout-index", "--all", "--force", "--quiet"],
+            vec!["bash", "-c", "true"],
+            vec!["git", "commit", "--quiet", "--message", "test: message"],
+        ]
+        .into_iter()
+        .map(|call| call.into_iter().map(str::to_owned).collect::<Vec<_>>())
+        .collect::<Vec<_>>()
+    );
+    assert!(!fixture.session_active());
+}
+
+#[test]
+fn public_continue_rejects_short_hex_head_tree_after_commit() {
+    use super::continue_contracts::Continuation;
+    let fixture = Continuation::with_invalid_tree(
+        &"a".repeat(SHA_LEN),
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        false,
+    );
+    let mut journal = fixture.journal();
+    journal.insert("split_count".to_owned(), "1\n".to_owned());
+    let bytes = fixture.protected_bytes();
+    let args = ["git-factor", "--continue", "--message", "test: message"].map(OsString::from);
+
+    let code = main_entry_with_vec(fixture.ctx().io, Ok(fixture.ctx()), &args);
+
+    assert_eq!(code, EXIT_SOFTWARE);
+    assert_eq!(fixture.stdout(), "");
+    assert_eq!(
+        fixture.stderr(),
+        "git command failed: invalid tree hash: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'\n"
+    );
+    assert_eq!(fixture.journal(), journal);
+    assert_eq!(fixture.protected_bytes(), bytes);
+    assert_eq!(
+        fixture.full_effect_requests(),
+        fixture.expected_effect_requests()
+    );
+}
+
+#[test]
+fn public_continue_rejects_long_hex_head_tree_after_commit() {
+    use super::continue_contracts::Continuation;
+    let fixture = Continuation::with_invalid_tree(
+        &"a".repeat(SHA_LEN),
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        false,
+    );
+    let mut journal = fixture.journal();
+    journal.insert("split_count".to_owned(), "1\n".to_owned());
+    let bytes = fixture.protected_bytes();
+    let args = ["git-factor", "--continue", "--message", "test: message"].map(OsString::from);
+
+    let code = main_entry_with_vec(fixture.ctx().io, Ok(fixture.ctx()), &args);
+
+    assert_eq!(code, EXIT_SOFTWARE);
+    assert_eq!(fixture.stdout(), "");
+    assert_eq!(
+        fixture.stderr(),
+        "git command failed: invalid tree hash: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'\n"
+    );
+    assert_eq!(fixture.journal(), journal);
+    assert_eq!(fixture.protected_bytes(), bytes);
+    assert_eq!(
+        fixture.full_effect_requests(),
+        fixture.expected_effect_requests()
+    );
+}
+
+#[test]
+fn public_continue_rejects_forty_byte_nonhex_head_tree_after_commit() {
+    use super::continue_contracts::Continuation;
+    let fixture = Continuation::with_invalid_tree(
+        &"a".repeat(SHA_LEN),
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaag",
+        false,
+    );
+    let mut journal = fixture.journal();
+    journal.insert("split_count".to_owned(), "1\n".to_owned());
+    let bytes = fixture.protected_bytes();
+    let args = ["git-factor", "--continue", "--message", "test: message"].map(OsString::from);
+
+    let code = main_entry_with_vec(fixture.ctx().io, Ok(fixture.ctx()), &args);
+
+    assert_eq!(code, EXIT_SOFTWARE);
+    assert_eq!(fixture.stdout(), "");
+    assert_eq!(
+        fixture.stderr(),
+        "git command failed: invalid tree hash: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaag'\n"
+    );
+    assert_eq!(fixture.journal(), journal);
+    assert_eq!(fixture.protected_bytes(), bytes);
+    assert_eq!(
+        fixture.full_effect_requests(),
+        fixture.expected_effect_requests()
+    );
+}
+
+#[test]
+fn public_continue_reports_the_smallest_native_gate_rejection_code() {
+    use super::continue_contracts::Continuation;
+    let fixture = Continuation::with_gate_code(&"a".repeat(SHA_LEN), 1);
+    let journal = fixture.journal();
+    let bytes = fixture.protected_bytes();
+    let args = ["git-factor", "--continue", "--message", "test: message"].map(OsString::from);
+
+    let code = main_entry_with_vec(fixture.ctx().io, Ok(fixture.ctx()), &args);
+
+    assert_eq!(code, EXIT_TEMPFAIL);
+    assert_eq!(
+        fixture.stdout(),
+        concat!(
+            "FACTOR: Exec gate failed. No commit created.\nEXEC: true\nCODE: 1\n\n",
+            "NEXT: Adjust staged changes so the exec gate passes, then retry:\n",
+            "  git factor --continue --message \"type: description\"\n",
+        )
+    );
+    assert_eq!(fixture.stderr(), "exec gate failed: true (exit code 1)\n");
+    assert_eq!(fixture.journal(), journal);
+    assert_eq!(fixture.protected_bytes(), bytes);
+    assert_eq!(
+        fixture.full_effect_requests(),
+        fixture.expected_effect_requests()
+    );
+}
+
+#[test]
+fn public_continue_reports_the_largest_native_gate_rejection_code() {
+    use super::continue_contracts::Continuation;
+    let fixture = Continuation::with_gate_code(&"a".repeat(SHA_LEN), 255);
+    let journal = fixture.journal();
+    let bytes = fixture.protected_bytes();
+    let args = ["git-factor", "--continue", "--message", "test: message"].map(OsString::from);
+
+    let code = main_entry_with_vec(fixture.ctx().io, Ok(fixture.ctx()), &args);
+
+    assert_eq!(code, EXIT_TEMPFAIL);
+    assert_eq!(
+        fixture.stdout(),
+        concat!(
+            "FACTOR: Exec gate failed. No commit created.\nEXEC: true\nCODE: 255\n\n",
+            "NEXT: Adjust staged changes so the exec gate passes, then retry:\n",
+            "  git factor --continue --message \"type: description\"\n",
+        )
+    );
+    assert_eq!(fixture.stderr(), "exec gate failed: true (exit code 255)\n");
+    assert_eq!(fixture.journal(), journal);
+    assert_eq!(fixture.protected_bytes(), bytes);
+    assert_eq!(
+        fixture.full_effect_requests(),
+        fixture.expected_effect_requests()
+    );
+}
