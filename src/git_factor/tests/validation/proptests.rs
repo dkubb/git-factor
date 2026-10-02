@@ -357,7 +357,8 @@ mod remove_empty_root_in {
                         let sequence_editor = format!("{} '--drop' '{short_root}'", editor.1);
                         expected_calls.push(format!(concat!(
                             "status git [\"rebase\", \"--empty\", \"drop\", ",
-                            "\"--interactive\", \"--no-update-refs\", ",
+                            "\"--interactive\", \"--no-autosquash\", ",
+                            "\"--no-update-refs\", ",
                             "\"--quiet\", \"--root\"] ",
                             "[(\"GIT_EDITOR\", \"false\"), ",
                             "(\"GIT_SEQUENCE_EDITOR\", {:?})] quiet=false",
@@ -437,7 +438,8 @@ mod remove_empty_root_in {
             );
             let rebase = format!(concat!(
                 "status git [\"rebase\", \"--empty\", \"drop\", ",
-                "\"--interactive\", \"--no-update-refs\", ",
+                "\"--interactive\", \"--no-autosquash\", ",
+                "\"--no-update-refs\", ",
                 "\"--quiet\", \"--root\"] ",
                 "[(\"GIT_EDITOR\", \"false\"), (\"GIT_SEQUENCE_EDITOR\", {:?})]",
                 " quiet=false cwd=\"/contract/repository\"",
