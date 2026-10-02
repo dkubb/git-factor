@@ -1,5 +1,6 @@
 use super::*;
 use crate::git_factor::tests::abort_contracts;
+use crate::git_factor::tests::continue_contracts;
 use crate::git_factor::tests::start_contracts::launcher::{LaunchFault, LaunchFixture};
 use crate::git_factor::tests::start_contracts::replay;
 use crate::git_factor::tests::start_contracts::{DirectStart, GateCase, query};
@@ -562,5 +563,374 @@ proptest! {
         prop_assert_eq!(fixture.calls(), fixture.expected_calls());
         prop_assert_eq!(fixture.remaining_executable_replies(), 0);
         prop_assert_eq!(fixture.remaining_keys(), Vec::<String>::new());
+    }
+}
+
+proptest! {
+    #[test]
+    fn public_continue_preserves_generated_completion(
+        original in string_regex("[0-9a-f]{40}").or_abort("original identity"),
+        split_count in prop_oneof![
+            8 => u8::MIN..=254,
+            1 => Just(253),
+            1 => Just(254),
+        ],
+        deleted in any::<bool>(),
+    ) {
+        let fixture = if deleted {
+            continue_contracts::Continuation::with_deleted(
+                &original, split_count)
+        } else {
+            continue_contracts::Continuation::new(
+                &original, split_count,
+                continue_contracts::ContinueCase::Complete)
+        };
+        let before = fixture.protected_bytes();
+        let args = ["git-factor", "--continue", "--message", "test: message"].map(OsString::from);
+
+        let code = main_entry_with_vec(fixture.ctx().io, Ok(fixture.ctx()), &args);
+
+        prop_assert_eq!(code, EXIT_OK);
+        prop_assert_eq!(fixture.stdout(), format!(
+            "FACTOR: Complete. Final commit split into {} commits.\n", u16::from(split_count) + 1,
+        ));
+        prop_assert_eq!(fixture.stderr(), "");
+        prop_assert!(!fixture.deleted_exists());
+        prop_assert_eq!(fixture.journal(), fixture.expected_journal());
+        prop_assert_eq!(fixture.protected_bytes(), before);
+        prop_assert_eq!(fixture.full_effect_requests(), fixture.expected_effect_requests());
+        prop_assert!(!fixture.session_active());
+        let expected_removals = if deleted {
+            vec![PathBuf::from("deleted.txt")]
+        } else {
+            Vec::new()
+        };
+        prop_assert_eq!(fixture.deleted_requests(), expected_removals);
+    }
+}
+
+proptest! {
+    #[test]
+    fn public_continue_propagates_generated_query_failures(
+        original in string_regex("[0-9a-f]{40}").or_abort("original identity"),
+        fault in prop::sample::select(vec![
+            continue_contracts::ContinueFault::SessionDir,
+            continue_contracts::ContinueFault::StagedStatus,
+            continue_contracts::ContinueFault::Checkout,
+            continue_contracts::ContinueFault::Clean,
+            continue_contracts::ContinueFault::CheckoutIndex,
+            continue_contracts::ContinueFault::DeletedPaths,
+            continue_contracts::ContinueFault::BeforeStatus,
+            continue_contracts::ContinueFault::AfterStatus,
+            continue_contracts::ContinueFault::Metadata,
+            continue_contracts::ContinueFault::Commit,
+            continue_contracts::ContinueFault::HeadTree,
+            continue_contracts::ContinueFault::Restore,
+            continue_contracts::ContinueFault::RestoredTree,
+            continue_contracts::ContinueFault::Reset,
+            continue_contracts::ContinueFault::DiffStat,
+            continue_contracts::ContinueFault::Untracked,
+
+        ]),
+    ) {
+        let fixture = continue_contracts::Continuation::with_fault(
+            &original, fault);
+        let before = fixture.protected_bytes();
+        let args = ["git-factor", "--continue", "--message", "test: message"].map(OsString::from);
+
+        let code = main_entry_with_vec(fixture.ctx().io, Ok(fixture.ctx()), &args);
+
+        let expected_code = if matches!(fault,
+            continue_contracts::ContinueFault::SessionDir) {
+            EXIT_DATAERR
+        } else { EXIT_SOFTWARE };
+        prop_assert_eq!(code, expected_code);
+        prop_assert_eq!(fixture.stdout(), "");
+        prop_assert_eq!(fixture.stderr(),
+            continue_contracts::Continuation::fault_stderr(fault));
+        prop_assert_eq!(fixture.journal(), fixture.expected_journal());
+        prop_assert_eq!(fixture.protected_bytes(), before);
+        prop_assert_eq!(fixture.full_effect_requests(), fixture.expected_effect_requests());
+    }
+}
+
+proptest! {
+    #[test]
+    fn public_continue_preserves_generated_gate_and_remainder_outcomes(
+        original in string_regex("[0-9a-f]{40}").or_abort("original identity"),
+        split_count in prop_oneof![
+            8 => u8::MIN..=254,
+            1 => Just(253),
+            1 => Just(254),
+        ],
+        case in prop::sample::select(vec![
+            continue_contracts::ContinueCase::Complete,
+            continue_contracts::ContinueCase::GateRejected,
+            continue_contracts::ContinueCase::GateSpawn,
+            continue_contracts::ContinueCase::NoStaged,
+            continue_contracts::ContinueCase::PostGateDirty,
+            continue_contracts::ContinueCase::PreGateDirty,
+            continue_contracts::ContinueCase::Remainder,
+        ]),
+    ) {
+        let fixture = continue_contracts::Continuation::new(
+            &original, split_count, case);
+        let before = fixture.protected_bytes();
+        let args = ["git-factor", "--continue", "--message", "test: message"].map(OsString::from);
+
+        let code = main_entry_with_vec(fixture.ctx().io, Ok(fixture.ctx()), &args);
+
+        prop_assert_eq!(code, fixture.expected_code());
+        prop_assert_eq!(fixture.stdout(), fixture.expected_stdout());
+        prop_assert_eq!(fixture.stderr(), fixture.expected_stderr());
+        prop_assert_eq!(fixture.journal(), fixture.expected_journal());
+        prop_assert_eq!(fixture.protected_bytes(), before);
+        prop_assert_eq!(fixture.full_effect_requests(), fixture.expected_effect_requests());
+        prop_assert_eq!(fixture.session_active(),
+            !matches!(case, continue_contracts::ContinueCase::Complete));
+    }
+}
+
+proptest! {
+    #[test]
+    fn public_continue_preserves_generated_state_failure_boundaries(
+        original in string_regex("[0-9a-f]{40}").or_abort("original identity"),
+        fault in prop::sample::select(vec![
+            continue_contracts::ContinueFileFault::ReadCommits,
+            continue_contracts::ContinueFileFault::ReadPhase,
+            continue_contracts::ContinueFileFault::ReadRequires,
+            continue_contracts::ContinueFileFault::ReadIndex,
+            continue_contracts::ContinueFileFault::ReadExec,
+            continue_contracts::ContinueFileFault::ReadCount,
+            continue_contracts::ContinueFileFault::ReadCountAfterCommit,
+            continue_contracts::ContinueFileFault::ReadExpected,
+            continue_contracts::ContinueFileFault::WriteCount,
+
+        ]),
+    ) {
+        use continue_contracts::{Continuation, ContinueFileFault};
+        let fixture = Continuation::with_file_fault(&original, fault);
+        let mut journal = fixture.journal();
+        if matches!(fault, ContinueFileFault::ReadExpected | ContinueFileFault::ReadCountAfterCommit) {
+            journal.insert("split_count".to_owned(), "1\n".to_owned());
+        }
+        let bytes = fixture.protected_bytes();
+        let args = ["git-factor", "--continue", "--message", "test: message"].map(OsString::from);
+        let stderr = if matches!(fault, ContinueFileFault::WriteCount) {
+            "failed to write state: continuation state write denied\n"
+        } else if matches!(fault, ContinueFileFault::ReadExpected) {
+            "git command failed: expected tree fallback denied\n"
+        } else {
+            "failed to read state: continuation state read denied\n"
+        };
+
+        let code = main_entry_with_vec(fixture.ctx().io, Ok(fixture.ctx()), &args);
+
+        prop_assert_eq!(code, EXIT_SOFTWARE);
+        prop_assert_eq!(fixture.stdout(), "");
+        prop_assert_eq!(fixture.stderr(), stderr);
+        prop_assert!(fixture.file_fault_observed());
+        prop_assert_eq!(fixture.journal(), journal);
+        prop_assert_eq!(fixture.protected_bytes(), bytes);
+        prop_assert_eq!(fixture.full_effect_requests(), fixture.expected_effect_requests());
+    }
+}
+
+proptest! {
+    #[test]
+    fn public_continue_preserves_generated_output_failure_frontiers(
+        original in string_regex("[0-9a-f]{40}").or_abort("original identity"),
+        write in prop::sample::select(vec![
+            continue_contracts::ContinueWrite::Complete,
+            continue_contracts::ContinueWrite::GateBanner,
+            continue_contracts::ContinueWrite::GateCommand,
+            continue_contracts::ContinueWrite::GateCode,
+            continue_contracts::ContinueWrite::GateSeparator,
+            continue_contracts::ContinueWrite::GateNext,
+            continue_contracts::ContinueWrite::GateUsage,
+            continue_contracts::ContinueWrite::Remainder,
+
+        ]),
+    ) {
+        let fixture = continue_contracts::Continuation::with_write(
+            &original, write);
+        let bytes = fixture.protected_bytes();
+        let args = ["git-factor", "--continue", "--message", "test: message"].map(OsString::from);
+
+        let code = main_entry_with_vec(fixture.ctx().io, Ok(fixture.ctx()), &args);
+
+        prop_assert_eq!(code, EXIT_SOFTWARE);
+        prop_assert_eq!(fixture.stdout(), write.prefix());
+        prop_assert_eq!(fixture.stderr(), "failed to write output: continuation output denied\n");
+        prop_assert!(fixture.write_observed());
+        prop_assert_eq!(fixture.journal(), fixture.expected_journal());
+        prop_assert_eq!(fixture.protected_bytes(), bytes);
+        prop_assert_eq!(fixture.full_effect_requests(), fixture.expected_effect_requests());
+    }
+}
+
+proptest! {
+    #[test]
+    fn public_continue_preserves_generated_precondition_refusals(
+        original in string_regex("[0-9a-f]{40}").or_abort("original identity"),
+        state in prop::sample::select(vec![
+            continue_contracts::ContinueState::Absent,
+            continue_contracts::ContinueState::Pending,
+            continue_contracts::ContinueState::RebaseRequired,
+            continue_contracts::ContinueState::IndexOutsideSpan,
+        ]),
+    ) {
+        use continue_contracts::{Continuation, ContinueState};
+        let fixture = Continuation::with_state(&original, state);
+        let journal = fixture.journal();
+        let bytes = fixture.protected_bytes();
+        let args = ["git-factor", "--continue", "--message", "test: message"].map(OsString::from);
+        let (expected_code, stderr) = match state {
+            ContinueState::Absent => (EXIT_USAGE, "no active factor session\n"),
+            ContinueState::Pending => (EXIT_USAGE,
+                "run 'git factor --continue' with no --message to begin splitting this commit\n"),
+            ContinueState::RebaseRequired => (EXIT_SOFTWARE,
+                "git command failed: no rebase in progress\n"),
+            ContinueState::IndexOutsideSpan => (EXIT_SOFTWARE,
+                "git command failed: commit index 1 out of range (have 1 commits)\n"),
+        };
+
+        let code = main_entry_with_vec(fixture.ctx().io, Ok(fixture.ctx()), &args);
+
+        prop_assert_eq!(code, expected_code);
+        prop_assert_eq!(fixture.stdout(), "");
+        prop_assert_eq!(fixture.stderr(), stderr);
+        prop_assert_eq!(fixture.journal(), journal);
+        prop_assert_eq!(fixture.protected_bytes(), bytes);
+        prop_assert_eq!(fixture.full_effect_requests(), Vec::new());
+    }
+
+}
+
+proptest! {
+    #[test]
+    fn public_continue_preserves_generated_rehydration_failure_boundaries(
+        original in string_regex("[0-9a-f]{40}").or_abort("original identity"),
+        failure in prop::sample::select(vec![
+            continue_contracts::ContinueRecoveryFailure::GateRejected,
+            continue_contracts::ContinueRecoveryFailure::GateSpawn,
+            continue_contracts::ContinueRecoveryFailure::PostGateDirty,
+        ]),
+    ) {
+        let fixture = continue_contracts::Continuation::with_recovery_failure(
+            &original, failure);
+        let journal = fixture.journal();
+        let bytes = fixture.protected_bytes();
+        let args = ["git-factor", "--continue", "--message", "test: message"].map(OsString::from);
+
+        let code = main_entry_with_vec(fixture.ctx().io, Ok(fixture.ctx()), &args);
+
+        prop_assert_eq!(code, EXIT_SOFTWARE);
+        prop_assert_eq!(fixture.stdout(), "");
+        prop_assert_eq!(fixture.stderr(), "git command failed: git write-tree: continuation query denied\n");
+        prop_assert_eq!(fixture.journal(), journal);
+        prop_assert_eq!(fixture.protected_bytes(), bytes);
+        prop_assert_eq!(fixture.full_effect_requests(), fixture.expected_effect_requests());
+    }
+}
+
+proptest! {
+    #[test]
+    fn public_continue_rejects_generated_invalid_tree_replies_after_commit(
+        original in string_regex("[0-9a-f]{40}").or_abort("original identity"),
+        invalid in prop_oneof![
+            string_regex("[g-z]{1,12}").or_abort("obvious invalid tree"),
+            string_regex("[0-9a-f]{39}").or_abort("short hex tree"),
+            string_regex("[0-9a-f]{41}").or_abort("long hex tree"),
+            string_regex("[0-9a-f]{39}g").or_abort("nonhex forty-byte tree"),
+        ],
+        expected in any::<bool>(),
+    ) {
+        let fixture = continue_contracts::Continuation::with_invalid_tree(
+            &original, &invalid, expected);
+        let mut journal = fixture.journal();
+        journal.insert("split_count".to_owned(), "1\n".to_owned());
+        let bytes = fixture.protected_bytes();
+        let args = ["git-factor", "--continue", "--message", "test: message"].map(OsString::from);
+
+        let code = main_entry_with_vec(fixture.ctx().io, Ok(fixture.ctx()), &args);
+
+        prop_assert_eq!(code, EXIT_SOFTWARE);
+        prop_assert_eq!(fixture.stdout(), "");
+        prop_assert_eq!(fixture.stderr(), format!("git command failed: invalid tree hash: '{invalid}'\n"));
+        prop_assert_eq!(fixture.journal(), journal);
+        prop_assert_eq!(fixture.protected_bytes(), bytes);
+        prop_assert_eq!(fixture.full_effect_requests(), fixture.expected_effect_requests());
+    }
+}
+
+proptest! {
+    #[test]
+    fn public_continue_preserves_generated_required_active_rebase_admission(
+        original in string_regex("[0-9a-f]{40}").or_abort("original identity"),
+        merge in any::<bool>(),
+    ) {
+        let fixture = continue_contracts::Continuation::with_active_rebase(&original, merge);
+        let before_journal = fixture.journal();
+        let before_bytes = fixture.protected_bytes();
+        let args = ["git-factor", "--continue", "--message", "test: message"].map(OsString::from);
+
+        let code = main_entry_with_vec(fixture.ctx().io, Ok(fixture.ctx()), &args);
+
+        prop_assert_eq!(code, EXIT_USAGE);
+        prop_assert_eq!(fixture.stdout(), "");
+        prop_assert_eq!(fixture.stderr(), concat!(
+            "no staged changes to commit\n",
+            "NEXT: stage exactly one atomic change, then rerun:\n",
+            "  git factor --continue --message \"type: description\"\n",
+        ));
+        prop_assert_eq!(fixture.journal(), before_journal);
+        prop_assert_eq!(fixture.protected_bytes(), before_bytes);
+        prop_assert_eq!(fixture.full_effect_requests(), fixture.expected_effect_requests());
+    }
+}
+
+proptest! {
+    #[test]
+    fn public_continue_reports_generated_counter_overflow_after_commit(
+        original in string_regex("[0-9a-f]{40}").or_abort("original identity"),
+    ) {
+        let fixture = continue_contracts::Continuation::with_counter_overflow(&original);
+        let journal = fixture.journal();
+        let bytes = fixture.protected_bytes();
+        let args = ["git-factor", "--continue", "--message", "test: message"].map(OsString::from);
+
+        let code = main_entry_with_vec(fixture.ctx().io, Ok(fixture.ctx()), &args);
+
+        prop_assert_eq!(code, EXIT_SOFTWARE);
+        prop_assert_eq!(fixture.stdout(), "");
+        prop_assert_eq!(fixture.stderr(), "git command failed: split_count overflow\n");
+        prop_assert_eq!(fixture.journal(), journal);
+        prop_assert_eq!(fixture.protected_bytes(), bytes);
+        prop_assert_eq!(fixture.full_effect_requests(), fixture.expected_effect_requests());
+    }
+
+    #[test]
+    fn public_continue_reports_generated_gate_rejection_codes(
+        original in string_regex("[0-9a-f]{40}").or_abort("original identity"),
+        rejected in 1..=u8::MAX,
+    ) {
+        let fixture = continue_contracts::Continuation::with_gate_code(&original, rejected);
+        let journal = fixture.journal();
+        let bytes = fixture.protected_bytes();
+        let args = ["git-factor", "--continue", "--message", "test: message"].map(OsString::from);
+
+        let code = main_entry_with_vec(fixture.ctx().io, Ok(fixture.ctx()), &args);
+
+        prop_assert_eq!(code, EXIT_TEMPFAIL);
+        prop_assert_eq!(fixture.stdout(), format!(concat!(
+            "FACTOR: Exec gate failed. No commit created.\nEXEC: true\nCODE: {}\n\n",
+            "NEXT: Adjust staged changes so the exec gate passes, then retry:\n",
+            "  git factor --continue --message \"type: description\"\n",
+        ), rejected));
+        prop_assert_eq!(fixture.stderr(), format!("exec gate failed: true (exit code {rejected})\n"));
+        prop_assert_eq!(fixture.journal(), journal);
+        prop_assert_eq!(fixture.protected_bytes(), bytes);
+        prop_assert_eq!(fixture.full_effect_requests(), fixture.expected_effect_requests());
     }
 }
