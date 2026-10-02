@@ -60,7 +60,7 @@ git factor --version
 
 ## Requirements
 
-- Git
+- Git 2.38 or newer
 - Rust and Cargo
 - a fully clean repository before `git factor --exec ...`
 - a deterministic validation command for `--exec`

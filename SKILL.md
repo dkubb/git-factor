@@ -8,10 +8,10 @@ description: >-
   one commit or one contiguous commit span into smaller, atomic commits with
   rebase.
 compatibility: Unified agent skills CLI
-version: 17
+version: 18
 metadata:
   author: dkubb
-  updated: "2026-03-16"
+  updated: "2026-10-02"
 triggers:
   - "split a commit"
   - "factor a commit"
@@ -43,6 +43,7 @@ Keep steps short. Keep each commit small.
 
 ## Prerequisites
 
+- Git 2.38 or newer.
 - `git-factor` and `git-sequence-editor` are available on `$PATH`.
 - The repository must be fully clean before `git factor --exec`.
   - Require `git status --porcelain=v1` to be empty.

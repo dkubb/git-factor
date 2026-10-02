@@ -2983,6 +2983,63 @@ fi
     }
 
     #[test]
+    fn finish_preserves_unrelated_branch_during_descendant_replay() {
+        let dir = init_repo();
+        let repo = dir.path();
+        commit_file(repo, "base.txt", "base\n", "Add base");
+        write_file(repo, "first.txt", "first\n");
+        write_file(repo, "second.txt", "second\n");
+        git(repo, &["add", "first.txt", "second.txt"]);
+        git(repo, &["commit", "--message", "Add selected changes"]);
+        let selected = git(repo, &["rev-parse", "HEAD"]);
+        git(repo, &["branch", "other", selected.as_str()]);
+        commit_file(repo, "later.txt", "later\n", "Add descendant");
+        let original_tree = git(repo, &["rev-parse", "HEAD^{tree}"]);
+        let original_branch = git(repo, &["symbolic-ref", "HEAD"]);
+        git(repo, &["config", "rebase.updateRefs", "true"]);
+
+        // Arrange a partially split session with a descendant still awaiting replay.
+        let started = Command::new(git_factor_bin())
+            .current_dir(repo)
+            .args(["--exec", "true", selected.as_str()])
+            .output()
+            .or_abort();
+        assert_eq!(started.status.code(), Some(EXIT_OK));
+        git(repo, &["add", "first.txt"]);
+        let submitted = Command::new(git_factor_bin())
+            .current_dir(repo)
+            .args(["--continue", "--message", "Add first change"])
+            .output()
+            .or_abort();
+        assert_eq!(submitted.status.code(), Some(EXIT_OK));
+        assert!(git_dir(repo).join("rebase-merge").exists());
+        assert_eq!(git(repo, &["rev-parse", "refs/heads/other"]), selected);
+
+        let finished = Command::new(git_factor_bin())
+            .current_dir(repo)
+            .args(["--finish"])
+            .output()
+            .or_abort();
+
+        assert_eq!(finished.status.code(), Some(EXIT_OK));
+        assert_eq!(
+            finished.stdout,
+            b"FACTOR: Complete. Final commit split into 2 commits.\n",
+        );
+        assert_eq!(finished.stderr, b"");
+        assert_eq!(git(repo, &["rev-parse", "refs/heads/other"]), selected);
+        assert_eq!(git(repo, &["rev-parse", "HEAD^{tree}"]), original_tree);
+        assert_eq!(git(repo, &["write-tree"]), original_tree);
+        assert_eq!(git(repo, &["symbolic-ref", "HEAD"]), original_branch);
+        assert_eq!(git(repo, &["status", "--porcelain"]), "");
+        assert_eq!(git(repo, &["rev-list", "--count", "HEAD"]), "4");
+        assert_eq!(git(repo, &["log", "-1", "--format=%s"]), "Add descendant");
+        assert!(!git_dir(repo).join("factor").exists());
+        assert!(!git_dir(repo).join("rebase-merge").exists());
+        assert!(!git_dir(repo).join("rebase-apply").exists());
+    }
+
+    #[test]
     fn finish_ignores_exec_gate_and_completes_session() {
         let dir = init_repo();
         let repo = dir.path();
