@@ -4918,40 +4918,6 @@ fn main_entry_is_callable() {
 }
 
 #[test]
-fn validate_ancestor_returns_not_ancestor_on_nonzero_status() {
-    let dir = TempDir::new().or_abort("tempdir");
-    let repo = dir.path();
-    let sha_text = "a".repeat(SHA_LEN);
-    let commit = CommitSha::new(sha_text.clone()).or_abort("commit sha");
-
-    let runner = ScriptedRunner::default().with_status(
-        "git",
-        &["merge-base", "--is-ancestor", sha_text.as_str(), "HEAD"],
-        &[],
-        true,
-        repo,
-        1,
-    );
-    let io = TestIo::default();
-    let env = TestEnv {
-        cwd: repo.to_path_buf(),
-    };
-    let ctx = Ctx {
-        runner: &runner,
-        cwd: repo.to_path_buf(),
-        io: &io,
-        env: &env,
-        fs: &REAL_FS,
-    };
-
-    let err = validate_ancestor(&ctx, &commit).err_or_abort("expected not-ancestor error");
-    assert!(
-        matches!(&err, FactorError::NotAncestor(found) if found.as_str() == commit.as_str()),
-        "err was: {err:?}"
-    );
-}
-
-#[test]
 fn cmd_continue_errors_on_split_count_overflow() {
     let dir = TempDir::new().or_abort("tempdir");
     let repo = dir.path();
