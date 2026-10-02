@@ -5,6 +5,29 @@ use crate::git_factor::tests::start_contracts::DirectStart;
 use super::*;
 
 #[test]
+fn public_status_reports_final_newline_failure_with_saved_facts_retained() {
+    status_contracts::active(
+        &"a".repeat(SHA_LEN),
+        0,
+        false,
+        false,
+        "splitting",
+        false,
+        16,
+    );
+}
+
+#[test]
+fn public_status_refuses_invalid_phase_without_changing_saved_facts() {
+    verify_public_status_phase_refusal("unsupported");
+}
+
+#[test]
+fn public_status_refuses_empty_phase_without_changing_saved_facts() {
+    verify_public_status_phase_refusal("");
+}
+
+#[test]
 fn cmd_start_errors_when_symmetric_diff_range_is_requested() {
     let dir = TempDir::new().or_abort("tempdir");
     let repo = dir.path();
