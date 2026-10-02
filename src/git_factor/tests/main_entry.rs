@@ -5,6 +5,11 @@ use crate::git_factor::tests::start_contracts::DirectStart;
 use super::*;
 
 #[test]
+fn public_abort_refuses_unavailable_fallback_without_changing_saved_facts() {
+    verify_public_abort_fallback_refusal(1);
+}
+
+#[test]
 fn public_status_reports_final_newline_failure_with_saved_facts_retained() {
     status_contracts::active(
         &"a".repeat(SHA_LEN),

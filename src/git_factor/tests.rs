@@ -1,3 +1,5 @@
+#[path = "tests/abort_contracts.rs"]
+pub(in crate::git_factor) mod abort_contracts;
 #[path = "tests/main_entry.rs"]
 mod main_entry;
 #[path = "tests/start_contracts.rs"]
@@ -1528,6 +1530,77 @@ fn ctx_from_parts<'ctx>(
         io,
         runner,
     })
+}
+
+/// An unavailable fallback commit refuses public abort before Git mutation.
+pub(in crate::git_factor) fn verify_public_abort_fallback_refusal(index: u8) {
+    let directory = TempDir::new().or_abort("abort fallback refusal fixture");
+    let repo = directory.path();
+    let state = setup_factor_state(
+        repo,
+        &"a".repeat(SHA_LEN),
+        "1\n",
+        Some("false\n"),
+        Some(TREE_EXPECTED_NL),
+    );
+    fs::write(state.join("current_index"), format!("{index}\n"))
+        .or_abort("unavailable saved commit");
+    fs::write(repo.join("unrelated"), b"user bytes\n").or_abort("unrelated abort input");
+    let journal_bytes = || {
+        let mut files = fs::read_dir(&state)
+            .or_abort("abort journal inventory")
+            .map(|entry| {
+                let file = entry.or_abort("abort journal entry");
+                (
+                    file.file_name(),
+                    fs::read(file.path()).or_abort("abort journal bytes"),
+                )
+            })
+            .collect::<Vec<_>>();
+        files.sort_by(|left, right| left.0.cmp(&right.0));
+        files
+    };
+    let before = journal_bytes();
+    let runner = ScriptedRunner::default();
+    let io = TestIo::default();
+    let environment = TestEnv {
+        cwd: repo.to_path_buf(),
+    };
+
+    let code = main_entry_with_vec(
+        &io,
+        ctx_from_parts(&environment, &runner, &io, &REAL_FS),
+        &[OsString::from("git-factor"), OsString::from("--abort")],
+    );
+
+    assert_eq!(code, EXIT_SOFTWARE);
+    assert_eq!(io.stdout(), "");
+    assert_eq!(
+        io.stderr(),
+        format!("git command failed: commit index {index} out of range (have 1 commits)\n")
+    );
+    let mut after = journal_bytes();
+    let diagnostic_position = after
+        .iter()
+        .position(|entry| entry.0 == "error.log")
+        .or_abort("added diagnostic entry");
+    after.remove(diagnostic_position);
+    assert_eq!(after, before);
+    let diagnostic =
+        fs::read_to_string(state.join("error.log")).or_abort("abort refusal diagnostic");
+    assert!(
+        diagnostic
+            .lines()
+            .any(|line| line == "argv=git-factor --abort")
+    );
+    assert!(diagnostic.lines().any(|line| line
+        == format!(
+            "error=git command failed: commit index {index} out of range (have 1 commits)"
+        )));
+    assert_eq!(
+        fs::read(repo.join("unrelated")).or_abort("preserved unrelated input"),
+        b"user bytes\n"
+    );
 }
 
 /// Invalid persisted phases refuse public status before output or mutation.
