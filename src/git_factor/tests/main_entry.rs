@@ -1,3 +1,7 @@
+use core::num::NonZeroUsize;
+
+use crate::git_factor::tests::start_contracts::DirectStart;
+
 use super::*;
 
 #[test]
@@ -2611,6 +2615,217 @@ fn cmd_start_refuses_parent_query_io_before_mutation() {
     );
     assert_eq!(fixture.io.stdout(), "");
     assert_eq!(fixture.io.stderr(), "");
+    assert_eq!(fixture.observed_journal(), None);
+    assert_eq!(fixture.observed_calls(), fixture.expected_calls);
+    assert_eq!(fixture.remaining_keys(), Vec::<String>::new());
+    // Only net contents/layout inside this tempdir, excluding factor state.
+    assert_eq!(fixture.direct_files_after(), fixture.direct_files_before);
+}
+
+fn failed_gate_output(at: NonZeroUsize) -> DirectStart {
+    use crate::git_factor::tests::start_contracts::GateCase;
+
+    let selected = NonEmpty::new(CommitSha::new("a".repeat(SHA_LEN)).or_abort("admitted SHA"));
+    DirectStart::new(
+        &selected,
+        false,
+        GateCase::FailOutputFailure(at),
+        "gate stdout",
+        "gate stderr",
+    )
+}
+
+#[test]
+fn cmd_start_stops_after_gate_stdout_write_failure() {
+    use core::num::NonZeroUsize;
+
+    let fixture = failed_gate_output(NonZeroUsize::new(1).or_abort("positive write ordinal"));
+    let ctx = fixture.ctx();
+
+    let result = cmd_start_with_resolved_in(&ctx, &fixture.exec, &fixture.state, &fixture.selected);
+
+    assert_eq!(
+        result.map_err(|err| err.to_string()),
+        Err("failed to write output: selected output write failed".to_owned())
+    );
+    assert_eq!(fixture.io.stdout(), "");
+    assert_eq!(fixture.io.stderr(), "");
+    assert_eq!(fixture.observed_journal(), None);
+    assert_eq!(fixture.observed_calls(), fixture.expected_calls);
+    assert_eq!(fixture.remaining_keys(), Vec::<String>::new());
+    // Only net contents/layout inside this tempdir, excluding factor state.
+    assert_eq!(fixture.direct_files_after(), fixture.direct_files_before);
+}
+
+#[test]
+fn cmd_start_stops_after_gate_stderr_write_failure() {
+    use core::num::NonZeroUsize;
+
+    let fixture = failed_gate_output(NonZeroUsize::new(2).or_abort("positive write ordinal"));
+    let ctx = fixture.ctx();
+
+    let result = cmd_start_with_resolved_in(&ctx, &fixture.exec, &fixture.state, &fixture.selected);
+
+    assert_eq!(
+        result.map_err(|err| err.to_string()),
+        Err("failed to write output: selected output write failed".to_owned())
+    );
+    assert_eq!(fixture.io.stdout(), "gate stdout");
+    assert_eq!(fixture.io.stderr(), "");
+    assert_eq!(fixture.observed_journal(), None);
+    assert_eq!(fixture.observed_calls(), fixture.expected_calls);
+    assert_eq!(fixture.remaining_keys(), Vec::<String>::new());
+    // Only net contents/layout inside this tempdir, excluding factor state.
+    assert_eq!(fixture.direct_files_after(), fixture.direct_files_before);
+}
+
+#[test]
+fn cmd_start_stops_after_gate_failure_heading_write_failure() {
+    use core::num::NonZeroUsize;
+
+    let fixture = failed_gate_output(NonZeroUsize::new(3).or_abort("positive write ordinal"));
+    let ctx = fixture.ctx();
+
+    let result = cmd_start_with_resolved_in(&ctx, &fixture.exec, &fixture.state, &fixture.selected);
+
+    assert_eq!(
+        result.map_err(|err| err.to_string()),
+        Err("failed to write output: selected output write failed".to_owned())
+    );
+    assert_eq!(fixture.io.stdout(), "gate stdout");
+    assert_eq!(fixture.io.stderr(), "gate stderr");
+    assert_eq!(fixture.observed_journal(), None);
+    assert_eq!(fixture.observed_calls(), fixture.expected_calls);
+    assert_eq!(fixture.remaining_keys(), Vec::<String>::new());
+    // Only net contents/layout inside this tempdir, excluding factor state.
+    assert_eq!(fixture.direct_files_after(), fixture.direct_files_before);
+}
+
+#[test]
+fn cmd_start_stops_after_gate_failure_command_write_failure() {
+    use core::num::NonZeroUsize;
+
+    let fixture = failed_gate_output(NonZeroUsize::new(4).or_abort("positive write ordinal"));
+    let ctx = fixture.ctx();
+
+    let result = cmd_start_with_resolved_in(&ctx, &fixture.exec, &fixture.state, &fixture.selected);
+
+    assert_eq!(
+        result.map_err(|err| err.to_string()),
+        Err("failed to write output: selected output write failed".to_owned())
+    );
+    assert_eq!(
+        fixture.io.stdout(),
+        "gate stdoutFACTOR: Start gate failed.\n"
+    );
+    assert_eq!(fixture.io.stderr(), "gate stderr");
+    assert_eq!(fixture.observed_journal(), None);
+    assert_eq!(fixture.observed_calls(), fixture.expected_calls);
+    assert_eq!(fixture.remaining_keys(), Vec::<String>::new());
+    // Only net contents/layout inside this tempdir, excluding factor state.
+    assert_eq!(fixture.direct_files_after(), fixture.direct_files_before);
+}
+
+#[test]
+fn cmd_start_stops_after_gate_failure_exit_code_write_failure() {
+    use core::num::NonZeroUsize;
+
+    let fixture = failed_gate_output(NonZeroUsize::new(5).or_abort("positive write ordinal"));
+    let ctx = fixture.ctx();
+
+    let result = cmd_start_with_resolved_in(&ctx, &fixture.exec, &fixture.state, &fixture.selected);
+
+    assert_eq!(
+        result.map_err(|err| err.to_string()),
+        Err("failed to write output: selected output write failed".to_owned())
+    );
+    assert_eq!(
+        fixture.io.stdout(),
+        "gate stdoutFACTOR: Start gate failed.\nEXEC: true\n"
+    );
+    assert_eq!(fixture.io.stderr(), "gate stderr");
+    assert_eq!(fixture.observed_journal(), None);
+    assert_eq!(fixture.observed_calls(), fixture.expected_calls);
+    assert_eq!(fixture.remaining_keys(), Vec::<String>::new());
+    // Only net contents/layout inside this tempdir, excluding factor state.
+    assert_eq!(fixture.direct_files_after(), fixture.direct_files_before);
+}
+
+#[test]
+fn cmd_start_stops_after_gate_failure_blank_line_write_failure() {
+    use core::num::NonZeroUsize;
+
+    let fixture = failed_gate_output(NonZeroUsize::new(6).or_abort("positive write ordinal"));
+    let ctx = fixture.ctx();
+
+    let result = cmd_start_with_resolved_in(&ctx, &fixture.exec, &fixture.state, &fixture.selected);
+
+    assert_eq!(
+        result.map_err(|err| err.to_string()),
+        Err("failed to write output: selected output write failed".to_owned())
+    );
+    assert_eq!(
+        fixture.io.stdout(),
+        "gate stdoutFACTOR: Start gate failed.\nEXEC: true\nCODE: 7\n"
+    );
+    assert_eq!(fixture.io.stderr(), "gate stderr");
+    assert_eq!(fixture.observed_journal(), None);
+    assert_eq!(fixture.observed_calls(), fixture.expected_calls);
+    assert_eq!(fixture.remaining_keys(), Vec::<String>::new());
+    // Only net contents/layout inside this tempdir, excluding factor state.
+    assert_eq!(fixture.direct_files_after(), fixture.direct_files_before);
+}
+
+#[test]
+fn cmd_start_stops_after_gate_failure_recovery_hint_write_failure() {
+    use core::num::NonZeroUsize;
+
+    let fixture = failed_gate_output(NonZeroUsize::new(7).or_abort("positive write ordinal"));
+    let ctx = fixture.ctx();
+
+    let result = cmd_start_with_resolved_in(&ctx, &fixture.exec, &fixture.state, &fixture.selected);
+
+    assert_eq!(
+        result.map_err(|err| err.to_string()),
+        Err("failed to write output: selected output write failed".to_owned())
+    );
+    assert_eq!(
+        fixture.io.stdout(),
+        "gate stdoutFACTOR: Start gate failed.\nEXEC: true\nCODE: 7\n\n"
+    );
+    assert_eq!(fixture.io.stderr(), "gate stderr");
+    assert_eq!(fixture.observed_journal(), None);
+    assert_eq!(fixture.observed_calls(), fixture.expected_calls);
+    assert_eq!(fixture.remaining_keys(), Vec::<String>::new());
+    // Only net contents/layout inside this tempdir, excluding factor state.
+    assert_eq!(fixture.direct_files_after(), fixture.direct_files_before);
+}
+
+#[test]
+fn cmd_start_refuses_post_gate_worktree_query_before_journal_creation() {
+    use crate::git_factor::tests::start_contracts::query;
+    use crate::git_factor::tests::start_contracts::query::{QueryCase, QueryReply, QueryTarget};
+
+    let selected = NonEmpty::new(CommitSha::new("a".repeat(SHA_LEN)).or_abort("admitted SHA"));
+    let case = QueryCase::Failure {
+        target: QueryTarget::Worktree,
+        reply: QueryReply::Rejected,
+    };
+    let fixture = query::direct_start(&selected, false, &case, "gate out", "gate err");
+    let ctx = fixture.ctx();
+
+    let result = cmd_start_with_resolved_in(&ctx, &fixture.exec, &fixture.state, &fixture.selected);
+
+    assert_eq!(
+        result.map_err(|err| err.to_string()),
+        Err(concat!(
+            "git command failed: git status --porcelain=v1 produced unexpected ",
+            "output (exit 128)\nSTDERR:\nselected query refused"
+        )
+        .to_owned())
+    );
+    assert_eq!(fixture.io.stdout(), "gate out");
+    assert_eq!(fixture.io.stderr(), "gate err");
     assert_eq!(fixture.observed_journal(), None);
     assert_eq!(fixture.observed_calls(), fixture.expected_calls);
     assert_eq!(fixture.remaining_keys(), Vec::<String>::new());
