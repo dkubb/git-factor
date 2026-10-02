@@ -3,6 +3,11 @@
 #[path = "trace_command_tests.rs"]
 mod command_contracts;
 
+/// Arrangements for complete repository snapshot contracts.
+#[cfg(test)]
+#[path = "trace_snapshot_tests.rs"]
+mod snapshot_contracts;
+
 use core::error::Error as _;
 use core::fmt::{Arguments, Write as _};
 use core::str::FromStr;
@@ -855,6 +860,272 @@ mod tests {
     mod collect_repo_snapshot {
         use super::super::collect_repo_snapshot;
         use super::super::command_contracts::{arrange_context, arrange_output};
+        use super::super::snapshot_contracts::{
+            Arrangement, Directory, Factor, Rebase, Reply, Selection, World,
+        };
+
+        #[test]
+        fn reads_complete_factor_fields() {
+            let world = World::complete();
+            let arrangement = Arrangement::new(world, "literal", 7);
+            let context = arrangement.context();
+
+            let result = collect_repo_snapshot(&context);
+
+            assert_eq!(result.git_dir.as_deref(), context.cwd.join(".git").to_str(),);
+            assert_eq!(result.head.as_deref(), Some("head-literal"));
+            assert_eq!(result.head_tree.as_deref(), Some("tree-literal"));
+            assert_eq!(result.toplevel.as_deref(), Some("/repository/literal"));
+            assert_eq!(result.factor_current_commit.as_deref(), Some("beta"));
+            assert_eq!(result.factor_current_index, Some(1));
+            assert_eq!(result.factor_split_count, Some(7));
+            assert_eq!(
+                result.factor_requires_rebase,
+                Some(super::super::StateBool::True)
+            );
+            assert_eq!(
+                result.factor_expected_tree.as_deref(),
+                Some("expected-literal")
+            );
+            assert_eq!(result.rebase_state, None);
+            assert_eq!(result.rebase_msgnum, None);
+            assert_eq!(result.rebase_end, None);
+            assert_eq!(result.rebase_todo_head, None);
+            assert_eq!(result.rebase_done_tail, None);
+            assert_eq!(result.staged_paths, ["staged-literal"]);
+            assert_eq!(
+                result.unstaged_paths,
+                ["staged-literal", "unstaged-literal"]
+            );
+            assert_eq!(result.untracked_paths, ["untracked-literal"]);
+            arrangement.assert_observation(&result);
+        }
+
+        #[test]
+        fn reads_first_padded_commit() {
+            let mut world = World::complete();
+            world.factor = Factor::Indexed(Selection::First);
+            let arrangement = Arrangement::new(world, "literal", 7);
+            let context = arrangement.context();
+
+            let result = collect_repo_snapshot(&context);
+
+            arrangement.assert_observation(&result);
+        }
+
+        #[test]
+        fn reads_last_padded_commit() {
+            let mut world = World::complete();
+            world.factor = Factor::Indexed(Selection::Last);
+            let arrangement = Arrangement::new(world, "literal", 7);
+            let context = arrangement.context();
+
+            let result = collect_repo_snapshot(&context);
+
+            arrangement.assert_observation(&result);
+        }
+
+        #[test]
+        fn keeps_past_end_index_without_current_commit() {
+            let mut world = World::complete();
+            world.factor = Factor::Indexed(Selection::PastEnd);
+            let arrangement = Arrangement::new(world, "literal", 7);
+            let context = arrangement.context();
+
+            let result = collect_repo_snapshot(&context);
+
+            arrangement.assert_observation(&result);
+        }
+
+        #[test]
+        fn observes_missing_journal() {
+            let mut world = World::complete();
+            world.factor = Factor::Absent;
+            let arrangement = Arrangement::new(world, "literal", 7);
+            let context = arrangement.context();
+
+            let result = collect_repo_snapshot(&context);
+
+            arrangement.assert_observation(&result);
+        }
+
+        #[test]
+        fn observes_malformed_optional_journal_fields() {
+            let mut world = World::complete();
+            world.factor = Factor::Malformed;
+            let arrangement = Arrangement::new(world, "literal", 7);
+            let context = arrangement.context();
+
+            let result = collect_repo_snapshot(&context);
+
+            assert_eq!(result.factor_expected_tree.as_deref(), Some(""));
+            arrangement.assert_observation(&result);
+        }
+
+        #[test]
+        fn observes_missing_commits_file() {
+            let mut world = World::complete();
+            world.factor = Factor::MissingCommits;
+            let arrangement = Arrangement::new(world, "literal", 7);
+            let context = arrangement.context();
+
+            let result = collect_repo_snapshot(&context);
+
+            arrangement.assert_observation(&result);
+        }
+
+        #[test]
+        fn observes_blank_commits_file() {
+            let mut world = World::complete();
+            world.factor = Factor::BlankCommits;
+            let arrangement = Arrangement::new(world, "literal", 7);
+            let context = arrangement.context();
+
+            let result = collect_repo_snapshot(&context);
+
+            arrangement.assert_observation(&result);
+        }
+
+        #[test]
+        fn preserves_head_and_tree_absence_on_empty_replies() {
+            let mut world = World::complete();
+            world.head = Reply::Empty;
+            world.tree = Reply::Empty;
+            let arrangement = Arrangement::new(world, "literal", 7);
+            let context = arrangement.context();
+
+            let result = collect_repo_snapshot(&context);
+
+            arrangement.assert_observation(&result);
+        }
+
+        #[test]
+        fn preserves_head_and_tree_absence_on_launch_failure() {
+            let mut world = World::complete();
+            world.head = Reply::Unavailable;
+            world.tree = Reply::Unavailable;
+            let arrangement = Arrangement::new(world, "literal", 7);
+            let context = arrangement.context();
+
+            let result = collect_repo_snapshot(&context);
+
+            arrangement.assert_observation(&result);
+        }
+
+        #[test]
+        fn observes_rejected_queries_without_toplevel_query() {
+            let mut world = World::complete();
+            world.head = Reply::Rejected;
+            world.tree = Reply::Rejected;
+            world.directory = Directory::Rejected;
+            let arrangement = Arrangement::new(world, "literal", 7);
+            let context = arrangement.context();
+
+            let result = collect_repo_snapshot(&context);
+
+            assert_eq!(result.head, None);
+            assert_eq!(result.head_tree, None);
+            assert_eq!(result.git_dir, None);
+            assert_eq!(result.toplevel, None);
+            arrangement.assert_observation(&result);
+        }
+
+        #[test]
+        fn observes_unavailable_directory_without_toplevel_query() {
+            let mut world = World::complete();
+            world.directory = Directory::Unavailable;
+            let arrangement = Arrangement::new(world, "literal", 7);
+            let context = arrangement.context();
+
+            let result = collect_repo_snapshot(&context);
+
+            arrangement.assert_observation(&result);
+        }
+
+        #[test]
+        fn observes_empty_toplevel_reply() {
+            let mut world = World::complete();
+            world.directory = Directory::Available(Reply::Empty);
+            let arrangement = Arrangement::new(world, "literal", 7);
+            let context = arrangement.context();
+
+            let result = collect_repo_snapshot(&context);
+
+            arrangement.assert_observation(&result);
+        }
+
+        #[test]
+        fn observes_failed_toplevel_query() {
+            let mut world = World::complete();
+            world.directory = Directory::Available(Reply::Unavailable);
+            let arrangement = Arrangement::new(world, "literal", 7);
+            let context = arrangement.context();
+
+            let result = collect_repo_snapshot(&context);
+
+            arrangement.assert_observation(&result);
+        }
+
+        #[test]
+        fn reads_merge_rebase_before_apply_metadata() {
+            let mut world = World::complete();
+            world.rebase = Rebase::Merge;
+            let arrangement = Arrangement::new(world, "literal", 7);
+            let context = arrangement.context();
+
+            let result = collect_repo_snapshot(&context);
+
+            assert_eq!(result.rebase_state, Some(super::super::RebaseState::Merge));
+            assert_eq!(result.rebase_msgnum, Some(super::super::RebaseCounter(7)));
+            assert_eq!(result.rebase_end, Some(super::super::RebaseCounter(17)));
+            assert_eq!(
+                result.rebase_todo_head.as_deref(),
+                Some("pick literal selected")
+            );
+            assert_eq!(result.rebase_done_tail.as_deref(), Some("exec literal"));
+            arrangement.assert_observation(&result);
+        }
+
+        #[test]
+        fn observes_comment_only_todo_and_blank_done() {
+            let mut world = World::complete();
+            world.rebase = Rebase::MergeEmpty;
+            let arrangement = Arrangement::new(world, "literal", 7);
+            let context = arrangement.context();
+
+            let result = collect_repo_snapshot(&context);
+
+            arrangement.assert_observation(&result);
+        }
+
+        #[test]
+        fn reads_apply_rebase_patch() {
+            let mut world = World::complete();
+            world.rebase = Rebase::Apply;
+            let arrangement = Arrangement::new(world, "literal", 7);
+            let context = arrangement.context();
+
+            let result = collect_repo_snapshot(&context);
+
+            assert_eq!(result.rebase_state, Some(super::super::RebaseState::Apply));
+            assert_eq!(result.rebase_msgnum, Some(super::super::RebaseCounter(7)));
+            assert_eq!(result.rebase_end, Some(super::super::RebaseCounter(17)));
+            assert_eq!(result.rebase_todo_head.as_deref(), Some("patch"));
+            assert_eq!(result.rebase_done_tail, None);
+            arrangement.assert_observation(&result);
+        }
+
+        #[test]
+        fn observes_apply_rebase_without_patch() {
+            let mut world = World::complete();
+            world.rebase = Rebase::ApplyMissing;
+            let arrangement = Arrangement::new(world, "literal", 7);
+            let context = arrangement.context();
+
+            let result = collect_repo_snapshot(&context);
+
+            arrangement.assert_observation(&result);
+        }
 
         #[test]
         fn ignores_empty_status_paths_and_preserves_quoted_paths() {
@@ -1114,7 +1385,57 @@ mod proptests {
     mod collect_repo_snapshot {
         use super::super::collect_repo_snapshot;
         use super::super::command_contracts::{arrange_context, arrange_output};
+        use super::super::snapshot_contracts::{
+            Arrangement, Directory, Factor, Rebase, Reply, Selection, World,
+        };
+
         use proptest::prelude::*;
+
+        proptest! {
+            #[test]
+            fn reads_generated_repository_and_session_facts(
+                head in prop::sample::select(vec![
+                    Reply::Unavailable, Reply::Empty, Reply::Present, Reply::Rejected,
+                ]),
+                tree in prop::sample::select(vec![
+                    Reply::Unavailable, Reply::Empty, Reply::Present, Reply::Rejected,
+                ]),
+                metadata in prop_oneof![
+                    1 => Just((Directory::Unavailable, Factor::Absent, Rebase::Absent)),
+                    1 => Just((Directory::Rejected, Factor::Absent, Rebase::Absent)),
+                    2 => (
+                        prop::sample::select(vec![
+                            Reply::Unavailable, Reply::Empty, Reply::Present, Reply::Rejected,
+                        ]),
+                        prop::sample::select(vec![
+                            Factor::Absent,
+                            Factor::Indexed(Selection::First),
+                            Factor::Indexed(Selection::Middle),
+                            Factor::Indexed(Selection::Last),
+                            Factor::Indexed(Selection::PastEnd),
+                            Factor::Malformed,
+                            Factor::MissingCommits,
+                            Factor::BlankCommits,
+                        ]),
+                        prop::sample::select(vec![
+                            Rebase::Absent, Rebase::Merge, Rebase::MergeEmpty,
+                            Rebase::Apply, Rebase::ApplyMissing,
+                        ]),
+                    ).prop_map(|(top, factor, rebase)| (Directory::Available(top), factor, rebase)),
+                ],
+                token in "[A-Za-z0-9_]{1,16}",
+                count in any::<u32>(),
+            ) {
+                let (directory, factor, rebase) = metadata;
+                let world = World { directory, factor, head, rebase, tree };
+                let arrangement = Arrangement::new(world, &token, count);
+                let context = arrangement.context();
+
+                let result = collect_repo_snapshot(&context);
+
+                arrangement.assert_observation(&result);
+            }
+        }
 
         proptest! {
             #[test]
