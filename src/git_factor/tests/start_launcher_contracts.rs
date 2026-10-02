@@ -525,6 +525,7 @@ fn native_call(
             "--no-autosquash",
             "--no-autostash",
             "--no-rebase-merges",
+            "--no-update-refs",
             "--no-stat",
             "--quiet",
             "--reschedule-failed-exec",

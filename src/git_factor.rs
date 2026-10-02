@@ -1782,6 +1782,7 @@ fn run_start_rebase_in(
         "--no-autosquash",
         "--no-autostash",
         "--no-rebase-merges",
+        "--no-update-refs",
         "--no-stat",
         "--quiet",
         "--reschedule-failed-exec",

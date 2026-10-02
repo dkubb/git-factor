@@ -1210,6 +1210,7 @@ fn start_rebase_failure_runner(
                 "--no-autosquash",
                 "--no-autostash",
                 "--no-rebase-merges",
+                "--no-update-refs",
                 "--no-stat",
                 "--quiet",
                 "--reschedule-failed-exec",
