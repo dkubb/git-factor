@@ -217,3 +217,97 @@ proptest! {
         prop_assert_eq!(&fixture.direct_files_after(), &fixture.direct_files_before);
     }
 }
+
+#[test]
+fn cmd_abort_uses_current_commit_when_start_head_is_missing() {
+    let dir = TempDir::new().or_abort("tempdir");
+    let repo = dir.path();
+    let state_dir = repo.join(".git").join("factor");
+    fs::create_dir_all(&state_dir).or_abort("create factor dir");
+    let commit = "a".repeat(COMMIT_SHA_HEX_LEN);
+    fs::write(state_dir.join("commits"), format!("{commit}\n")).or_abort("write commits");
+    fs::write(state_dir.join("current_index"), "0\n").or_abort("write current_index");
+
+    let io = Box::leak(Box::new(TestIo::default()));
+    let env = Box::leak(Box::new(TestEnv));
+    let fs = &REAL_FS;
+    let runner = Box::leak(Box::new(ScriptedRunner::new(
+        vec![
+            Ok(Output {
+                status: success_status(),
+                stdout: b".git\n".to_vec(),
+                stderr: Vec::new(),
+            }),
+            Ok(Output {
+                status: success_status(),
+                stdout: b".git\n".to_vec(),
+                stderr: Vec::new(),
+            }),
+            Ok(Output {
+                status: success_status(),
+                stdout: b".git\n".to_vec(),
+                stderr: Vec::new(),
+            }),
+        ],
+        vec![Ok(success_status()), Ok(success_status())],
+    )));
+    let ctx = Ctx {
+        cwd: repo.to_path_buf(),
+        env,
+        fs,
+        io,
+        runner,
+    };
+
+    let code = cmd_abort_in(&ctx).or_abort("abort should succeed");
+    assert_eq!(code, EXIT_OK);
+    assert_eq!(
+        io.out.borrow().as_str(),
+        "FACTOR: Session aborted for current commit step.\n"
+    );
+    assert!(!state_dir.exists(), "state dir should be removed");
+}
+
+#[test]
+fn cmd_abort_propagates_current_commit_error_when_start_head_is_missing() {
+    let dir = TempDir::new().or_abort("tempdir");
+    let repo = dir.path();
+    let state_dir = repo.join(".git").join("factor");
+    fs::create_dir_all(&state_dir).or_abort("create factor dir");
+    let commit = "a".repeat(COMMIT_SHA_HEX_LEN);
+    fs::write(state_dir.join("commits"), format!("{commit}\n")).or_abort("write commits");
+    fs::write(state_dir.join("current_index"), "1\n").or_abort("write current_index");
+
+    let io = Box::leak(Box::new(TestIo::default()));
+    let env = Box::leak(Box::new(TestEnv));
+    let fs = &REAL_FS;
+    let runner = Box::leak(Box::new(ScriptedRunner::new(
+        vec![
+            Ok(Output {
+                status: success_status(),
+                stdout: b".git\n".to_vec(),
+                stderr: Vec::new(),
+            }),
+            Ok(Output {
+                status: success_status(),
+                stdout: b".git\n".to_vec(),
+                stderr: Vec::new(),
+            }),
+        ],
+        Vec::new(),
+    )));
+    let ctx = Ctx {
+        cwd: repo.to_path_buf(),
+        env,
+        fs,
+        io,
+        runner,
+    };
+
+    let err = cmd_abort_in(&ctx)
+        .err_or_abort("missing start_head should fall back to current commit lookup");
+    assert_eq!(
+        err.to_string(),
+        "git command failed: commit index 1 out of range (have 1 commits)"
+    );
+}
