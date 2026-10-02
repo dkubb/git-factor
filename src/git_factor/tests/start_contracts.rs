@@ -1,3 +1,6 @@
+#[path = "start_launcher_contracts.rs"]
+pub(in crate::git_factor) mod launcher;
+
 #[path = "start_query_contracts.rs"]
 pub(in crate::git_factor) mod query;
 

@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 748437d1f8a3fa10fec43f62396f23748933f90678e791a01cbfe69b46867cd3 # shrinks to shas = ["a0aa0a00aa00000a0aaa0aa000aa0000a0aaaa0a"], root = false, fault = ShortIo
