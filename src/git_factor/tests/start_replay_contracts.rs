@@ -199,23 +199,14 @@ fn admission(
         &format!("{start_head}\n"),
     );
     for sha in selected {
-        runner = runner
-            .with_status(
-                "git",
-                &["merge-base", "--is-ancestor", sha.as_str(), "HEAD"],
-                &[],
-                true,
-                repo,
-                0,
-            )
-            .with_status(
-                "git",
-                &["rev-parse", "--quiet", "--verify", &format!("{sha}^2")],
-                &[],
-                true,
-                repo,
-                1 << 8,
-            );
+        runner = runner.with_status(
+            "git",
+            &["merge-base", "--is-ancestor", sha.as_str(), "HEAD"],
+            &[],
+            true,
+            repo,
+            0,
+        );
     }
     runner
         .with_output(

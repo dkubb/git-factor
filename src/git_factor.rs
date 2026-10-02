@@ -1698,7 +1698,7 @@ fn cmd_start_in(
     cmd_start_with_resolved_in(ctx, exec, &state_dir, &span)
 }
 
-/// Validates that a split target commit is reachable from `HEAD` and non-merge.
+/// Validates that a split target commit is reachable from `HEAD`.
 #[cfg_attr(
     not(test),
     expect(
@@ -1721,20 +1721,7 @@ fn validate_split_target_in(ctx: &Ctx<'_>, sha: &CommitSha) -> Result<(), Factor
         return Err(FactorError::NotAncestor(sha.clone()));
     }
 
-    let has_second_parent = command_status_with(
-        ctx,
-        "git",
-        &["rev-parse", "--quiet", "--verify", &format!("{sha}^2")],
-        &[],
-        true,
-    )
-    .is_ok_and(|status| status.success());
-
-    if has_second_parent {
-        Err(FactorError::MergeCommit(sha.clone()))
-    } else {
-        Ok(())
-    }
+    Ok(())
 }
 
 /// Starts interactive rebase and stops at each selected commit for splitting.
@@ -3467,7 +3454,7 @@ mod proptests {
         let fs = Box::leak(Box::new(TestFs));
         let runner = Box::leak(Box::new(ScriptedRunner::new(
             Vec::new(),
-            vec![Ok(success_status()), Ok(failure_status())],
+            vec![Ok(success_status())],
         )));
         let ctx = Ctx {
             cwd: PathBuf::from("."),
@@ -3479,8 +3466,16 @@ mod proptests {
         let sha = CommitSha::new("0123456789abcdef0123456789abcdef01234567".to_owned())
             .or_abort("valid sha");
 
-        validate_split_target_in(&ctx, &sha).or_abort("non-merge ancestor should be accepted");
-        assert_eq!(runner.status_calls.borrow().len(), 2);
+        validate_split_target_in(&ctx, &sha).or_abort("ancestor should be accepted");
+        assert_eq!(
+            runner.status_calls.borrow().as_slice(),
+            &[vec![
+                "merge-base".to_owned(),
+                "--is-ancestor".to_owned(),
+                sha.to_string(),
+                "HEAD".to_owned(),
+            ]]
+        );
     }
 
     #[test]

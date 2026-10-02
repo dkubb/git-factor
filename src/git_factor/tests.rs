@@ -17,8 +17,6 @@ use std::sync::Mutex;
 use std::thread;
 
 use super::*;
-
-use crate::git_factor::validation::validate_not_merge;
 use tempfile::TempDir;
 
 /// Generates an `Fs` trait method that delegates to `REAL_FS`.
@@ -929,6 +927,14 @@ fn start_single_head_resolution_runner(repo: &Path, sha: &str) -> ScriptedRunner
 }
 
 fn start_single_head_validation_runner(repo: &Path, sha: &str) -> ScriptedRunner {
+    start_resolved_head_validation_runner(repo, sha).with_commit_object(
+        repo,
+        sha,
+        Some(&"d".repeat(SHA_LEN)),
+    )
+}
+
+fn start_resolved_head_validation_runner(repo: &Path, sha: &str) -> ScriptedRunner {
     start_single_head_resolution_runner(repo, sha)
         .with_status(
             "git",
@@ -939,14 +945,6 @@ fn start_single_head_validation_runner(repo: &Path, sha: &str) -> ScriptedRunner
             0,
         )
         .with_commit_object(repo, sha, Some(&"d".repeat(SHA_LEN)))
-        .with_status(
-            "git",
-            &["rev-parse", "--quiet", "--verify", &format!("{sha}^2")],
-            &[],
-            true,
-            repo,
-            1,
-        )
 }
 
 fn is_forced_runner_failure(err: &FactorError) -> bool {
@@ -993,14 +991,6 @@ fn continue_runner_with_commit(repo: &Path, original: &str, deleted_paths: &str)
             true,
             repo,
             0,
-        )
-        .with_status(
-            "git",
-            &["rev-parse", "--quiet", "--verify", &format!("{original}^2")],
-            &[],
-            true,
-            repo,
-            1,
         )
         .with_status("git", &["diff", "--quiet", "--staged"], &[], false, repo, 1)
         .with_status(
@@ -1118,10 +1108,6 @@ fn continue_runner_with_remaining_output(
         .with_status("git", &["read-tree", TREE_REHYDRATE], &[], false, repo, 0)
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "scripted runner encodes the multi-commit start interactions explicitly"
-)]
 fn start_multi_commit_runner_base(repo: &Path, sha_a: &str, sha_b: &str) -> ScriptedRunner {
     let head = "c".repeat(SHA_LEN);
     let span_expr = format!("{sha_a}..{sha_b}");
@@ -1158,22 +1144,8 @@ fn start_multi_commit_runner_base(repo: &Path, sha_a: &str, sha_b: &str) -> Scri
             repo,
             &format!("{head}\n"),
         )
-        .with_status(
-            "git",
-            &["rev-parse", "--quiet", "--verify", &format!("{sha_a}^2")],
-            &[],
-            true,
-            repo,
-            1,
-        )
-        .with_status(
-            "git",
-            &["rev-parse", "--quiet", "--verify", &format!("{sha_b}^2")],
-            &[],
-            true,
-            repo,
-            1,
-        )
+        .with_commit_object(repo, sha_a, Some(&"d".repeat(SHA_LEN)))
+        .with_commit_object(repo, sha_b, Some(sha_a))
         .with_output(
             "git",
             &["rev-parse", "--verify", &format!("{sha_b}^")],
@@ -1204,22 +1176,6 @@ fn start_multi_commit_runner_base(repo: &Path, sha_a: &str, sha_b: &str) -> Scri
             true,
             repo,
             0,
-        )
-        .with_status(
-            "git",
-            &["rev-parse", "--quiet", "--verify", &format!("{sha_a}^2")],
-            &[],
-            true,
-            repo,
-            1,
-        )
-        .with_status(
-            "git",
-            &["rev-parse", "--quiet", "--verify", &format!("{sha_b}^2")],
-            &[],
-            true,
-            repo,
-            1,
         )
         .with_commit_object(repo, sha_a, Some(&"d".repeat(SHA_LEN)))
         .with_output("git", &["rev-parse", "--short", sha_b], repo, "bbbbbbb\n")
@@ -1263,8 +1219,21 @@ fn start_rebase_failure_runner(
 }
 
 fn start_single_head_runner(repo: &Path, sha: &str, tree: &str, diff_stat: &str) -> ScriptedRunner {
+    start_resolved_head_runner(repo, sha, tree, diff_stat).with_commit_object(
+        repo,
+        sha,
+        Some(&"d".repeat(SHA_LEN)),
+    )
+}
+
+fn start_resolved_head_runner(
+    repo: &Path,
+    sha: &str,
+    tree: &str,
+    diff_stat: &str,
+) -> ScriptedRunner {
     with_start_gate_result(
-        start_single_head_validation_runner(repo, sha)
+        start_resolved_head_validation_runner(repo, sha)
             .with_output("git", &["rev-parse", "--short", sha], repo, "aaaaaaa\n")
             .with_output(
                 "git",
@@ -1278,7 +1247,6 @@ fn start_single_head_runner(repo: &Path, sha: &str, tree: &str, diff_stat: &str)
         "",
         "",
     )
-    .with_commit_object(repo, sha, Some(&"d".repeat(SHA_LEN)))
     .with_output(
         "git",
         &["rev-parse", concat!("HEAD^", "{", "tree", "}")],
@@ -1328,14 +1296,7 @@ fn start_single_head_root_runner(
                 0,
             )
             .with_commit_object(repo, sha, None)
-            .with_status(
-                "git",
-                &["rev-parse", "--quiet", "--verify", &format!("{sha}^2")],
-                &[],
-                true,
-                repo,
-                1,
-            )
+            .with_commit_object(repo, sha, None)
             .with_output("git", &["rev-parse", "--short", sha], repo, "aaaaaaa\n")
             .with_output(
                 "git",
@@ -1466,22 +1427,8 @@ fn start_range_ref_runner(repo: &Path, sha_a: &str, sha_b: &str) -> ScriptedRunn
                 repo,
                 0,
             )
-            .with_status(
-                "git",
-                &["rev-parse", "--quiet", "--verify", &format!("{sha_a}^2")],
-                &[],
-                true,
-                repo,
-                1,
-            )
-            .with_status(
-                "git",
-                &["rev-parse", "--quiet", "--verify", &format!("{sha_b}^2")],
-                &[],
-                true,
-                repo,
-                1,
-            )
+            .with_commit_object(repo, sha_a, Some(&"d".repeat(SHA_LEN)))
+            .with_commit_object(repo, sha_b, Some(sha_a))
             .with_output(
                 "git",
                 &["rev-parse", "--verify", &format!("{sha_b}^")],
@@ -2206,87 +2153,6 @@ fn cmd_continue_returns_rehydrate_error_when_exec_status_call_fails() {
 }
 
 #[test]
-fn validate_not_merge_treats_status_error_as_non_merge() {
-    let dir = TempDir::new().or_abort("tempdir");
-    let repo = dir.path();
-    let runner = ScriptedRunner::default();
-    let io = TestIo::default();
-    let env = TestEnv {
-        cwd: repo.to_path_buf(),
-    };
-    let ctx = Ctx {
-        runner: &runner,
-        cwd: repo.to_path_buf(),
-        io: &io,
-        env: &env,
-        fs: &REAL_FS,
-    };
-    let sha = CommitSha::new("a".repeat(SHA_LEN)).or_abort("valid sha");
-
-    validate_not_merge(&ctx, &sha).or_abort("status errors should be treated as non-merge");
-}
-
-#[test]
-fn validate_not_merge_treats_nonzero_status_as_non_merge() {
-    let dir = TempDir::new().or_abort("tempdir");
-    let repo = dir.path();
-    let sha = CommitSha::new("a".repeat(SHA_LEN)).or_abort("valid sha");
-    let runner = ScriptedRunner::default().with_status(
-        "git",
-        &["rev-parse", "--quiet", "--verify", &format!("{sha}^2")],
-        &[],
-        true,
-        repo,
-        1,
-    );
-    let io = TestIo::default();
-    let env = TestEnv {
-        cwd: repo.to_path_buf(),
-    };
-    let ctx = Ctx {
-        runner: &runner,
-        cwd: repo.to_path_buf(),
-        io: &io,
-        env: &env,
-        fs: &REAL_FS,
-    };
-
-    validate_not_merge(&ctx, &sha).or_abort("nonzero status should be treated as non-merge");
-}
-
-#[test]
-fn validate_not_merge_errors_for_merge_commit() {
-    let dir = TempDir::new().or_abort("tempdir");
-    let repo = dir.path();
-    let sha = CommitSha::new("a".repeat(SHA_LEN)).or_abort("valid sha");
-    let runner = ScriptedRunner::default().with_status(
-        "git",
-        &["rev-parse", "--quiet", "--verify", &format!("{sha}^2")],
-        &[],
-        true,
-        repo,
-        0,
-    );
-    let io = TestIo::default();
-    let env = TestEnv {
-        cwd: repo.to_path_buf(),
-    };
-    let ctx = Ctx {
-        runner: &runner,
-        cwd: repo.to_path_buf(),
-        io: &io,
-        env: &env,
-        fs: &REAL_FS,
-    };
-
-    let err = validate_not_merge(&ctx, &sha).err_or_abort("merge commit should be rejected");
-    assert!(
-        matches!(&err, FactorError::MergeCommit(found) if *found == sha),
-        "err was: {err:?}"
-    );
-}
-
-#[test]
 fn default_errln_error_path_is_reachable_for_coverage() {
     let io = DefaultErrlnFailingIo;
     let err = io.errln("io fail").err_or_abort("expected io failure");
@@ -2815,8 +2681,7 @@ where
         0,
         "",
         "",
-    )
-    .with_commit_object(repo, &sha, Some(&"d".repeat(SHA_LEN)));
+    );
     let io = TestIo::default();
     let env = TestEnv {
         cwd: repo.to_path_buf(),

@@ -188,10 +188,6 @@ impl Runner for CommitObject {
 pub(in crate::git_factor::validation) type ParentCase = (String, Reply, Result<BaseParent, String>);
 
 /// Generates one object observation; no ancestry admission runs while arranging it.
-#[expect(
-    clippy::single_call_fn,
-    reason = "one canonical property consumes its closed arranged input strategy"
-)]
 pub(in crate::git_factor::validation) fn inputs() -> impl Strategy<Value = ParentCase> {
     let identities = || ("[0-9a-f]{40}", "[0-9a-f]{40}", "[0-9a-f]{40}");
     prop_oneof![

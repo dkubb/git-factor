@@ -102,8 +102,6 @@ proptest! {
                 prop_oneof![
                     prop_oneof![Just(query::QueryPosition::First), Just(query::QueryPosition::Last)]
                         .prop_map(query::QueryTarget::Ancestor),
-                    prop_oneof![Just(query::QueryPosition::First), Just(query::QueryPosition::Last)]
-                        .prop_map(query::QueryTarget::MergeParent),
                     Just(query::QueryTarget::Diff), Just(query::QueryTarget::EmptyRoot),
                     Just(query::QueryTarget::Gate), Just(query::QueryTarget::Head),
                     Just(query::QueryTarget::Message), Just(query::QueryTarget::Parent),
@@ -128,6 +126,39 @@ proptest! {
         let result = cmd_start_with_resolved_in(
             &ctx, &fixture.exec, &fixture.state, &fixture.selected,
         );
+
+        prop_assert_eq!(&result.map_err(|err| err.to_string()), &fixture.expected_result);
+        prop_assert_eq!(&fixture.observed_calls(), &fixture.expected_calls);
+        prop_assert_eq!(fixture.remaining_keys(), Vec::<String>::new());
+        prop_assert_eq!(&fixture.io.stdout(), &fixture.expected_stdout);
+        prop_assert_eq!(&fixture.io.stderr(), &fixture.expected_stderr);
+        prop_assert_eq!(&fixture.observed_journal(), &fixture.expected_journal);
+        // End-state contents/layout only, inside the owned tempdir and outside factor state.
+        prop_assert_eq!(&fixture.direct_files_after(), &fixture.direct_files_before);
+    }
+
+    #[test]
+    fn characterizes_selected_object_admission_failures(
+        shas in prop::collection::vec(
+            string_regex("[0-9a-f]{40}").or_abort("SHA strategy"), 1..=4,
+        ),
+        position in prop_oneof![Just(query::QueryPosition::First), Just(query::QueryPosition::Last)],
+        reply in prop_oneof![Just(query::QueryReply::Io), Just(query::QueryReply::Rejected)],
+    ) {
+        let selected = NonEmpty::from_vec(
+            shas.into_iter().map(|sha| CommitSha::new(sha).or_abort("admitted SHA")).collect(),
+        ).or_abort("nonempty generated span");
+        let case = query::QueryCase::Failure {
+            target: query::QueryTarget::MergeParent(position),
+            reply,
+        };
+        let fixture = query::selected_start(&selected, &case);
+        let ctx = fixture.ctx();
+        let refs = NonEmpty::new(
+            NonEmptyString::try_from("base..tip".to_owned()).or_abort("explicit range"),
+        );
+
+        let result = cmd_start_in(&ctx, &fixture.exec, &refs);
 
         prop_assert_eq!(&result.map_err(|err| err.to_string()), &fixture.expected_result);
         prop_assert_eq!(&fixture.observed_calls(), &fixture.expected_calls);
