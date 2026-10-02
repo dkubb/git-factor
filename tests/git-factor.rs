@@ -3690,7 +3690,7 @@ fi
   echo "100644 blob deadbeefdeadbeefdeadbeefdeadbeefdeadbeef	file.txt"
   exit 0
 fi
-if [ "${1-}" = "rebase" ] && [ "${2-}" = "--root" ] && [ "${3-}" = "--interactive" ]; then
+if [ "${1-}" = "rebase" ]; then
   echo "UNEXPECTED_ROOT_REBASE" >&2
   exit 1
 fi
