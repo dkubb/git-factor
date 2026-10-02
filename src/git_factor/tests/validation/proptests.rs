@@ -1,3 +1,115 @@
+mod validate_exec_syntax {
+    use super::super::resolve_contract::{Observation, Reply as QueryReply};
+    use super::super::*;
+    use core::cell::RefCell;
+    use core::ops::RangeInclusive;
+    use proptest::char::range;
+    use proptest::collection::vec;
+    use proptest::prelude::*;
+    use std::os::unix::process::ExitStatusExt as _;
+
+    #[derive(Clone, Debug)]
+    enum Reply {
+        Signal(i32),
+        Spawn(String),
+        Status(u8),
+    }
+
+    struct SyntaxRunner<'calls> {
+        calls: &'calls RefCell<Vec<String>>,
+        reply: Reply,
+    }
+
+    impl Runner for SyntaxRunner<'_> {
+        fn output(&self, bin: &str, args: &[&str], cwd: &Path) -> io::Result<Output> {
+            self.calls
+                .borrow_mut()
+                .push(format!("output {bin} {args:?} cwd={cwd:?}"));
+            Err(io::Error::other("syntax validation must use status"))
+        }
+
+        fn status(
+            &self,
+            bin: &str,
+            args: &[&str],
+            envs: &[(&str, &str)],
+            quiet: bool,
+            cwd: &Path,
+        ) -> io::Result<ExitStatus> {
+            self.calls.borrow_mut().push(format!(
+                "status {bin} {args:?} {envs:?} quiet={quiet} cwd={cwd:?}"
+            ));
+            match self.reply.clone() {
+                Reply::Signal(signal) => Ok(ExitStatus::from_raw(signal)),
+                Reply::Spawn(message) => Err(io::Error::other(message)),
+                Reply::Status(code) => Ok(ExitStatus::from_raw(i32::from(code) << 8)),
+            }
+        }
+    }
+
+    proptest! {
+        #[test]
+        fn preserves_generated_syntax_status_and_launch_errors(
+            command in prop_oneof![
+                1 => Just(String::new()),
+                7 => vec(
+                    prop_oneof![
+                        Just('\''),
+                        Just('"'),
+                        Just('\\'),
+                        Just('\n'),
+                        Just('\u{3bb}'),
+                        Just(' '),
+                        range('\u{1}', char::MAX),
+                    ],
+                    RangeInclusive::<usize>::new(0, 80),
+                ).prop_map(|characters| characters.into_iter().collect::<String>()),
+            ],
+            reply in prop_oneof![
+                Just(Reply::Status(0)),
+                RangeInclusive::<u8>::new(1, u8::MAX).prop_map(Reply::Status),
+                RangeInclusive::<u8>::new(1, 31)
+                    .prop_map(|signal| Reply::Signal(i32::from(signal))),
+                prop_oneof![
+                    1 => Just(String::new()),
+                    7 => vec(any::<char>(), RangeInclusive::<usize>::new(0, 80))
+                        .prop_map(|characters| characters.into_iter().collect::<String>()),
+                ].prop_map(Reply::Spawn),
+            ],
+            directory in "/contract/[a-z]{1,12}( [a-z]{1,8})?",
+        ) {
+            let expected = match reply.clone() {
+                Reply::Spawn(message) => Err(format!(
+                    "git command failed: bash syntax check: git command failed: bash --norc: {message}"
+                )),
+                Reply::Status(0) => Ok(()),
+                Reply::Signal(_) | Reply::Status(_) => Err(format!(
+                    "invalid exec syntax: {command}"
+                )),
+            };
+            let calls = RefCell::new(Vec::new());
+            let runner = SyntaxRunner { calls: &calls, reply };
+            let capabilities = Observation::new(&calls, QueryReply::IoFailure);
+            let ctx = Ctx {
+                runner: &runner,
+                cwd: PathBuf::from(&directory),
+                io: &capabilities,
+                env: &capabilities,
+                fs: &capabilities,
+            };
+            let expected_calls = vec![format!(
+                "status bash [\"--norc\", \"--noprofile\", \"-n\", \"-c\", {command:?}] [] quiet=true cwd={directory:?}"
+            )];
+
+            let actual = super::super::validate_exec_syntax(&ctx, &command)
+                .map_err(|error| error.to_string());
+
+            prop_assert_eq!(actual, expected);
+            prop_assert_eq!(&*calls.borrow(), &expected_calls);
+        }
+    }
+}
+
 mod remove_empty_root_in {
     use super::super::*;
     use core::cell::RefCell;
