@@ -44,7 +44,11 @@ fn cmd_start_errors_when_merge_base_spawn_fails() {
     let dir = TempDir::new().or_abort("tempdir");
     let repo = dir.path();
     let sha = "a".repeat(SHA_LEN);
-    let runner = start_single_head_resolution_runner(repo, &sha);
+    let runner = start_single_head_resolution_runner(repo, &sha).with_commit_object(
+        repo,
+        &sha,
+        Some(&"d".repeat(SHA_LEN)),
+    );
     let io = TestIo::default();
     let env = TestEnv {
         cwd: repo.to_path_buf(),
@@ -174,8 +178,7 @@ fn cmd_start_propagates_status_error_when_start_sequence_fails() {
         &["rev-parse", "HEAD^{tree}"],
         repo,
         &format!("{}\n", "c".repeat(SHA_LEN)),
-    )
-    .with_commit_object(repo, &sha, Some(&"d".repeat(SHA_LEN)));
+    );
 
     let io = TestIo::default();
     let env = TestEnv {
@@ -474,8 +477,7 @@ fn cmd_start_single_head_session_exec_gate_failure_returns_exec_failed() {
         1,
         "",
         "",
-    )
-    .with_commit_object(repo, &sha, Some(&"d".repeat(SHA_LEN)));
+    );
     let io = TestIo::default();
     let env = TestEnv {
         cwd: repo.to_path_buf(),
@@ -527,8 +529,7 @@ fn cmd_start_single_head_session_exec_gate_failure_with_multiple_exec_commands_r
         1,
         "",
         "",
-    )
-    .with_commit_object(repo, &sha, Some(&"d".repeat(SHA_LEN)));
+    );
     let io = TestIo::default();
     let env = TestEnv {
         cwd: repo.to_path_buf(),
@@ -581,7 +582,8 @@ fn cmd_start_propagates_head_lookup_error_after_sorting() {
             &["rev-list", "--reverse", "--topo-order", &sha],
             repo,
             &format!("{sha}\n"),
-        );
+        )
+        .with_commit_object(repo, &sha, Some(&"d".repeat(SHA_LEN)));
     let io = TestIo::default();
     let env = TestEnv {
         cwd: repo.to_path_buf(),
@@ -623,7 +625,6 @@ fn cmd_start_single_head_session_propagates_exec_status_io_error() {
             repo,
             "subject\n",
         )
-        .with_commit_object(repo, &sha, Some(&"d".repeat(SHA_LEN)))
         .with_status(
             "bash",
             &["--norc", "--noprofile", "-n", "-c", "true"],
@@ -683,8 +684,7 @@ fn cmd_start_propagates_commits_state_write_failure() {
         0,
         "",
         "",
-    )
-    .with_commit_object(repo, &sha, Some(&"d".repeat(SHA_LEN)));
+    );
     let io = TestIo::default();
     let env = TestEnv {
         cwd: repo.to_path_buf(),
@@ -791,8 +791,7 @@ fn cmd_start_propagates_expected_tree_capture_error_after_state_write() {
         0,
         "",
         "",
-    )
-    .with_commit_object(repo, &sha, Some(&"d".repeat(SHA_LEN)));
+    );
     let io = TestIo::default();
     let env = TestEnv {
         cwd: repo.to_path_buf(),
@@ -837,14 +836,7 @@ fn cmd_start_root_session_propagates_mixed_reset_error() {
                 0,
             )
             .with_commit_object(repo, &sha, None)
-            .with_status(
-                "git",
-                &["rev-parse", "--quiet", "--verify", &format!("{sha}^2")],
-                &[],
-                true,
-                repo,
-                1,
-            )
+            .with_commit_object(repo, &sha, None)
             .with_output("git", &["rev-parse", "--short", &sha], repo, "aaaaaaa\n")
             .with_output(
                 "git",
@@ -1071,7 +1063,7 @@ fn cmd_start_single_head_session_defaults_missing_commit_to_head() {
     let sha = "a".repeat(SHA_LEN);
     let tree = "0123456789abcdef0123456789abcdef01234567";
     let diff_stat = " src/lib.rs | 1 +\n 1 file changed, 1 insertion(+)\n";
-    let runner = start_single_head_runner(repo, &sha, tree, diff_stat);
+    let runner = start_resolved_head_runner(repo, &sha, tree, diff_stat);
     let io = TestIo::default();
     let env = TestEnv {
         cwd: repo.to_path_buf(),
@@ -1118,7 +1110,7 @@ fn cmd_start_head_in_direct_path_succeeds() {
     let sha = "a".repeat(SHA_LEN);
     let tree = "0123456789abcdef0123456789abcdef01234567";
     let diff_stat = " src/lib.rs | 1 +\n 1 file changed, 1 insertion(+)\n";
-    let runner = start_single_head_runner(repo, &sha, tree, diff_stat);
+    let runner = start_resolved_head_runner(repo, &sha, tree, diff_stat);
     let io = TestIo::default();
     let env = TestEnv {
         cwd: repo.to_path_buf(),
@@ -1226,14 +1218,7 @@ fn cmd_start_rejects_merge_commit_during_validation() {
             repo,
             0,
         )
-        .with_status(
-            "git",
-            &["rev-parse", "--quiet", "--verify", &format!("{sha}^2")],
-            &[],
-            true,
-            repo,
-            0,
-        );
+        .with_output("git", &["cat-file", "commit", &sha], repo, &format!("tree {}\nparent {}\nparent {}\nauthor Example <example@example.com> 1 +0000\n\nsubject\n", "c".repeat(SHA_LEN), "b".repeat(SHA_LEN), "d".repeat(SHA_LEN)));
     let io = TestIo::default();
     let env = TestEnv {
         cwd: repo.to_path_buf(),
@@ -1889,12 +1874,11 @@ fn cmd_start_preserves_opened_state_when_diff_query_fails() {
 }
 
 #[test]
-fn cmd_start_characterizes_later_merge_query_io_fail_open() {
+fn cmd_start_refuses_later_merge_object_query_before_mutation() {
     use crate::git_factor::tests::start_contracts::query;
     use crate::git_factor::tests::start_contracts::query::{
         QueryCase, QueryPosition, QueryReply, QueryTarget,
     };
-    use alloc::collections::BTreeMap;
 
     let selected = NonEmpty::from_vec(vec![
         CommitSha::new("a".repeat(SHA_LEN)).or_abort("first SHA"),
@@ -1905,50 +1889,20 @@ fn cmd_start_characterizes_later_merge_query_io_fail_open() {
         target: QueryTarget::MergeParent(QueryPosition::Last),
         reply: QueryReply::Io,
     };
-    let fixture = query::direct_start(&selected, false, &case, "gate out", "gate err");
+    let fixture = query::selected_start(&selected, &case);
     let ctx = fixture.ctx();
 
-    let result = cmd_start_with_resolved_in(&ctx, &fixture.exec, &fixture.state, &fixture.selected);
+    let refs =
+        NonEmpty::new(NonEmptyString::try_from("base..tip".to_owned()).or_abort("explicit range"));
+    let result = cmd_start_in(&ctx, &fixture.exec, &refs);
 
-    assert_eq!(result.map_err(|err| err.to_string()), Ok(EXIT_OK));
-    // This pins baseline fail-open behavior; the independent Merge Fix owns its repair.
     assert_eq!(
-        fixture.io.stdout(),
-        concat!(
-            "gate outFACTOR: Split session started for 2 commits (tip: abcdef0).\n",
-            "ORIGINAL MESSAGE: subject\nUNSTAGED:\n\n",
-            "NEXT: Stage changes for the first atomic commit, then run:\n",
-            "  git factor --continue --message \"type: description\"\n\n",
-            "Run git factor -h for command help or git-factor --help for the ",
-            "full workflow guide.\n\nHINTS:\n",
-            "  - Find the ONE smallest addition nothing depends on\n",
-            "  - Target 15-30 lines (50 max)\n",
-            "  - Message: single concrete action, no \"and\"/\"or\"\n",
-            "  - Verify: git log --oneline | wc -l\n",
-            "  - NEVER use git commit. ONLY use git factor --continue.\n",
-            "  RECOVERY: git factor --abort\n",
-        )
+        result.map_err(|err| err.to_string()),
+        Err("git command failed: git cat-file: selected query IO failure".to_owned())
     );
-    assert_eq!(fixture.io.stderr(), "gate err");
-    let expected_journal = [
-        (
-            "commits",
-            format!("{}\n{}\n", "a".repeat(SHA_LEN), "b".repeat(SHA_LEN)),
-        ),
-        ("current_index", "1\n".to_owned()),
-        ("exec", "true\n".to_owned()),
-        ("is_root", "false\n".to_owned()),
-        ("phase", "splitting\n".to_owned()),
-        ("requires_rebase", "false\n".to_owned()),
-        ("split_count", "0\n".to_owned()),
-        ("start_head", format!("{}\n", "b".repeat(SHA_LEN))),
-        ("started_rebase", "false\n".to_owned()),
-        ("expected_tree", TREE_EXPECTED_NL.to_owned()),
-    ]
-    .into_iter()
-    .map(|(name, text)| (OsString::from(name), text))
-    .collect::<BTreeMap<_, _>>();
-    assert_eq!(fixture.observed_journal(), Some(expected_journal));
+    assert_eq!(fixture.io.stdout(), "");
+    assert_eq!(fixture.io.stderr(), "");
+    assert_eq!(fixture.observed_journal(), None);
     assert_eq!(fixture.observed_calls(), fixture.expected_calls);
     assert_eq!(fixture.remaining_keys(), Vec::<String>::new());
     // Only net contents/layout inside this tempdir, excluding factor state.

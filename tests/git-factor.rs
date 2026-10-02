@@ -762,6 +762,81 @@ fi
     }
 
     #[test]
+    #[expect(
+        clippy::literal_string_with_formatting_args,
+        reason = "Git's tree revision syntax is literal input"
+    )]
+    fn failed_later_merge_queries_refuse_before_running_gates() {
+        let dir = init_repo();
+        let repo = dir.path();
+        commit_file(repo, "file.txt", "one\n", "Add initial content");
+        let branch = git(repo, &["branch", "--show-current"]);
+        git(repo, &["checkout", "-b", "side"]);
+        commit_file(repo, "side.txt", "side\n", "Add side content");
+        git(repo, &["checkout", branch.trim()]);
+        commit_file(repo, "file.txt", "two\n", "Change content");
+        let ordinary = git(repo, &["rev-parse", "HEAD"]);
+        git(
+            repo,
+            &["merge", "--no-ff", "-m", "Merge side content", "side"],
+        );
+        let head = git(repo, &["rev-parse", "HEAD"]);
+        let tree = git(repo, &["rev-parse", "HEAD^{tree}"]);
+        let contents = fs::read(repo.join("file.txt")).or_abort();
+        let side_contents = fs::read(repo.join("side.txt")).or_abort();
+        let index = fs::read(git_dir(repo).join("index")).or_abort();
+        let references = git(repo, &["show-ref"]);
+        let interception = format!(
+            r#"if [ "${{1-}}" = "rev-parse" ] && [ "${{2-}}" = "--quiet" ] && [ "${{3-}}" = "--verify" ]; then
+  case "${{4-}}" in
+    *^2) printf 'merge query refused\n' >&2; exit 128 ;;
+  esac
+fi
+if [ "${{1-}}" = "cat-file" ] && [ "${{2-}}" = "commit" ] && [ "${{3-}}" = "{}" ]; then
+  printf 'later merge object query refused\n' >&2
+  exit 128
+fi
+"#,
+            head.trim(),
+        );
+        let (wrapper, bin) = make_git_wrapper_named("git", &interception);
+        let mut path = OsString::from(bin.as_os_str());
+        path.push(OsStr::new(":"));
+        path.push(env::var_os("PATH").or_abort());
+        let mut command = Command::new(git_factor_bin());
+        command
+            .current_dir(repo)
+            .args([
+                "--exec",
+                "printf ran > gate-ran",
+                ordinary.trim(),
+                head.trim(),
+            ])
+            .env("PATH", path)
+            .env_remove("CLAUDECODE")
+            .env_remove("GIT_FACTOR_TRACE_LOG");
+
+        let output = command.output().or_abort();
+
+        assert_eq!(output.status.code(), Some(EXIT_SOFTWARE));
+        assert_eq!(output.stdout.as_slice(), b"");
+        assert_eq!(
+            output.stderr.as_slice(),
+            b"git command failed: later merge object query refused\n"
+        );
+        assert_eq!(git(repo, &["rev-parse", "HEAD"]), head);
+        assert_eq!(git(repo, &["rev-parse", "HEAD^{tree}"]), tree);
+        assert_eq!(fs::read(repo.join("file.txt")).or_abort(), contents);
+        assert_eq!(fs::read(repo.join("side.txt")).or_abort(), side_contents);
+        assert_eq!(git(repo, &["show-ref"]), references);
+        assert_eq!(fs::read(git_dir(repo).join("index")).or_abort(), index);
+        assert!(!repo.join("gate-ran").exists());
+        assert!(!git_dir(repo).join("factor").exists());
+        assert!(!git_dir(repo).join("rebase-merge").exists());
+        drop(wrapper);
+    }
+
+    #[test]
     fn rejects_commit_ref_when_git_returns_non_hex_40_char_sha() {
         let dir = init_repo();
         let repo = dir.path();

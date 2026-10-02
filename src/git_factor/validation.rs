@@ -19,10 +19,6 @@ use std::collections::HashSet;
 mod parent_contracts;
 
 /// Reads consecutive parent records from an actual commit object.
-#[cfg_attr(
-    not(test),
-    expect(clippy::single_call_fn, reason = "selected-range ancestry admission")
-)]
 pub(in crate::git_factor) fn base_parent_in(
     ctx: &Ctx<'_>,
     commit: &CommitSha,
@@ -504,21 +500,7 @@ pub(in crate::git_factor) fn validate_not_merge(
     ctx: &Ctx<'_>,
     sha: &CommitSha,
 ) -> Result<(), FactorError> {
-    let has_second_parent = match command_status_with(
-        ctx,
-        "git",
-        &["rev-parse", "--quiet", "--verify", &format!("{sha}^2")],
-        &[],
-        true,
-    ) {
-        Ok(status) => status.success(),
-        Err(_err) => false,
-    };
-
-    if has_second_parent {
-        return Err(FactorError::MergeCommit(sha.clone()));
-    }
-    Ok(())
+    base_parent_in(ctx, sha).map(|_parent| ())
 }
 
 #[cfg(test)]
@@ -531,6 +513,108 @@ mod proptests;
 
 #[cfg(test)]
 mod tests {
+    mod validate_not_merge {
+        use super::super::parent_contracts::{CommitObject, Reply};
+
+        #[test]
+        fn accepts_a_root_object() {
+            let fixture = CommitObject::new(
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                Reply::text("tree cccccccccccccccccccccccccccccccccccccccc\nauthor Example <example@example.com> 1 +0000\n\nsubject\n".to_owned()),
+            );
+            let ctx = fixture.context();
+
+            let actual = super::super::validate_not_merge(&ctx, &fixture.commit)
+                .map_err(|error| error.to_string());
+
+            assert_eq!(actual, Ok(()));
+            assert_eq!(fixture.queries.get(), 1);
+            assert_eq!(fixture.mutations.get(), 0);
+            assert_eq!(fixture.io.out.borrow().as_str(), "");
+            assert_eq!(fixture.io.err.borrow().as_str(), "");
+        }
+
+        #[test]
+        fn accepts_an_ordinary_object() {
+            let fixture = CommitObject::new(
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                Reply::text("tree cccccccccccccccccccccccccccccccccccccccc\nparent bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\nauthor Example <example@example.com> 1 +0000\n\nsubject\n".to_owned()),
+            );
+            let ctx = fixture.context();
+
+            let actual = super::super::validate_not_merge(&ctx, &fixture.commit)
+                .map_err(|error| error.to_string());
+
+            assert_eq!(actual, Ok(()));
+            assert_eq!(fixture.queries.get(), 1);
+            assert_eq!(fixture.mutations.get(), 0);
+            assert_eq!(fixture.io.out.borrow().as_str(), "");
+            assert_eq!(fixture.io.err.borrow().as_str(), "");
+        }
+
+        #[test]
+        fn rejects_a_merge_object() {
+            let fixture = CommitObject::new(
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                Reply::text("tree cccccccccccccccccccccccccccccccccccccccc\nparent bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\nparent cccccccccccccccccccccccccccccccccccccccc\nauthor Example <example@example.com> 1 +0000\n\nsubject\n".to_owned()),
+            );
+            let ctx = fixture.context();
+
+            let actual = super::super::validate_not_merge(&ctx, &fixture.commit)
+                .map_err(|error| error.to_string());
+
+            assert_eq!(actual, Err("commit aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa is a merge commit and cannot be split".to_owned()));
+            assert_eq!(fixture.queries.get(), 1);
+            assert_eq!(fixture.mutations.get(), 0);
+            assert_eq!(fixture.io.out.borrow().as_str(), "");
+            assert_eq!(fixture.io.err.borrow().as_str(), "");
+        }
+
+        #[test]
+        fn refuses_failed_object_queries() {
+            let code: i32 = 256;
+            let fixture = CommitObject::new(
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                Reply::Output {
+                    code,
+                    content: String::new(),
+                    error: "query refused".to_owned(),
+                },
+            );
+            let ctx = fixture.context();
+
+            let actual = super::super::validate_not_merge(&ctx, &fixture.commit)
+                .map_err(|error| error.to_string());
+
+            assert_eq!(actual, Err("git command failed: query refused".to_owned()));
+            assert_eq!(fixture.queries.get(), 1);
+            assert_eq!(fixture.mutations.get(), 0);
+            assert_eq!(fixture.io.out.borrow().as_str(), "");
+            assert_eq!(fixture.io.err.borrow().as_str(), "");
+        }
+
+        #[test]
+        fn refuses_unavailable_object_queries() {
+            let fixture = CommitObject::new(
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                Reply::SpawnError("query unavailable".to_owned()),
+            );
+            let ctx = fixture.context();
+
+            let actual = super::super::validate_not_merge(&ctx, &fixture.commit)
+                .map_err(|error| error.to_string());
+
+            assert_eq!(
+                actual,
+                Err("git command failed: git cat-file: query unavailable".to_owned())
+            );
+            assert_eq!(fixture.queries.get(), 1);
+            assert_eq!(fixture.mutations.get(), 0);
+            assert_eq!(fixture.io.out.borrow().as_str(), "");
+            assert_eq!(fixture.io.err.borrow().as_str(), "");
+        }
+    }
+
     mod base_parent_in {
         use super::super::parent_contracts::{CommitObject, Reply};
 
@@ -1597,18 +1681,10 @@ mod tests {
             _quiet: bool,
             _cwd: &Path,
         ) -> io::Result<ExitStatus> {
-            let start_merge_ref = format!("{SPAN_START_SHA}^2");
-            let end_merge_ref = format!("{SPAN_END_SHA}^2");
-            if args == ["rev-parse", "--quiet", "--verify", start_merge_ref.as_str()]
-                || args == ["rev-parse", "--quiet", "--verify", end_merge_ref.as_str()]
-            {
-                Ok(ExitStatus::from_raw(256))
-            } else {
-                Err(io::Error::other(format!(
-                    "unexpected status args: {}",
-                    args.join(" ")
-                )))
-            }
+            Err(io::Error::other(format!(
+                "unexpected status args: {}",
+                args.join(" ")
+            )))
         }
     }
 
@@ -1616,6 +1692,17 @@ mod tests {
 
     impl Runner for ParentLookupRunner {
         fn output(&self, _bin: &str, args: &[&str], _cwd: &Path) -> io::Result<Output> {
+            if matches!(args, ["cat-file", "commit", SPAN_START_SHA | SPAN_END_SHA]) {
+                return Ok(Output {
+                    status: ExitStatus::from_raw(0),
+                    stdout: format!(
+                        "tree {}\nauthor Example <example@example.com> 1 +0000\n\nsubject\n",
+                        "c".repeat(COMMIT_SHA_HEX_LEN)
+                    )
+                    .into_bytes(),
+                    stderr: Vec::new(),
+                });
+            }
             let end_parent_ref = format!("{SPAN_END_SHA}^");
             if args == ["rev-parse", "--verify", end_parent_ref.as_str()] {
                 Ok(Output {
@@ -1639,18 +1726,10 @@ mod tests {
             _quiet: bool,
             _cwd: &Path,
         ) -> io::Result<ExitStatus> {
-            let start_merge_ref = format!("{SPAN_START_SHA}^2");
-            let end_merge_ref = format!("{SPAN_END_SHA}^2");
-            if args == ["rev-parse", "--quiet", "--verify", start_merge_ref.as_str()]
-                || args == ["rev-parse", "--quiet", "--verify", end_merge_ref.as_str()]
-            {
-                Ok(ExitStatus::from_raw(256))
-            } else {
-                Err(io::Error::other(format!(
-                    "unexpected status args: {}",
-                    args.join(" ")
-                )))
-            }
+            Err(io::Error::other(format!(
+                "unexpected status args: {}",
+                args.join(" ")
+            )))
         }
     }
 
@@ -1658,6 +1737,17 @@ mod tests {
 
     impl Runner for ParentParseRunner {
         fn output(&self, _bin: &str, args: &[&str], _cwd: &Path) -> io::Result<Output> {
+            if matches!(args, ["cat-file", "commit", SPAN_START_SHA | SPAN_END_SHA]) {
+                return Ok(Output {
+                    status: ExitStatus::from_raw(0),
+                    stdout: format!(
+                        "tree {}\nauthor Example <example@example.com> 1 +0000\n\nsubject\n",
+                        "c".repeat(COMMIT_SHA_HEX_LEN)
+                    )
+                    .into_bytes(),
+                    stderr: Vec::new(),
+                });
+            }
             let end_parent_ref = format!("{SPAN_END_SHA}^");
             if args == ["rev-parse", "--verify", end_parent_ref.as_str()] {
                 Ok(Output {
@@ -1681,18 +1771,10 @@ mod tests {
             _quiet: bool,
             _cwd: &Path,
         ) -> io::Result<ExitStatus> {
-            let start_merge_ref = format!("{SPAN_START_SHA}^2");
-            let end_merge_ref = format!("{SPAN_END_SHA}^2");
-            if args == ["rev-parse", "--quiet", "--verify", start_merge_ref.as_str()]
-                || args == ["rev-parse", "--quiet", "--verify", end_merge_ref.as_str()]
-            {
-                Ok(ExitStatus::from_raw(256))
-            } else {
-                Err(io::Error::other(format!(
-                    "unexpected status args: {}",
-                    args.join(" ")
-                )))
-            }
+            Err(io::Error::other(format!(
+                "unexpected status args: {}",
+                args.join(" ")
+            )))
         }
     }
 
@@ -2385,38 +2467,6 @@ mod tests {
         assert!(range_output.stdout.is_empty());
         assert_eq!(range_output.stderr, b"forced range lookup failure\n");
 
-        let start_merge = range_runner
-            .status(
-                "git",
-                &[
-                    "rev-parse",
-                    "--quiet",
-                    "--verify",
-                    &format!("{SPAN_START_SHA}^2"),
-                ],
-                &[],
-                false,
-                Path::new("."),
-            )
-            .or_abort("start merge check");
-        assert!(!start_merge.success());
-
-        let end_merge = range_runner
-            .status(
-                "git",
-                &[
-                    "rev-parse",
-                    "--quiet",
-                    "--verify",
-                    &format!("{SPAN_END_SHA}^2"),
-                ],
-                &[],
-                false,
-                Path::new("."),
-            )
-            .or_abort("end merge check");
-        assert!(!end_merge.success());
-
         let unexpected_range_output = range_runner
             .output("git", &["status"], Path::new("."))
             .err_or_abort("unexpected range output args should fail");
@@ -2455,38 +2505,6 @@ mod tests {
             b"forced parent lookup failure\n"
         );
 
-        let lookup_start_merge = parent_lookup_runner
-            .status(
-                "git",
-                &[
-                    "rev-parse",
-                    "--quiet",
-                    "--verify",
-                    &format!("{SPAN_START_SHA}^2"),
-                ],
-                &[],
-                false,
-                Path::new("."),
-            )
-            .or_abort("lookup start merge check");
-        assert!(!lookup_start_merge.success());
-
-        let lookup_end_merge = parent_lookup_runner
-            .status(
-                "git",
-                &[
-                    "rev-parse",
-                    "--quiet",
-                    "--verify",
-                    &format!("{SPAN_END_SHA}^2"),
-                ],
-                &[],
-                false,
-                Path::new("."),
-            )
-            .or_abort("lookup end merge check");
-        assert!(!lookup_end_merge.success());
-
         let unexpected_lookup_output = parent_lookup_runner
             .output("git", &["status"], Path::new("."))
             .err_or_abort("unexpected lookup output args should fail");
@@ -2521,38 +2539,6 @@ mod tests {
         assert!(invalid_parent_output.status.success());
         assert_eq!(invalid_parent_output.stdout, b"not-a-commit\n");
         assert!(invalid_parent_output.stderr.is_empty());
-
-        let parse_start_merge = parent_parse_runner
-            .status(
-                "git",
-                &[
-                    "rev-parse",
-                    "--quiet",
-                    "--verify",
-                    &format!("{SPAN_START_SHA}^2"),
-                ],
-                &[],
-                false,
-                Path::new("."),
-            )
-            .or_abort("parse start merge check");
-        assert!(!parse_start_merge.success());
-
-        let parse_end_merge = parent_parse_runner
-            .status(
-                "git",
-                &[
-                    "rev-parse",
-                    "--quiet",
-                    "--verify",
-                    &format!("{SPAN_END_SHA}^2"),
-                ],
-                &[],
-                false,
-                Path::new("."),
-            )
-            .or_abort("parse end merge check");
-        assert!(!parse_end_merge.success());
 
         let unexpected_parse_output = parent_parse_runner
             .output("git", &["status"], Path::new("."))

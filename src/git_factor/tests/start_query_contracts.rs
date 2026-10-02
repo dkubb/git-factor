@@ -50,21 +50,7 @@ pub(in crate::git_factor) enum QueryCase {
 }
 
 impl QueryCase {
-    fn continues(&self) -> bool {
-        // Only the separate Merge Fix still owns a fail-open admission boundary.
-        matches!(
-            *self,
-            Self::Failure {
-                target: QueryTarget::MergeParent(_),
-                ..
-            }
-        )
-    }
-
     fn expected_result(&self, selected: &NonEmpty<CommitSha>) -> Result<i32, String> {
-        if self.continues() {
-            return Ok(EXIT_OK);
-        }
         match *self {
             Self::EmptyShort => Err("git command failed: empty short SHA".to_owned()),
             Self::Failure {
@@ -165,10 +151,8 @@ impl QueryTarget {
             Self::Diff => "git diff",
             Self::EmptyRoot => "git commit-tree",
             Self::Gate => "bash -c",
-            Self::Head | Self::MergeParent(_) | Self::Short | Self::TopLevel | Self::Tree => {
-                "git rev-parse"
-            }
-            Self::Parent => "git cat-file",
+            Self::Head | Self::Short | Self::TopLevel | Self::Tree => "git rev-parse",
+            Self::Parent | Self::MergeParent(_) => "git cat-file",
             Self::Message => "git show",
             Self::Reset => "git reset",
             Self::Syntax => "bash --norc",
@@ -320,14 +304,6 @@ fn admission_steps(
             repo,
             0,
         ));
-        steps.push(QueryStep::status_site(
-            QuerySite::MergeParent(index),
-            "git",
-            &["rev-parse", "--quiet", "--verify", &format!("{sha}^2")],
-            true,
-            repo,
-            1 << 8,
-        ));
     }
     steps.extend([
         QueryStep::output(
@@ -372,10 +348,6 @@ fn admission_steps(
     steps
 }
 
-#[expect(
-    clippy::single_call_fn,
-    reason = "baseline output-IO snapshot script remains separate from selected-query arrangement"
-)]
 fn after_output_io(mut runner: ObservedRunner, repo: &Path, tip: &str) -> ObservedRunner {
     // Baseline command_output snapshots even with tracing disabled; keep answers valid.
     for (args, text) in [
@@ -399,10 +371,6 @@ fn after_output_io(mut runner: ObservedRunner, repo: &Path, tip: &str) -> Observ
     runner
 }
 
-#[expect(
-    clippy::single_call_fn,
-    reason = "typed selected reply is installed while constructing the linear query script"
-)]
 fn append_query_step(
     mut runner: ObservedRunner,
     step: QueryStep,
@@ -483,6 +451,86 @@ fn append_query_step(
     }
 }
 
+/// Arranges explicit span admission, before resolved-start gate execution.
+pub(in crate::git_factor) fn selected_start(
+    selected: &NonEmpty<CommitSha>,
+    case: &QueryCase,
+) -> DirectStart {
+    let dir = TempDir::new().or_abort("selected-object fixture tempdir");
+    let repo = dir.path();
+    fs::create_dir_all(repo.join(".git")).or_abort("state parent fixture");
+    fs::write(repo.join("direct-write-sentinel"), b"sentinel\n").or_abort("existing sentinel");
+    let mut runner = ObservedRunner::default()
+        .with_output("git", &["rev-parse", "--git-dir"], repo, ".git\n")
+        .with_output("git", &["rev-parse", "--git-dir"], repo, ".git\n")
+        .with_output("git", &["status", "--porcelain=v1"], repo, "")
+        .with_output(
+            "git",
+            &["rev-list", "--reverse", "--ancestry-path", "base..tip"],
+            repo,
+            &format!(
+                "{}\n",
+                selected
+                    .iter()
+                    .map(CommitSha::as_str)
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            ),
+        );
+    let target = case.target().site(selected);
+    let mut seen = false;
+    for (index, sha) in selected.iter().enumerate() {
+        let step = QueryStep::Output {
+            bin: "git".to_owned(),
+            args: vec!["cat-file".to_owned(), "commit".to_owned(), sha.to_string()],
+            cwd: repo.to_path_buf(),
+            text: format!(
+                "tree {}\nparent {}\nauthor Example <example@example.com> 1 +0000\n\nsubject\n",
+                "c".repeat(SHA_LEN),
+                "d".repeat(SHA_LEN),
+            ),
+            target: QuerySite::MergeParent(index),
+        };
+        let is_target = step.target() == target;
+        runner = append_query_step(runner, step, is_target, case);
+        if is_target {
+            seen = true;
+            if case.is_io_output(true) {
+                runner = after_output_io(runner, repo, selected.last().as_str());
+            }
+            break;
+        }
+    }
+    assert!(
+        seen,
+        "selected object target must belong to this admitted span"
+    );
+    let expected_calls = runner.expectations();
+    let direct_files_before = DirectStart::direct_files(repo, &repo.join(".git/factor"));
+    DirectStart {
+        env: TestEnv {
+            cwd: repo.to_path_buf(),
+        },
+        state: StateDir::new(repo.join(".git/factor")),
+        selected: selected.clone(),
+        exec: NonEmpty::new(NonEmptyString::try_from("true".to_owned()).or_abort("query gate")),
+        io: CapturedIo {
+            stdout: RefCell::new(String::new()),
+            stderr: RefCell::new(String::new()),
+            writes: Cell::new(0),
+            fail_at: None,
+        },
+        _dir: dir,
+        runner,
+        expected_result: case.expected_result(selected),
+        expected_calls,
+        expected_journal: None,
+        expected_stdout: String::new(),
+        expected_stderr: String::new(),
+        direct_files_before,
+    }
+}
+
 pub(in crate::git_factor) fn direct_start(
     selected: &NonEmpty<CommitSha>,
     requested_root: bool,
@@ -514,9 +562,7 @@ pub(in crate::git_factor) fn direct_start(
             if snapshots {
                 runner = after_output_io(runner, repo, selected.last().as_str());
             }
-            if !case.continues() {
-                break;
-            }
+            break;
         }
     }
     assert!(seen, "query target must belong to this admitted span");
@@ -624,9 +670,6 @@ fn query_journal(
     root: bool,
     case: &QueryCase,
 ) -> Option<BTreeMap<OsString, String>> {
-    if case.continues() {
-        return Some(DirectStart::journal(selected, root));
-    }
     match case.target() {
         // Characterize partial legacy recovery state after admission; not a new recovery guarantee.
         QueryTarget::Tree => {
@@ -656,9 +699,6 @@ fn query_journal(
     reason = "independent stream prefix for each selected legacy query boundary"
 )]
 fn query_streams(count: usize, case: &QueryCase, stdout: &str, stderr: &str) -> (String, String) {
-    if case.continues() {
-        return DirectStart::streams(stdout, stderr, DirectStart::banner(count, true), None);
-    }
     match *case {
         QueryCase::Failure {
             target: QueryTarget::Gate,

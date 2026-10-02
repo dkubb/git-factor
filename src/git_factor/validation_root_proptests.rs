@@ -502,3 +502,25 @@ mod base_parent_in {
         }
     }
 }
+
+mod validate_not_merge {
+    use super::super::parent_contracts::{CommitObject, inputs};
+    use proptest::prelude::*;
+
+    proptest! {
+        #[test]
+        fn admits_only_successfully_read_non_merge_objects((commit, reply, expected) in inputs()) {
+            let fixture = CommitObject::new(&commit, reply);
+            let ctx = fixture.context();
+
+            let actual = super::super::validate_not_merge(&ctx, &fixture.commit)
+                .map_err(|error| error.to_string());
+
+            prop_assert_eq!(actual, expected.map(|_parent| ()));
+            prop_assert_eq!(fixture.queries.get(), 1);
+            prop_assert_eq!(fixture.mutations.get(), 0);
+            prop_assert_eq!(fixture.io.out.borrow().clone(), "");
+            prop_assert_eq!(fixture.io.err.borrow().clone(), "");
+        }
+    }
+}
