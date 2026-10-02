@@ -16,16 +16,13 @@ mod support;
     reason = "preserve the established inline test layout"
 )]
 mod tests {
-    use core::panic::AssertUnwindSafe;
-    use core::time::Duration;
     use std::env;
     use std::ffi::{OsStr, OsString};
     use std::fs;
     use std::io;
-    use std::panic::{catch_unwind, resume_unwind};
+    use std::panic::resume_unwind;
     use std::path::{Path, PathBuf};
     use std::process::{self, Command};
-    use std::thread::sleep;
 
     use git_factor::non_empty_string::NonEmptyString;
     use tempfile::TempDir;
@@ -5233,81 +5230,6 @@ fi
     fn postconditions_helper_accepts_default_expectation() {
         let dir = init_repo();
         assert_git_factor_postconditions(dir.path(), GitFactorExpectation::default());
-    }
-
-    #[test]
-    fn proptest_run_integration_suite() {
-        const MAX_ATTEMPTS: usize = 3;
-        for attempt in 1..=MAX_ATTEMPTS {
-            let result = catch_unwind(AssertUnwindSafe(|| {
-                cli_help_flag_prints_help_to_stdout_and_exits_ok();
-                cli_short_version_flag_prints_version_to_stdout_and_exits_ok();
-                cli_version_flag_prints_version_to_stdout_and_exits_ok();
-                start_requires_exec_command();
-                start_requires_exec_command_when_only_message_is_provided();
-                start_defaults_to_head_when_commit_is_omitted();
-                rejects_default_head_when_repository_has_no_commits();
-                start_accepts_root_commit_ref_in_non_head_mode();
-                start_runs_with_absolute_git_dir();
-                start_reports_error_when_hint_show_toplevel_fails();
-                start_reports_missing_git_binary_from_git_output();
-                rejects_invalid_commit_ref();
-                status_reports_active_session_details();
-                status_trace_records_rebase_merge_snapshot_fields();
-                status_trace_records_rebase_apply_snapshot_fields();
-                start_cleans_state_when_git_rebase_fails();
-                continue_completes_single_commit_split_and_preserves_tree();
-                rejects_continue_without_message();
-                continue_splits_combined_span_for_multi_commit_range();
-                continue_completes_combined_span_for_multiple_explicit_refs();
-                continue_preserves_index_and_rehydrates_pool_when_exec_gate_fails();
-                continue_materializes_staged_deletions_into_worktree();
-                continue_reports_rehydrate_read_tree_failure();
-                continue_reports_rehydrate_conflicts_when_exec_gate_fails();
-                continue_drops_empty_root_commit_session();
-                finish_succeeds_without_rebase_when_target_is_head();
-                finish_reuses_original_commit_message_when_none_provided();
-                finish_rejects_empty_original_message_when_no_message_provided();
-                finish_reports_tree_hash_mismatch_via_write_tree_wrapper();
-                finish_ignores_exec_gate_and_completes_session();
-                continue_reports_rebase_continue_failure_with_recovery_hint();
-                continue_trace_logs_spawn_error_when_bash_is_unavailable();
-                start_reports_nonzero_git_output_status_with_stderr_message();
-                abort_succeeds_when_session_dir_exists_but_no_rebase_is_active();
-                abort_resets_repo_to_pre_start_head();
-                abort_propagates_git_dir_lookup_failure_after_active_check();
-                start_ignores_invalid_rev_list_lines_in_range_expansion();
-            }));
-
-            match result {
-                Ok(()) => return,
-                Err(payload) => {
-                    let transient = match (
-                        payload.downcast_ref::<&str>(),
-                        payload.downcast_ref::<String>(),
-                    ) {
-                        (Some(message), _) => {
-                            message.contains("retryable spawn error:")
-                                || message.contains("Resource temporarily unavailable")
-                                || message.contains("os error 11")
-                                || message.contains("os error 35")
-                        }
-                        (None, Some(message)) => {
-                            message.contains("retryable spawn error:")
-                                || message.contains("Resource temporarily unavailable")
-                                || message.contains("os error 11")
-                                || message.contains("os error 35")
-                        }
-                        (None, None) => false,
-                    };
-                    if attempt < MAX_ATTEMPTS && transient {
-                        sleep(Duration::from_millis(50));
-                        continue;
-                    }
-                    resume_unwind(payload);
-                }
-            }
-        }
     }
 
     #[test]
