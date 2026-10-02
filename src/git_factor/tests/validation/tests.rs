@@ -2346,67 +2346,6 @@ fn sort_topologically_reports_empty_sorted_output() {
 }
 
 #[test]
-fn validate_ancestor_wraps_command_status_io_error() {
-    struct AncestorIoErrorRunner;
-
-    impl Runner for AncestorIoErrorRunner {
-        fn output(&self, _bin: &str, _args: &[&str], _cwd: &Path) -> io::Result<Output> {
-            Err(io::Error::other("output should not be called"))
-        }
-
-        fn status(
-            &self,
-            _bin: &str,
-            _args: &[&str],
-            _envs: &[(&str, &str)],
-            _quiet: bool,
-            _cwd: &Path,
-        ) -> io::Result<ExitStatus> {
-            Err(io::Error::other("forced merge-base status io failure"))
-        }
-    }
-
-    let dir = TempDir::new().or_abort("tempdir");
-    let runner = AncestorIoErrorRunner;
-    let env = TestEnv {
-        cwd: dir.path().to_path_buf(),
-    };
-    let ctx = Ctx {
-        runner: &runner,
-        cwd: dir.path().to_path_buf(),
-        io: &REAL_IO,
-        env: &env,
-        fs: &REAL_FS,
-    };
-    let sha = CommitSha::new("a".repeat(COMMIT_SHA_HEX_LEN)).or_abort("valid sha");
-    let output_err = runner
-        .output("git", &["status"], dir.path())
-        .err_or_abort("output method should fail");
-    assert!(
-        output_err
-            .to_string()
-            .contains("output should not be called"),
-        "unexpected output error: {output_err}"
-    );
-
-    let err = validate_ancestor(&ctx, &sha).err_or_abort("status io error should fail");
-    let message = git_command_message(&err).or_abort("expected GitCommand");
-    assert!(
-        message.contains("forced merge-base status io failure"),
-        "unexpected error: {err:?}"
-    );
-}
-
-#[test]
-fn validate_ancestor_returns_ok_for_head_commit() {
-    let dir = TempDir::new().or_abort("tempdir");
-    init_git_repo(dir.path());
-    let ctx = ctx_for(dir.path());
-    let head = resolve_head_commit(&ctx).or_abort("resolve");
-    validate_ancestor(&ctx, &head).or_abort("HEAD should be ancestor of HEAD");
-}
-
-#[test]
 fn init_empty_root_repo_creates_single_empty_root_commit() {
     let dir = TempDir::new().or_abort("tempdir");
     init_empty_root_repo(dir.path());

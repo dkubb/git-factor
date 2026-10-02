@@ -96,7 +96,7 @@ use self::validation::{
     remove_empty_root_in, resolve_commit, resolve_commit_span, validate_exec_syntax,
 };
 #[cfg(test)]
-use self::validation::{resolve_commit_refs, resolve_head_commit, validate_ancestor};
+use self::validation::{resolve_commit_refs, resolve_head_commit};
 
 #[cfg(test)]
 use crate::test_support::{OrAbort as _, ResultOrAbort as _};

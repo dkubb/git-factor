@@ -430,30 +430,6 @@ fn validate_contiguous_span(
     Ok(())
 }
 
-/// Validates that a commit is an ancestor of HEAD.
-#[cfg(test)]
-pub(in crate::git_factor) fn validate_ancestor(
-    ctx: &Ctx<'_>,
-    sha: &CommitSha,
-) -> Result<(), FactorError> {
-    let status = match command_status_with(
-        ctx,
-        "git",
-        &["merge-base", "--is-ancestor", sha.as_str(), "HEAD"],
-        &[],
-        true,
-    ) {
-        Ok(status) => status,
-        Err(err) => return Err(FactorError::GitCommand(non_empty_msg(err.to_string()))),
-    };
-
-    if status.success() {
-        Ok(())
-    } else {
-        Err(FactorError::NotAncestor(sha.clone()))
-    }
-}
-
 /// Validates that an exec command has valid bash syntax.
 #[cfg_attr(
     not(test),
