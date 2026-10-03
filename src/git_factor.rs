@@ -2192,7 +2192,13 @@ fn run_with_args_vec(ctx: &Ctx<'_>, args: Vec<OsString>) -> Result<i32, FactorEr
     }
 
     if cli.abort() {
-        if cli.status() || cli.continue_flag() || cli.retry() || cli.finish() || has_start_args() {
+        if cli.status()
+            || cli.continue_flag()
+            || cli.retry()
+            || cli.finish()
+            || has_start_args()
+            || !cli.message().is_empty()
+        {
             return Err(FactorError::Usage(non_empty_msg(
                 "--abort cannot be combined with other options".to_owned(),
             )));

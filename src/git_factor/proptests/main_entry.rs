@@ -1226,3 +1226,15 @@ proptest! {
         verify_public_abort(in_progress, &sha);
     }
 }
+
+proptest! {
+    #[test]
+    fn abort_messages_preserve_generated_dispatch_refusals(
+        message in "[a-zA-Z][a-zA-Z0-9 ]{0,40}",
+    ) {
+        refusal(
+            &["--abort", "--message", &message],
+            "--abort cannot be combined with other options",
+        );
+    }
+}
