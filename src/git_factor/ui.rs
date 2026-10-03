@@ -140,6 +140,2157 @@ pub(in crate::git_factor) fn print_session_started(
 
 #[cfg(test)]
 mod tests {
+    mod print_hints_with_remaining_in {
+        use super::super::hint_contracts::{
+            complete, rejected, spawn_failed, with_guidance, with_guidance_value, with_reference,
+            with_remaining, without_guidance, without_reference, without_remaining, write_failed,
+        };
+        use super::super::*;
+        use crate::non_empty_string::NonEmptyString;
+        use crate::test_support::OrAbort as _;
+        use core::num::{NonZeroU8, NonZeroUsize};
+        #[test]
+        fn empty_remaining_without_optional_guidance() {
+            let world = complete(
+                without_remaining(),
+                &without_reference(),
+                &without_guidance(),
+            );
+            let repo = world.directory.path();
+            let ctx = Ctx {
+                cwd: repo.to_path_buf(),
+                env: &world.env,
+                runner: &world.runner,
+                io: &world.io,
+                fs: &REAL_FS,
+            };
+
+            let result = super::super::print_hints_with_remaining_in(&ctx, &world.remaining);
+
+            let (stdout, stderr, calls) = (
+                world.io.stdout.borrow(),
+                world.io.stderr.borrow(),
+                world.runner.calls.borrow(),
+            );
+
+            let reference_read = fs::read(repo.join("references/rust.md"));
+
+            assert_eq!(
+                result.as_ref().map_err(ToString::to_string),
+                world.expected_result.as_ref().map_err(Clone::clone)
+            );
+            assert_eq!(
+                (
+                    stdout.as_str(),
+                    stderr.as_str(),
+                    calls.as_slice(),
+                    world.io.attempted.get(),
+                    fs::read(repo.join(".git/index")).or_abort("saved index remains"),
+                    fs::read(repo.join("user.txt")).or_abort("saved user remains"),
+                    reference_read.as_ref().map_err(io::Error::kind)
+                ),
+                (
+                    world.expected_stdout.as_str(),
+                    "",
+                    world.expected_calls.as_slice(),
+                    world.expected_writes,
+                    b"saved index".to_vec(),
+                    b"saved user bytes".to_vec(),
+                    world.expected_reference.as_ref().map_err(Clone::clone)
+                )
+            );
+        }
+
+        #[test]
+        fn remaining_with_reference_and_claude_guidance() {
+            let world = complete(
+                with_remaining(
+                    &NonEmptyString::try_from("2 files changed")
+                        .or_abort("nonempty fixed remaining"),
+                ),
+                &with_reference(),
+                &with_guidance(),
+            );
+            let repo = world.directory.path();
+            let ctx = Ctx {
+                cwd: repo.to_path_buf(),
+                env: &world.env,
+                runner: &world.runner,
+                io: &world.io,
+                fs: &REAL_FS,
+            };
+
+            let result = super::super::print_hints_with_remaining_in(&ctx, &world.remaining);
+
+            let (stdout, stderr, calls) = (
+                world.io.stdout.borrow(),
+                world.io.stderr.borrow(),
+                world.runner.calls.borrow(),
+            );
+
+            let reference_read = fs::read(repo.join("references/rust.md"));
+
+            assert_eq!(
+                result.as_ref().map_err(ToString::to_string),
+                world.expected_result.as_ref().map_err(Clone::clone)
+            );
+            assert_eq!(
+                (
+                    stdout.as_str(),
+                    stderr.as_str(),
+                    calls.as_slice(),
+                    world.io.attempted.get(),
+                    fs::read(repo.join(".git/index")).or_abort("saved index remains"),
+                    fs::read(repo.join("user.txt")).or_abort("saved user remains"),
+                    reference_read.as_ref().map_err(io::Error::kind)
+                ),
+                (
+                    world.expected_stdout.as_str(),
+                    "",
+                    world.expected_calls.as_slice(),
+                    world.expected_writes,
+                    b"saved index".to_vec(),
+                    b"saved user bytes".to_vec(),
+                    world.expected_reference.as_ref().map_err(Clone::clone)
+                )
+            );
+        }
+
+        #[test]
+        fn single_space_remaining_is_printed() {
+            let world = complete(
+                with_remaining(&NonEmptyString::try_from(" ").or_abort("nonempty fixed remaining")),
+                &with_reference(),
+                &with_guidance(),
+            );
+            let repo = world.directory.path();
+            let ctx = Ctx {
+                cwd: repo.to_path_buf(),
+                env: &world.env,
+                runner: &world.runner,
+                io: &world.io,
+                fs: &REAL_FS,
+            };
+
+            let result = super::super::print_hints_with_remaining_in(&ctx, &world.remaining);
+
+            let (stdout, stderr, calls) = (
+                world.io.stdout.borrow(),
+                world.io.stderr.borrow(),
+                world.runner.calls.borrow(),
+            );
+
+            let reference_read = fs::read(repo.join("references/rust.md"));
+
+            assert_eq!(
+                result.as_ref().map_err(ToString::to_string),
+                world.expected_result.as_ref().map_err(Clone::clone)
+            );
+            assert_eq!(
+                (
+                    stdout.as_str(),
+                    stderr.as_str(),
+                    calls.as_slice(),
+                    world.io.attempted.get(),
+                    fs::read(repo.join(".git/index")).or_abort("saved index remains"),
+                    fs::read(repo.join("user.txt")).or_abort("saved user remains"),
+                    reference_read.as_ref().map_err(io::Error::kind)
+                ),
+                (
+                    world.expected_stdout.as_str(),
+                    "",
+                    world.expected_calls.as_slice(),
+                    world.expected_writes,
+                    b"saved index".to_vec(),
+                    b"saved user bytes".to_vec(),
+                    world.expected_reference.as_ref().map_err(Clone::clone)
+                )
+            );
+        }
+
+        #[test]
+        fn empty_claudecode_value_keeps_guidance() {
+            let world = complete(
+                with_remaining(
+                    &NonEmptyString::try_from("2 files changed")
+                        .or_abort("nonempty fixed remaining"),
+                ),
+                &with_reference(),
+                &with_guidance_value(OsString::new()),
+            );
+            let repo = world.directory.path();
+            let ctx = Ctx {
+                cwd: repo.to_path_buf(),
+                env: &world.env,
+                runner: &world.runner,
+                io: &world.io,
+                fs: &REAL_FS,
+            };
+
+            let result = super::super::print_hints_with_remaining_in(&ctx, &world.remaining);
+
+            let (stdout, stderr, calls) = (
+                world.io.stdout.borrow(),
+                world.io.stderr.borrow(),
+                world.runner.calls.borrow(),
+            );
+
+            let reference_read = fs::read(repo.join("references/rust.md"));
+
+            assert_eq!(
+                result.as_ref().map_err(ToString::to_string),
+                world.expected_result.as_ref().map_err(Clone::clone)
+            );
+            assert_eq!(
+                (
+                    stdout.as_str(),
+                    stderr.as_str(),
+                    calls.as_slice(),
+                    world.io.attempted.get(),
+                    fs::read(repo.join(".git/index")).or_abort("saved index remains"),
+                    fs::read(repo.join("user.txt")).or_abort("saved user remains"),
+                    reference_read.as_ref().map_err(io::Error::kind)
+                ),
+                (
+                    world.expected_stdout.as_str(),
+                    "",
+                    world.expected_calls.as_slice(),
+                    world.expected_writes,
+                    b"saved index".to_vec(),
+                    b"saved user bytes".to_vec(),
+                    world.expected_reference.as_ref().map_err(Clone::clone)
+                )
+            );
+        }
+
+        #[test]
+        fn nested_cwd_discovers_repository_root_reference() {
+            let mut world = complete(
+                with_remaining(
+                    &NonEmptyString::try_from("2 files changed")
+                        .or_abort("nonempty fixed remaining"),
+                ),
+                &with_reference(),
+                &with_guidance(),
+            );
+            let repo = world.directory.path();
+            let nested = repo.join("nested");
+            fs::create_dir_all(&nested).or_abort("owned nested current directory");
+            fs::write(nested.join("user.txt"), b"saved nested user bytes")
+                .or_abort("save nested user");
+            world.env.repo = nested.clone();
+            world.expected_calls = vec![super::super::hint_contracts::Call::Output {
+                args: vec!["rev-parse".to_owned(), "--show-toplevel".to_owned()],
+                bin: "git".to_owned(),
+                cwd: nested.clone(),
+            }];
+            let ctx = Ctx {
+                cwd: nested.clone(),
+                env: &world.env,
+                runner: &world.runner,
+                io: &world.io,
+                fs: &REAL_FS,
+            };
+
+            let result = super::super::print_hints_with_remaining_in(&ctx, &world.remaining);
+
+            let (stdout, stderr, calls) = (
+                world.io.stdout.borrow(),
+                world.io.stderr.borrow(),
+                world.runner.calls.borrow(),
+            );
+
+            let reference_read = fs::read(repo.join("references/rust.md"));
+
+            assert_eq!(
+                result.as_ref().map_err(ToString::to_string),
+                world.expected_result.as_ref().map_err(Clone::clone)
+            );
+            assert_eq!(
+                (
+                    stdout.as_str(),
+                    stderr.as_str(),
+                    calls.as_slice(),
+                    world.io.attempted.get(),
+                    fs::read(repo.join(".git/index")).or_abort("saved index remains"),
+                    fs::read(repo.join("user.txt")).or_abort("saved user remains"),
+                    reference_read.as_ref().map_err(io::Error::kind),
+                    fs::read(nested.join("user.txt")).or_abort("nested user remains"),
+                    fs::read(nested.join("references/rust.md"))
+                        .as_ref()
+                        .map_err(io::Error::kind)
+                ),
+                (
+                    world.expected_stdout.as_str(),
+                    "",
+                    world.expected_calls.as_slice(),
+                    world.expected_writes,
+                    b"saved index".to_vec(),
+                    b"saved user bytes".to_vec(),
+                    world.expected_reference.as_ref().map_err(Clone::clone),
+                    b"saved nested user bytes".to_vec(),
+                    Err(io::ErrorKind::NotFound)
+                )
+            );
+        }
+
+        #[test]
+        fn nested_reference_is_omitted_when_repository_root_reference_is_absent() {
+            let mut world = complete(
+                with_remaining(
+                    &NonEmptyString::try_from("2 files changed")
+                        .or_abort("nonempty fixed remaining"),
+                ),
+                &without_reference(),
+                &with_guidance(),
+            );
+            let repo = world.directory.path();
+            let nested = repo.join("nested");
+            fs::create_dir_all(&nested).or_abort("owned nested current directory");
+            fs::write(nested.join("user.txt"), b"saved nested user bytes")
+                .or_abort("save nested user");
+            fs::create_dir_all(nested.join("references"))
+                .or_abort("owned nested reference directory");
+            fs::write(nested.join("references/rust.md"), b"nested decoy")
+                .or_abort("save nested decoy reference");
+            world.env.repo = nested.clone();
+            world.expected_calls = vec![super::super::hint_contracts::Call::Output {
+                args: vec!["rev-parse".to_owned(), "--show-toplevel".to_owned()],
+                bin: "git".to_owned(),
+                cwd: nested.clone(),
+            }];
+            let ctx = Ctx {
+                cwd: nested.clone(),
+                env: &world.env,
+                runner: &world.runner,
+                io: &world.io,
+                fs: &REAL_FS,
+            };
+
+            let result = super::super::print_hints_with_remaining_in(&ctx, &world.remaining);
+
+            let (stdout, stderr, calls) = (
+                world.io.stdout.borrow(),
+                world.io.stderr.borrow(),
+                world.runner.calls.borrow(),
+            );
+
+            let reference_read = fs::read(repo.join("references/rust.md"));
+
+            assert_eq!(
+                result.as_ref().map_err(ToString::to_string),
+                world.expected_result.as_ref().map_err(Clone::clone)
+            );
+            assert_eq!(
+                (
+                    stdout.as_str(),
+                    stderr.as_str(),
+                    calls.as_slice(),
+                    world.io.attempted.get(),
+                    fs::read(repo.join(".git/index")).or_abort("saved index remains"),
+                    fs::read(repo.join("user.txt")).or_abort("saved user remains"),
+                    reference_read.as_ref().map_err(io::Error::kind),
+                    fs::read(nested.join("user.txt")).or_abort("nested user remains"),
+                    fs::read(nested.join("references/rust.md"))
+                        .as_ref()
+                        .map_err(io::Error::kind)
+                ),
+                (
+                    world.expected_stdout.as_str(),
+                    "",
+                    world.expected_calls.as_slice(),
+                    world.expected_writes,
+                    b"saved index".to_vec(),
+                    b"saved user bytes".to_vec(),
+                    world.expected_reference.as_ref().map_err(Clone::clone),
+                    b"saved nested user bytes".to_vec(),
+                    Ok(&b"nested decoy".to_vec())
+                )
+            );
+        }
+
+        #[test]
+        fn query_rejection_precedes_all_output() {
+            let world = rejected(
+                "pending".to_owned(),
+                &with_reference(),
+                &with_guidance(),
+                NonZeroU8::new(23).or_abort("nonzero rejection"),
+            );
+            let repo = world.directory.path();
+            let ctx = Ctx {
+                cwd: repo.to_path_buf(),
+                env: &world.env,
+                runner: &world.runner,
+                io: &world.io,
+                fs: &REAL_FS,
+            };
+
+            let result = super::super::print_hints_with_remaining_in(&ctx, &world.remaining);
+
+            let (stdout, stderr, calls) = (
+                world.io.stdout.borrow(),
+                world.io.stderr.borrow(),
+                world.runner.calls.borrow(),
+            );
+
+            let reference_read = fs::read(repo.join("references/rust.md"));
+
+            assert_eq!(
+                result.as_ref().map_err(ToString::to_string),
+                world.expected_result.as_ref().map_err(Clone::clone)
+            );
+            assert_eq!(
+                (
+                    stdout.as_str(),
+                    stderr.as_str(),
+                    calls.as_slice(),
+                    world.io.attempted.get(),
+                    fs::read(repo.join(".git/index")).or_abort("saved index remains"),
+                    fs::read(repo.join("user.txt")).or_abort("saved user remains"),
+                    reference_read.as_ref().map_err(io::Error::kind)
+                ),
+                (
+                    world.expected_stdout.as_str(),
+                    "",
+                    world.expected_calls.as_slice(),
+                    world.expected_writes,
+                    b"saved index".to_vec(),
+                    b"saved user bytes".to_vec(),
+                    world.expected_reference.as_ref().map_err(Clone::clone)
+                )
+            );
+        }
+
+        #[test]
+        fn query_spawn_observes_trigger_then_snapshot_queries() {
+            let world = spawn_failed("pending".to_owned(), &with_reference(), &with_guidance());
+            let repo = world.directory.path();
+            let ctx = Ctx {
+                cwd: repo.to_path_buf(),
+                env: &world.env,
+                runner: &world.runner,
+                io: &world.io,
+                fs: &REAL_FS,
+            };
+
+            let result = super::super::print_hints_with_remaining_in(&ctx, &world.remaining);
+
+            let (stdout, stderr, calls) = (
+                world.io.stdout.borrow(),
+                world.io.stderr.borrow(),
+                world.runner.calls.borrow(),
+            );
+
+            let reference_read = fs::read(repo.join("references/rust.md"));
+
+            assert_eq!(
+                result.as_ref().map_err(ToString::to_string),
+                world.expected_result.as_ref().map_err(Clone::clone)
+            );
+            assert_eq!(
+                (
+                    stdout.as_str(),
+                    stderr.as_str(),
+                    calls.as_slice(),
+                    world.io.attempted.get(),
+                    fs::read(repo.join(".git/index")).or_abort("saved index remains"),
+                    fs::read(repo.join("user.txt")).or_abort("saved user remains"),
+                    reference_read.as_ref().map_err(io::Error::kind)
+                ),
+                (
+                    world.expected_stdout.as_str(),
+                    "",
+                    world.expected_calls.as_slice(),
+                    world.expected_writes,
+                    b"saved index".to_vec(),
+                    b"saved user bytes".to_vec(),
+                    world.expected_reference.as_ref().map_err(Clone::clone)
+                )
+            );
+        }
+
+        #[test]
+        fn output_write_1_preserves_exact_prefix_and_saved_bytes() {
+            let world = write_failed(
+                with_remaining(
+                    &NonEmptyString::try_from("2 files changed")
+                        .or_abort("nonempty fixed remaining"),
+                ),
+                &with_reference(),
+                &with_guidance(),
+                NonZeroUsize::new(1).or_abort("positive write ordinal"),
+            );
+            let repo = world.directory.path();
+            let ctx = Ctx {
+                cwd: repo.to_path_buf(),
+                env: &world.env,
+                runner: &world.runner,
+                io: &world.io,
+                fs: &REAL_FS,
+            };
+
+            let result = super::super::print_hints_with_remaining_in(&ctx, &world.remaining);
+
+            let (stdout, stderr, calls) = (
+                world.io.stdout.borrow(),
+                world.io.stderr.borrow(),
+                world.runner.calls.borrow(),
+            );
+
+            let reference_read = fs::read(repo.join("references/rust.md"));
+
+            assert_eq!(
+                result.as_ref().map_err(ToString::to_string),
+                world.expected_result.as_ref().map_err(Clone::clone)
+            );
+            assert_eq!(
+                (
+                    stdout.as_str(),
+                    stderr.as_str(),
+                    calls.as_slice(),
+                    world.io.attempted.get(),
+                    fs::read(repo.join(".git/index")).or_abort("saved index remains"),
+                    fs::read(repo.join("user.txt")).or_abort("saved user remains"),
+                    reference_read.as_ref().map_err(io::Error::kind)
+                ),
+                (
+                    world.expected_stdout.as_str(),
+                    "",
+                    world.expected_calls.as_slice(),
+                    world.expected_writes,
+                    b"saved index".to_vec(),
+                    b"saved user bytes".to_vec(),
+                    world.expected_reference.as_ref().map_err(Clone::clone)
+                )
+            );
+        }
+
+        #[test]
+        fn output_write_2_preserves_exact_prefix_and_saved_bytes() {
+            let world = write_failed(
+                with_remaining(
+                    &NonEmptyString::try_from("2 files changed")
+                        .or_abort("nonempty fixed remaining"),
+                ),
+                &with_reference(),
+                &with_guidance(),
+                NonZeroUsize::new(2).or_abort("positive write ordinal"),
+            );
+            let repo = world.directory.path();
+            let ctx = Ctx {
+                cwd: repo.to_path_buf(),
+                env: &world.env,
+                runner: &world.runner,
+                io: &world.io,
+                fs: &REAL_FS,
+            };
+
+            let result = super::super::print_hints_with_remaining_in(&ctx, &world.remaining);
+
+            let (stdout, stderr, calls) = (
+                world.io.stdout.borrow(),
+                world.io.stderr.borrow(),
+                world.runner.calls.borrow(),
+            );
+
+            let reference_read = fs::read(repo.join("references/rust.md"));
+
+            assert_eq!(
+                result.as_ref().map_err(ToString::to_string),
+                world.expected_result.as_ref().map_err(Clone::clone)
+            );
+            assert_eq!(
+                (
+                    stdout.as_str(),
+                    stderr.as_str(),
+                    calls.as_slice(),
+                    world.io.attempted.get(),
+                    fs::read(repo.join(".git/index")).or_abort("saved index remains"),
+                    fs::read(repo.join("user.txt")).or_abort("saved user remains"),
+                    reference_read.as_ref().map_err(io::Error::kind)
+                ),
+                (
+                    world.expected_stdout.as_str(),
+                    "",
+                    world.expected_calls.as_slice(),
+                    world.expected_writes,
+                    b"saved index".to_vec(),
+                    b"saved user bytes".to_vec(),
+                    world.expected_reference.as_ref().map_err(Clone::clone)
+                )
+            );
+        }
+
+        #[test]
+        fn output_write_3_preserves_exact_prefix_and_saved_bytes() {
+            let world = write_failed(
+                with_remaining(
+                    &NonEmptyString::try_from("2 files changed")
+                        .or_abort("nonempty fixed remaining"),
+                ),
+                &with_reference(),
+                &with_guidance(),
+                NonZeroUsize::new(3).or_abort("positive write ordinal"),
+            );
+            let repo = world.directory.path();
+            let ctx = Ctx {
+                cwd: repo.to_path_buf(),
+                env: &world.env,
+                runner: &world.runner,
+                io: &world.io,
+                fs: &REAL_FS,
+            };
+
+            let result = super::super::print_hints_with_remaining_in(&ctx, &world.remaining);
+
+            let (stdout, stderr, calls) = (
+                world.io.stdout.borrow(),
+                world.io.stderr.borrow(),
+                world.runner.calls.borrow(),
+            );
+
+            let reference_read = fs::read(repo.join("references/rust.md"));
+
+            assert_eq!(
+                result.as_ref().map_err(ToString::to_string),
+                world.expected_result.as_ref().map_err(Clone::clone)
+            );
+            assert_eq!(
+                (
+                    stdout.as_str(),
+                    stderr.as_str(),
+                    calls.as_slice(),
+                    world.io.attempted.get(),
+                    fs::read(repo.join(".git/index")).or_abort("saved index remains"),
+                    fs::read(repo.join("user.txt")).or_abort("saved user remains"),
+                    reference_read.as_ref().map_err(io::Error::kind)
+                ),
+                (
+                    world.expected_stdout.as_str(),
+                    "",
+                    world.expected_calls.as_slice(),
+                    world.expected_writes,
+                    b"saved index".to_vec(),
+                    b"saved user bytes".to_vec(),
+                    world.expected_reference.as_ref().map_err(Clone::clone)
+                )
+            );
+        }
+
+        #[test]
+        fn output_write_4_preserves_exact_prefix_and_saved_bytes() {
+            let world = write_failed(
+                with_remaining(
+                    &NonEmptyString::try_from("2 files changed")
+                        .or_abort("nonempty fixed remaining"),
+                ),
+                &with_reference(),
+                &with_guidance(),
+                NonZeroUsize::new(4).or_abort("positive write ordinal"),
+            );
+            let repo = world.directory.path();
+            let ctx = Ctx {
+                cwd: repo.to_path_buf(),
+                env: &world.env,
+                runner: &world.runner,
+                io: &world.io,
+                fs: &REAL_FS,
+            };
+
+            let result = super::super::print_hints_with_remaining_in(&ctx, &world.remaining);
+
+            let (stdout, stderr, calls) = (
+                world.io.stdout.borrow(),
+                world.io.stderr.borrow(),
+                world.runner.calls.borrow(),
+            );
+
+            let reference_read = fs::read(repo.join("references/rust.md"));
+
+            assert_eq!(
+                result.as_ref().map_err(ToString::to_string),
+                world.expected_result.as_ref().map_err(Clone::clone)
+            );
+            assert_eq!(
+                (
+                    stdout.as_str(),
+                    stderr.as_str(),
+                    calls.as_slice(),
+                    world.io.attempted.get(),
+                    fs::read(repo.join(".git/index")).or_abort("saved index remains"),
+                    fs::read(repo.join("user.txt")).or_abort("saved user remains"),
+                    reference_read.as_ref().map_err(io::Error::kind)
+                ),
+                (
+                    world.expected_stdout.as_str(),
+                    "",
+                    world.expected_calls.as_slice(),
+                    world.expected_writes,
+                    b"saved index".to_vec(),
+                    b"saved user bytes".to_vec(),
+                    world.expected_reference.as_ref().map_err(Clone::clone)
+                )
+            );
+        }
+
+        #[test]
+        fn output_write_5_preserves_exact_prefix_and_saved_bytes() {
+            let world = write_failed(
+                with_remaining(
+                    &NonEmptyString::try_from("2 files changed")
+                        .or_abort("nonempty fixed remaining"),
+                ),
+                &with_reference(),
+                &with_guidance(),
+                NonZeroUsize::new(5).or_abort("positive write ordinal"),
+            );
+            let repo = world.directory.path();
+            let ctx = Ctx {
+                cwd: repo.to_path_buf(),
+                env: &world.env,
+                runner: &world.runner,
+                io: &world.io,
+                fs: &REAL_FS,
+            };
+
+            let result = super::super::print_hints_with_remaining_in(&ctx, &world.remaining);
+
+            let (stdout, stderr, calls) = (
+                world.io.stdout.borrow(),
+                world.io.stderr.borrow(),
+                world.runner.calls.borrow(),
+            );
+
+            let reference_read = fs::read(repo.join("references/rust.md"));
+
+            assert_eq!(
+                result.as_ref().map_err(ToString::to_string),
+                world.expected_result.as_ref().map_err(Clone::clone)
+            );
+            assert_eq!(
+                (
+                    stdout.as_str(),
+                    stderr.as_str(),
+                    calls.as_slice(),
+                    world.io.attempted.get(),
+                    fs::read(repo.join(".git/index")).or_abort("saved index remains"),
+                    fs::read(repo.join("user.txt")).or_abort("saved user remains"),
+                    reference_read.as_ref().map_err(io::Error::kind)
+                ),
+                (
+                    world.expected_stdout.as_str(),
+                    "",
+                    world.expected_calls.as_slice(),
+                    world.expected_writes,
+                    b"saved index".to_vec(),
+                    b"saved user bytes".to_vec(),
+                    world.expected_reference.as_ref().map_err(Clone::clone)
+                )
+            );
+        }
+
+        #[test]
+        fn output_write_6_preserves_exact_prefix_and_saved_bytes() {
+            let world = write_failed(
+                with_remaining(
+                    &NonEmptyString::try_from("2 files changed")
+                        .or_abort("nonempty fixed remaining"),
+                ),
+                &with_reference(),
+                &with_guidance(),
+                NonZeroUsize::new(6).or_abort("positive write ordinal"),
+            );
+            let repo = world.directory.path();
+            let ctx = Ctx {
+                cwd: repo.to_path_buf(),
+                env: &world.env,
+                runner: &world.runner,
+                io: &world.io,
+                fs: &REAL_FS,
+            };
+
+            let result = super::super::print_hints_with_remaining_in(&ctx, &world.remaining);
+
+            let (stdout, stderr, calls) = (
+                world.io.stdout.borrow(),
+                world.io.stderr.borrow(),
+                world.runner.calls.borrow(),
+            );
+
+            let reference_read = fs::read(repo.join("references/rust.md"));
+
+            assert_eq!(
+                result.as_ref().map_err(ToString::to_string),
+                world.expected_result.as_ref().map_err(Clone::clone)
+            );
+            assert_eq!(
+                (
+                    stdout.as_str(),
+                    stderr.as_str(),
+                    calls.as_slice(),
+                    world.io.attempted.get(),
+                    fs::read(repo.join(".git/index")).or_abort("saved index remains"),
+                    fs::read(repo.join("user.txt")).or_abort("saved user remains"),
+                    reference_read.as_ref().map_err(io::Error::kind)
+                ),
+                (
+                    world.expected_stdout.as_str(),
+                    "",
+                    world.expected_calls.as_slice(),
+                    world.expected_writes,
+                    b"saved index".to_vec(),
+                    b"saved user bytes".to_vec(),
+                    world.expected_reference.as_ref().map_err(Clone::clone)
+                )
+            );
+        }
+
+        #[test]
+        fn output_write_7_preserves_exact_prefix_and_saved_bytes() {
+            let world = write_failed(
+                with_remaining(
+                    &NonEmptyString::try_from("2 files changed")
+                        .or_abort("nonempty fixed remaining"),
+                ),
+                &with_reference(),
+                &with_guidance(),
+                NonZeroUsize::new(7).or_abort("positive write ordinal"),
+            );
+            let repo = world.directory.path();
+            let ctx = Ctx {
+                cwd: repo.to_path_buf(),
+                env: &world.env,
+                runner: &world.runner,
+                io: &world.io,
+                fs: &REAL_FS,
+            };
+
+            let result = super::super::print_hints_with_remaining_in(&ctx, &world.remaining);
+
+            let (stdout, stderr, calls) = (
+                world.io.stdout.borrow(),
+                world.io.stderr.borrow(),
+                world.runner.calls.borrow(),
+            );
+
+            let reference_read = fs::read(repo.join("references/rust.md"));
+
+            assert_eq!(
+                result.as_ref().map_err(ToString::to_string),
+                world.expected_result.as_ref().map_err(Clone::clone)
+            );
+            assert_eq!(
+                (
+                    stdout.as_str(),
+                    stderr.as_str(),
+                    calls.as_slice(),
+                    world.io.attempted.get(),
+                    fs::read(repo.join(".git/index")).or_abort("saved index remains"),
+                    fs::read(repo.join("user.txt")).or_abort("saved user remains"),
+                    reference_read.as_ref().map_err(io::Error::kind)
+                ),
+                (
+                    world.expected_stdout.as_str(),
+                    "",
+                    world.expected_calls.as_slice(),
+                    world.expected_writes,
+                    b"saved index".to_vec(),
+                    b"saved user bytes".to_vec(),
+                    world.expected_reference.as_ref().map_err(Clone::clone)
+                )
+            );
+        }
+
+        #[test]
+        fn output_write_8_preserves_exact_prefix_and_saved_bytes() {
+            let world = write_failed(
+                with_remaining(
+                    &NonEmptyString::try_from("2 files changed")
+                        .or_abort("nonempty fixed remaining"),
+                ),
+                &with_reference(),
+                &with_guidance(),
+                NonZeroUsize::new(8).or_abort("positive write ordinal"),
+            );
+            let repo = world.directory.path();
+            let ctx = Ctx {
+                cwd: repo.to_path_buf(),
+                env: &world.env,
+                runner: &world.runner,
+                io: &world.io,
+                fs: &REAL_FS,
+            };
+
+            let result = super::super::print_hints_with_remaining_in(&ctx, &world.remaining);
+
+            let (stdout, stderr, calls) = (
+                world.io.stdout.borrow(),
+                world.io.stderr.borrow(),
+                world.runner.calls.borrow(),
+            );
+
+            let reference_read = fs::read(repo.join("references/rust.md"));
+
+            assert_eq!(
+                result.as_ref().map_err(ToString::to_string),
+                world.expected_result.as_ref().map_err(Clone::clone)
+            );
+            assert_eq!(
+                (
+                    stdout.as_str(),
+                    stderr.as_str(),
+                    calls.as_slice(),
+                    world.io.attempted.get(),
+                    fs::read(repo.join(".git/index")).or_abort("saved index remains"),
+                    fs::read(repo.join("user.txt")).or_abort("saved user remains"),
+                    reference_read.as_ref().map_err(io::Error::kind)
+                ),
+                (
+                    world.expected_stdout.as_str(),
+                    "",
+                    world.expected_calls.as_slice(),
+                    world.expected_writes,
+                    b"saved index".to_vec(),
+                    b"saved user bytes".to_vec(),
+                    world.expected_reference.as_ref().map_err(Clone::clone)
+                )
+            );
+        }
+
+        #[test]
+        fn output_write_9_preserves_exact_prefix_and_saved_bytes() {
+            let world = write_failed(
+                with_remaining(
+                    &NonEmptyString::try_from("2 files changed")
+                        .or_abort("nonempty fixed remaining"),
+                ),
+                &with_reference(),
+                &with_guidance(),
+                NonZeroUsize::new(9).or_abort("positive write ordinal"),
+            );
+            let repo = world.directory.path();
+            let ctx = Ctx {
+                cwd: repo.to_path_buf(),
+                env: &world.env,
+                runner: &world.runner,
+                io: &world.io,
+                fs: &REAL_FS,
+            };
+
+            let result = super::super::print_hints_with_remaining_in(&ctx, &world.remaining);
+
+            let (stdout, stderr, calls) = (
+                world.io.stdout.borrow(),
+                world.io.stderr.borrow(),
+                world.runner.calls.borrow(),
+            );
+
+            let reference_read = fs::read(repo.join("references/rust.md"));
+
+            assert_eq!(
+                result.as_ref().map_err(ToString::to_string),
+                world.expected_result.as_ref().map_err(Clone::clone)
+            );
+            assert_eq!(
+                (
+                    stdout.as_str(),
+                    stderr.as_str(),
+                    calls.as_slice(),
+                    world.io.attempted.get(),
+                    fs::read(repo.join(".git/index")).or_abort("saved index remains"),
+                    fs::read(repo.join("user.txt")).or_abort("saved user remains"),
+                    reference_read.as_ref().map_err(io::Error::kind)
+                ),
+                (
+                    world.expected_stdout.as_str(),
+                    "",
+                    world.expected_calls.as_slice(),
+                    world.expected_writes,
+                    b"saved index".to_vec(),
+                    b"saved user bytes".to_vec(),
+                    world.expected_reference.as_ref().map_err(Clone::clone)
+                )
+            );
+        }
+
+        #[test]
+        fn output_write_10_preserves_exact_prefix_and_saved_bytes() {
+            let world = write_failed(
+                with_remaining(
+                    &NonEmptyString::try_from("2 files changed")
+                        .or_abort("nonempty fixed remaining"),
+                ),
+                &with_reference(),
+                &with_guidance(),
+                NonZeroUsize::new(10).or_abort("positive write ordinal"),
+            );
+            let repo = world.directory.path();
+            let ctx = Ctx {
+                cwd: repo.to_path_buf(),
+                env: &world.env,
+                runner: &world.runner,
+                io: &world.io,
+                fs: &REAL_FS,
+            };
+
+            let result = super::super::print_hints_with_remaining_in(&ctx, &world.remaining);
+
+            let (stdout, stderr, calls) = (
+                world.io.stdout.borrow(),
+                world.io.stderr.borrow(),
+                world.runner.calls.borrow(),
+            );
+
+            let reference_read = fs::read(repo.join("references/rust.md"));
+
+            assert_eq!(
+                result.as_ref().map_err(ToString::to_string),
+                world.expected_result.as_ref().map_err(Clone::clone)
+            );
+            assert_eq!(
+                (
+                    stdout.as_str(),
+                    stderr.as_str(),
+                    calls.as_slice(),
+                    world.io.attempted.get(),
+                    fs::read(repo.join(".git/index")).or_abort("saved index remains"),
+                    fs::read(repo.join("user.txt")).or_abort("saved user remains"),
+                    reference_read.as_ref().map_err(io::Error::kind)
+                ),
+                (
+                    world.expected_stdout.as_str(),
+                    "",
+                    world.expected_calls.as_slice(),
+                    world.expected_writes,
+                    b"saved index".to_vec(),
+                    b"saved user bytes".to_vec(),
+                    world.expected_reference.as_ref().map_err(Clone::clone)
+                )
+            );
+        }
+
+        #[test]
+        fn output_write_11_preserves_exact_prefix_and_saved_bytes() {
+            let world = write_failed(
+                with_remaining(
+                    &NonEmptyString::try_from("2 files changed")
+                        .or_abort("nonempty fixed remaining"),
+                ),
+                &with_reference(),
+                &with_guidance(),
+                NonZeroUsize::new(11).or_abort("positive write ordinal"),
+            );
+            let repo = world.directory.path();
+            let ctx = Ctx {
+                cwd: repo.to_path_buf(),
+                env: &world.env,
+                runner: &world.runner,
+                io: &world.io,
+                fs: &REAL_FS,
+            };
+
+            let result = super::super::print_hints_with_remaining_in(&ctx, &world.remaining);
+
+            let (stdout, stderr, calls) = (
+                world.io.stdout.borrow(),
+                world.io.stderr.borrow(),
+                world.runner.calls.borrow(),
+            );
+
+            let reference_read = fs::read(repo.join("references/rust.md"));
+
+            assert_eq!(
+                result.as_ref().map_err(ToString::to_string),
+                world.expected_result.as_ref().map_err(Clone::clone)
+            );
+            assert_eq!(
+                (
+                    stdout.as_str(),
+                    stderr.as_str(),
+                    calls.as_slice(),
+                    world.io.attempted.get(),
+                    fs::read(repo.join(".git/index")).or_abort("saved index remains"),
+                    fs::read(repo.join("user.txt")).or_abort("saved user remains"),
+                    reference_read.as_ref().map_err(io::Error::kind)
+                ),
+                (
+                    world.expected_stdout.as_str(),
+                    "",
+                    world.expected_calls.as_slice(),
+                    world.expected_writes,
+                    b"saved index".to_vec(),
+                    b"saved user bytes".to_vec(),
+                    world.expected_reference.as_ref().map_err(Clone::clone)
+                )
+            );
+        }
+
+        #[test]
+        fn output_write_12_preserves_exact_prefix_and_saved_bytes() {
+            let world = write_failed(
+                with_remaining(
+                    &NonEmptyString::try_from("2 files changed")
+                        .or_abort("nonempty fixed remaining"),
+                ),
+                &with_reference(),
+                &with_guidance(),
+                NonZeroUsize::new(12).or_abort("positive write ordinal"),
+            );
+            let repo = world.directory.path();
+            let ctx = Ctx {
+                cwd: repo.to_path_buf(),
+                env: &world.env,
+                runner: &world.runner,
+                io: &world.io,
+                fs: &REAL_FS,
+            };
+
+            let result = super::super::print_hints_with_remaining_in(&ctx, &world.remaining);
+
+            let (stdout, stderr, calls) = (
+                world.io.stdout.borrow(),
+                world.io.stderr.borrow(),
+                world.runner.calls.borrow(),
+            );
+
+            let reference_read = fs::read(repo.join("references/rust.md"));
+
+            assert_eq!(
+                result.as_ref().map_err(ToString::to_string),
+                world.expected_result.as_ref().map_err(Clone::clone)
+            );
+            assert_eq!(
+                (
+                    stdout.as_str(),
+                    stderr.as_str(),
+                    calls.as_slice(),
+                    world.io.attempted.get(),
+                    fs::read(repo.join(".git/index")).or_abort("saved index remains"),
+                    fs::read(repo.join("user.txt")).or_abort("saved user remains"),
+                    reference_read.as_ref().map_err(io::Error::kind)
+                ),
+                (
+                    world.expected_stdout.as_str(),
+                    "",
+                    world.expected_calls.as_slice(),
+                    world.expected_writes,
+                    b"saved index".to_vec(),
+                    b"saved user bytes".to_vec(),
+                    world.expected_reference.as_ref().map_err(Clone::clone)
+                )
+            );
+        }
+
+        #[test]
+        fn output_write_13_preserves_exact_prefix_and_saved_bytes() {
+            let world = write_failed(
+                with_remaining(
+                    &NonEmptyString::try_from("2 files changed")
+                        .or_abort("nonempty fixed remaining"),
+                ),
+                &with_reference(),
+                &with_guidance(),
+                NonZeroUsize::new(13).or_abort("positive write ordinal"),
+            );
+            let repo = world.directory.path();
+            let ctx = Ctx {
+                cwd: repo.to_path_buf(),
+                env: &world.env,
+                runner: &world.runner,
+                io: &world.io,
+                fs: &REAL_FS,
+            };
+
+            let result = super::super::print_hints_with_remaining_in(&ctx, &world.remaining);
+
+            let (stdout, stderr, calls) = (
+                world.io.stdout.borrow(),
+                world.io.stderr.borrow(),
+                world.runner.calls.borrow(),
+            );
+
+            let reference_read = fs::read(repo.join("references/rust.md"));
+
+            assert_eq!(
+                result.as_ref().map_err(ToString::to_string),
+                world.expected_result.as_ref().map_err(Clone::clone)
+            );
+            assert_eq!(
+                (
+                    stdout.as_str(),
+                    stderr.as_str(),
+                    calls.as_slice(),
+                    world.io.attempted.get(),
+                    fs::read(repo.join(".git/index")).or_abort("saved index remains"),
+                    fs::read(repo.join("user.txt")).or_abort("saved user remains"),
+                    reference_read.as_ref().map_err(io::Error::kind)
+                ),
+                (
+                    world.expected_stdout.as_str(),
+                    "",
+                    world.expected_calls.as_slice(),
+                    world.expected_writes,
+                    b"saved index".to_vec(),
+                    b"saved user bytes".to_vec(),
+                    world.expected_reference.as_ref().map_err(Clone::clone)
+                )
+            );
+        }
+
+        #[test]
+        fn output_write_14_preserves_exact_prefix_and_saved_bytes() {
+            let world = write_failed(
+                with_remaining(
+                    &NonEmptyString::try_from("2 files changed")
+                        .or_abort("nonempty fixed remaining"),
+                ),
+                &with_reference(),
+                &with_guidance(),
+                NonZeroUsize::new(14).or_abort("positive write ordinal"),
+            );
+            let repo = world.directory.path();
+            let ctx = Ctx {
+                cwd: repo.to_path_buf(),
+                env: &world.env,
+                runner: &world.runner,
+                io: &world.io,
+                fs: &REAL_FS,
+            };
+
+            let result = super::super::print_hints_with_remaining_in(&ctx, &world.remaining);
+
+            let (stdout, stderr, calls) = (
+                world.io.stdout.borrow(),
+                world.io.stderr.borrow(),
+                world.runner.calls.borrow(),
+            );
+
+            let reference_read = fs::read(repo.join("references/rust.md"));
+
+            assert_eq!(
+                result.as_ref().map_err(ToString::to_string),
+                world.expected_result.as_ref().map_err(Clone::clone)
+            );
+            assert_eq!(
+                (
+                    stdout.as_str(),
+                    stderr.as_str(),
+                    calls.as_slice(),
+                    world.io.attempted.get(),
+                    fs::read(repo.join(".git/index")).or_abort("saved index remains"),
+                    fs::read(repo.join("user.txt")).or_abort("saved user remains"),
+                    reference_read.as_ref().map_err(io::Error::kind)
+                ),
+                (
+                    world.expected_stdout.as_str(),
+                    "",
+                    world.expected_calls.as_slice(),
+                    world.expected_writes,
+                    b"saved index".to_vec(),
+                    b"saved user bytes".to_vec(),
+                    world.expected_reference.as_ref().map_err(Clone::clone)
+                )
+            );
+        }
+
+        #[test]
+        fn output_write_15_preserves_exact_prefix_and_saved_bytes() {
+            let world = write_failed(
+                with_remaining(
+                    &NonEmptyString::try_from("2 files changed")
+                        .or_abort("nonempty fixed remaining"),
+                ),
+                &with_reference(),
+                &with_guidance(),
+                NonZeroUsize::new(15).or_abort("positive write ordinal"),
+            );
+            let repo = world.directory.path();
+            let ctx = Ctx {
+                cwd: repo.to_path_buf(),
+                env: &world.env,
+                runner: &world.runner,
+                io: &world.io,
+                fs: &REAL_FS,
+            };
+
+            let result = super::super::print_hints_with_remaining_in(&ctx, &world.remaining);
+
+            let (stdout, stderr, calls) = (
+                world.io.stdout.borrow(),
+                world.io.stderr.borrow(),
+                world.runner.calls.borrow(),
+            );
+
+            let reference_read = fs::read(repo.join("references/rust.md"));
+
+            assert_eq!(
+                result.as_ref().map_err(ToString::to_string),
+                world.expected_result.as_ref().map_err(Clone::clone)
+            );
+            assert_eq!(
+                (
+                    stdout.as_str(),
+                    stderr.as_str(),
+                    calls.as_slice(),
+                    world.io.attempted.get(),
+                    fs::read(repo.join(".git/index")).or_abort("saved index remains"),
+                    fs::read(repo.join("user.txt")).or_abort("saved user remains"),
+                    reference_read.as_ref().map_err(io::Error::kind)
+                ),
+                (
+                    world.expected_stdout.as_str(),
+                    "",
+                    world.expected_calls.as_slice(),
+                    world.expected_writes,
+                    b"saved index".to_vec(),
+                    b"saved user bytes".to_vec(),
+                    world.expected_reference.as_ref().map_err(Clone::clone)
+                )
+            );
+        }
+
+        #[test]
+        fn output_write_16_preserves_exact_prefix_and_saved_bytes() {
+            let world = write_failed(
+                with_remaining(
+                    &NonEmptyString::try_from("2 files changed")
+                        .or_abort("nonempty fixed remaining"),
+                ),
+                &with_reference(),
+                &with_guidance(),
+                NonZeroUsize::new(16).or_abort("positive write ordinal"),
+            );
+            let repo = world.directory.path();
+            let ctx = Ctx {
+                cwd: repo.to_path_buf(),
+                env: &world.env,
+                runner: &world.runner,
+                io: &world.io,
+                fs: &REAL_FS,
+            };
+
+            let result = super::super::print_hints_with_remaining_in(&ctx, &world.remaining);
+
+            let (stdout, stderr, calls) = (
+                world.io.stdout.borrow(),
+                world.io.stderr.borrow(),
+                world.runner.calls.borrow(),
+            );
+
+            let reference_read = fs::read(repo.join("references/rust.md"));
+
+            assert_eq!(
+                result.as_ref().map_err(ToString::to_string),
+                world.expected_result.as_ref().map_err(Clone::clone)
+            );
+            assert_eq!(
+                (
+                    stdout.as_str(),
+                    stderr.as_str(),
+                    calls.as_slice(),
+                    world.io.attempted.get(),
+                    fs::read(repo.join(".git/index")).or_abort("saved index remains"),
+                    fs::read(repo.join("user.txt")).or_abort("saved user remains"),
+                    reference_read.as_ref().map_err(io::Error::kind)
+                ),
+                (
+                    world.expected_stdout.as_str(),
+                    "",
+                    world.expected_calls.as_slice(),
+                    world.expected_writes,
+                    b"saved index".to_vec(),
+                    b"saved user bytes".to_vec(),
+                    world.expected_reference.as_ref().map_err(Clone::clone)
+                )
+            );
+        }
+
+        #[test]
+        fn output_write_17_preserves_exact_prefix_and_saved_bytes() {
+            let world = write_failed(
+                with_remaining(
+                    &NonEmptyString::try_from("2 files changed")
+                        .or_abort("nonempty fixed remaining"),
+                ),
+                &with_reference(),
+                &with_guidance(),
+                NonZeroUsize::new(17).or_abort("positive write ordinal"),
+            );
+            let repo = world.directory.path();
+            let ctx = Ctx {
+                cwd: repo.to_path_buf(),
+                env: &world.env,
+                runner: &world.runner,
+                io: &world.io,
+                fs: &REAL_FS,
+            };
+
+            let result = super::super::print_hints_with_remaining_in(&ctx, &world.remaining);
+
+            let (stdout, stderr, calls) = (
+                world.io.stdout.borrow(),
+                world.io.stderr.borrow(),
+                world.runner.calls.borrow(),
+            );
+
+            let reference_read = fs::read(repo.join("references/rust.md"));
+
+            assert_eq!(
+                result.as_ref().map_err(ToString::to_string),
+                world.expected_result.as_ref().map_err(Clone::clone)
+            );
+            assert_eq!(
+                (
+                    stdout.as_str(),
+                    stderr.as_str(),
+                    calls.as_slice(),
+                    world.io.attempted.get(),
+                    fs::read(repo.join(".git/index")).or_abort("saved index remains"),
+                    fs::read(repo.join("user.txt")).or_abort("saved user remains"),
+                    reference_read.as_ref().map_err(io::Error::kind)
+                ),
+                (
+                    world.expected_stdout.as_str(),
+                    "",
+                    world.expected_calls.as_slice(),
+                    world.expected_writes,
+                    b"saved index".to_vec(),
+                    b"saved user bytes".to_vec(),
+                    world.expected_reference.as_ref().map_err(Clone::clone)
+                )
+            );
+        }
+
+        #[test]
+        fn output_write_18_preserves_exact_prefix_and_saved_bytes() {
+            let world = write_failed(
+                with_remaining(
+                    &NonEmptyString::try_from("2 files changed")
+                        .or_abort("nonempty fixed remaining"),
+                ),
+                &with_reference(),
+                &with_guidance(),
+                NonZeroUsize::new(18).or_abort("positive write ordinal"),
+            );
+            let repo = world.directory.path();
+            let ctx = Ctx {
+                cwd: repo.to_path_buf(),
+                env: &world.env,
+                runner: &world.runner,
+                io: &world.io,
+                fs: &REAL_FS,
+            };
+
+            let result = super::super::print_hints_with_remaining_in(&ctx, &world.remaining);
+
+            let (stdout, stderr, calls) = (
+                world.io.stdout.borrow(),
+                world.io.stderr.borrow(),
+                world.runner.calls.borrow(),
+            );
+
+            let reference_read = fs::read(repo.join("references/rust.md"));
+
+            assert_eq!(
+                result.as_ref().map_err(ToString::to_string),
+                world.expected_result.as_ref().map_err(Clone::clone)
+            );
+            assert_eq!(
+                (
+                    stdout.as_str(),
+                    stderr.as_str(),
+                    calls.as_slice(),
+                    world.io.attempted.get(),
+                    fs::read(repo.join(".git/index")).or_abort("saved index remains"),
+                    fs::read(repo.join("user.txt")).or_abort("saved user remains"),
+                    reference_read.as_ref().map_err(io::Error::kind)
+                ),
+                (
+                    world.expected_stdout.as_str(),
+                    "",
+                    world.expected_calls.as_slice(),
+                    world.expected_writes,
+                    b"saved index".to_vec(),
+                    b"saved user bytes".to_vec(),
+                    world.expected_reference.as_ref().map_err(Clone::clone)
+                )
+            );
+        }
+
+        #[test]
+        fn output_write_19_preserves_exact_prefix_and_saved_bytes() {
+            let world = write_failed(
+                with_remaining(
+                    &NonEmptyString::try_from("2 files changed")
+                        .or_abort("nonempty fixed remaining"),
+                ),
+                &with_reference(),
+                &with_guidance(),
+                NonZeroUsize::new(19).or_abort("positive write ordinal"),
+            );
+            let repo = world.directory.path();
+            let ctx = Ctx {
+                cwd: repo.to_path_buf(),
+                env: &world.env,
+                runner: &world.runner,
+                io: &world.io,
+                fs: &REAL_FS,
+            };
+
+            let result = super::super::print_hints_with_remaining_in(&ctx, &world.remaining);
+
+            let (stdout, stderr, calls) = (
+                world.io.stdout.borrow(),
+                world.io.stderr.borrow(),
+                world.runner.calls.borrow(),
+            );
+
+            let reference_read = fs::read(repo.join("references/rust.md"));
+
+            assert_eq!(
+                result.as_ref().map_err(ToString::to_string),
+                world.expected_result.as_ref().map_err(Clone::clone)
+            );
+            assert_eq!(
+                (
+                    stdout.as_str(),
+                    stderr.as_str(),
+                    calls.as_slice(),
+                    world.io.attempted.get(),
+                    fs::read(repo.join(".git/index")).or_abort("saved index remains"),
+                    fs::read(repo.join("user.txt")).or_abort("saved user remains"),
+                    reference_read.as_ref().map_err(io::Error::kind)
+                ),
+                (
+                    world.expected_stdout.as_str(),
+                    "",
+                    world.expected_calls.as_slice(),
+                    world.expected_writes,
+                    b"saved index".to_vec(),
+                    b"saved user bytes".to_vec(),
+                    world.expected_reference.as_ref().map_err(Clone::clone)
+                )
+            );
+        }
+
+        #[test]
+        fn output_write_20_preserves_exact_prefix_and_saved_bytes() {
+            let world = write_failed(
+                with_remaining(
+                    &NonEmptyString::try_from("2 files changed")
+                        .or_abort("nonempty fixed remaining"),
+                ),
+                &with_reference(),
+                &with_guidance(),
+                NonZeroUsize::new(20).or_abort("positive write ordinal"),
+            );
+            let repo = world.directory.path();
+            let ctx = Ctx {
+                cwd: repo.to_path_buf(),
+                env: &world.env,
+                runner: &world.runner,
+                io: &world.io,
+                fs: &REAL_FS,
+            };
+
+            let result = super::super::print_hints_with_remaining_in(&ctx, &world.remaining);
+
+            let (stdout, stderr, calls) = (
+                world.io.stdout.borrow(),
+                world.io.stderr.borrow(),
+                world.runner.calls.borrow(),
+            );
+
+            let reference_read = fs::read(repo.join("references/rust.md"));
+
+            assert_eq!(
+                result.as_ref().map_err(ToString::to_string),
+                world.expected_result.as_ref().map_err(Clone::clone)
+            );
+            assert_eq!(
+                (
+                    stdout.as_str(),
+                    stderr.as_str(),
+                    calls.as_slice(),
+                    world.io.attempted.get(),
+                    fs::read(repo.join(".git/index")).or_abort("saved index remains"),
+                    fs::read(repo.join("user.txt")).or_abort("saved user remains"),
+                    reference_read.as_ref().map_err(io::Error::kind)
+                ),
+                (
+                    world.expected_stdout.as_str(),
+                    "",
+                    world.expected_calls.as_slice(),
+                    world.expected_writes,
+                    b"saved index".to_vec(),
+                    b"saved user bytes".to_vec(),
+                    world.expected_reference.as_ref().map_err(Clone::clone)
+                )
+            );
+        }
+
+        #[test]
+        fn output_write_21_preserves_exact_prefix_and_saved_bytes() {
+            let world = write_failed(
+                with_remaining(
+                    &NonEmptyString::try_from("2 files changed")
+                        .or_abort("nonempty fixed remaining"),
+                ),
+                &with_reference(),
+                &with_guidance(),
+                NonZeroUsize::new(21).or_abort("positive write ordinal"),
+            );
+            let repo = world.directory.path();
+            let ctx = Ctx {
+                cwd: repo.to_path_buf(),
+                env: &world.env,
+                runner: &world.runner,
+                io: &world.io,
+                fs: &REAL_FS,
+            };
+
+            let result = super::super::print_hints_with_remaining_in(&ctx, &world.remaining);
+
+            let (stdout, stderr, calls) = (
+                world.io.stdout.borrow(),
+                world.io.stderr.borrow(),
+                world.runner.calls.borrow(),
+            );
+
+            let reference_read = fs::read(repo.join("references/rust.md"));
+
+            assert_eq!(
+                result.as_ref().map_err(ToString::to_string),
+                world.expected_result.as_ref().map_err(Clone::clone)
+            );
+            assert_eq!(
+                (
+                    stdout.as_str(),
+                    stderr.as_str(),
+                    calls.as_slice(),
+                    world.io.attempted.get(),
+                    fs::read(repo.join(".git/index")).or_abort("saved index remains"),
+                    fs::read(repo.join("user.txt")).or_abort("saved user remains"),
+                    reference_read.as_ref().map_err(io::Error::kind)
+                ),
+                (
+                    world.expected_stdout.as_str(),
+                    "",
+                    world.expected_calls.as_slice(),
+                    world.expected_writes,
+                    b"saved index".to_vec(),
+                    b"saved user bytes".to_vec(),
+                    world.expected_reference.as_ref().map_err(Clone::clone)
+                )
+            );
+        }
+
+        #[test]
+        fn output_write_22_preserves_exact_prefix_and_saved_bytes() {
+            let world = write_failed(
+                with_remaining(
+                    &NonEmptyString::try_from("2 files changed")
+                        .or_abort("nonempty fixed remaining"),
+                ),
+                &with_reference(),
+                &with_guidance(),
+                NonZeroUsize::new(22).or_abort("positive write ordinal"),
+            );
+            let repo = world.directory.path();
+            let ctx = Ctx {
+                cwd: repo.to_path_buf(),
+                env: &world.env,
+                runner: &world.runner,
+                io: &world.io,
+                fs: &REAL_FS,
+            };
+
+            let result = super::super::print_hints_with_remaining_in(&ctx, &world.remaining);
+
+            let (stdout, stderr, calls) = (
+                world.io.stdout.borrow(),
+                world.io.stderr.borrow(),
+                world.runner.calls.borrow(),
+            );
+
+            let reference_read = fs::read(repo.join("references/rust.md"));
+
+            assert_eq!(
+                result.as_ref().map_err(ToString::to_string),
+                world.expected_result.as_ref().map_err(Clone::clone)
+            );
+            assert_eq!(
+                (
+                    stdout.as_str(),
+                    stderr.as_str(),
+                    calls.as_slice(),
+                    world.io.attempted.get(),
+                    fs::read(repo.join(".git/index")).or_abort("saved index remains"),
+                    fs::read(repo.join("user.txt")).or_abort("saved user remains"),
+                    reference_read.as_ref().map_err(io::Error::kind)
+                ),
+                (
+                    world.expected_stdout.as_str(),
+                    "",
+                    world.expected_calls.as_slice(),
+                    world.expected_writes,
+                    b"saved index".to_vec(),
+                    b"saved user bytes".to_vec(),
+                    world.expected_reference.as_ref().map_err(Clone::clone)
+                )
+            );
+        }
+
+        #[test]
+        fn output_write_23_preserves_exact_prefix_and_saved_bytes() {
+            let world = write_failed(
+                with_remaining(
+                    &NonEmptyString::try_from("2 files changed")
+                        .or_abort("nonempty fixed remaining"),
+                ),
+                &with_reference(),
+                &with_guidance(),
+                NonZeroUsize::new(23).or_abort("positive write ordinal"),
+            );
+            let repo = world.directory.path();
+            let ctx = Ctx {
+                cwd: repo.to_path_buf(),
+                env: &world.env,
+                runner: &world.runner,
+                io: &world.io,
+                fs: &REAL_FS,
+            };
+
+            let result = super::super::print_hints_with_remaining_in(&ctx, &world.remaining);
+
+            let (stdout, stderr, calls) = (
+                world.io.stdout.borrow(),
+                world.io.stderr.borrow(),
+                world.runner.calls.borrow(),
+            );
+
+            let reference_read = fs::read(repo.join("references/rust.md"));
+
+            assert_eq!(
+                result.as_ref().map_err(ToString::to_string),
+                world.expected_result.as_ref().map_err(Clone::clone)
+            );
+            assert_eq!(
+                (
+                    stdout.as_str(),
+                    stderr.as_str(),
+                    calls.as_slice(),
+                    world.io.attempted.get(),
+                    fs::read(repo.join(".git/index")).or_abort("saved index remains"),
+                    fs::read(repo.join("user.txt")).or_abort("saved user remains"),
+                    reference_read.as_ref().map_err(io::Error::kind)
+                ),
+                (
+                    world.expected_stdout.as_str(),
+                    "",
+                    world.expected_calls.as_slice(),
+                    world.expected_writes,
+                    b"saved index".to_vec(),
+                    b"saved user bytes".to_vec(),
+                    world.expected_reference.as_ref().map_err(Clone::clone)
+                )
+            );
+        }
+
+        #[test]
+        fn output_write_24_preserves_exact_prefix_and_saved_bytes() {
+            let world = write_failed(
+                with_remaining(
+                    &NonEmptyString::try_from("2 files changed")
+                        .or_abort("nonempty fixed remaining"),
+                ),
+                &with_reference(),
+                &with_guidance(),
+                NonZeroUsize::new(24).or_abort("positive write ordinal"),
+            );
+            let repo = world.directory.path();
+            let ctx = Ctx {
+                cwd: repo.to_path_buf(),
+                env: &world.env,
+                runner: &world.runner,
+                io: &world.io,
+                fs: &REAL_FS,
+            };
+
+            let result = super::super::print_hints_with_remaining_in(&ctx, &world.remaining);
+
+            let (stdout, stderr, calls) = (
+                world.io.stdout.borrow(),
+                world.io.stderr.borrow(),
+                world.runner.calls.borrow(),
+            );
+
+            let reference_read = fs::read(repo.join("references/rust.md"));
+
+            assert_eq!(
+                result.as_ref().map_err(ToString::to_string),
+                world.expected_result.as_ref().map_err(Clone::clone)
+            );
+            assert_eq!(
+                (
+                    stdout.as_str(),
+                    stderr.as_str(),
+                    calls.as_slice(),
+                    world.io.attempted.get(),
+                    fs::read(repo.join(".git/index")).or_abort("saved index remains"),
+                    fs::read(repo.join("user.txt")).or_abort("saved user remains"),
+                    reference_read.as_ref().map_err(io::Error::kind)
+                ),
+                (
+                    world.expected_stdout.as_str(),
+                    "",
+                    world.expected_calls.as_slice(),
+                    world.expected_writes,
+                    b"saved index".to_vec(),
+                    b"saved user bytes".to_vec(),
+                    world.expected_reference.as_ref().map_err(Clone::clone)
+                )
+            );
+        }
+
+        #[test]
+        fn output_write_25_preserves_exact_prefix_and_saved_bytes() {
+            let world = write_failed(
+                with_remaining(
+                    &NonEmptyString::try_from("2 files changed")
+                        .or_abort("nonempty fixed remaining"),
+                ),
+                &with_reference(),
+                &with_guidance(),
+                NonZeroUsize::new(25).or_abort("positive write ordinal"),
+            );
+            let repo = world.directory.path();
+            let ctx = Ctx {
+                cwd: repo.to_path_buf(),
+                env: &world.env,
+                runner: &world.runner,
+                io: &world.io,
+                fs: &REAL_FS,
+            };
+
+            let result = super::super::print_hints_with_remaining_in(&ctx, &world.remaining);
+
+            let (stdout, stderr, calls) = (
+                world.io.stdout.borrow(),
+                world.io.stderr.borrow(),
+                world.runner.calls.borrow(),
+            );
+
+            let reference_read = fs::read(repo.join("references/rust.md"));
+
+            assert_eq!(
+                result.as_ref().map_err(ToString::to_string),
+                world.expected_result.as_ref().map_err(Clone::clone)
+            );
+            assert_eq!(
+                (
+                    stdout.as_str(),
+                    stderr.as_str(),
+                    calls.as_slice(),
+                    world.io.attempted.get(),
+                    fs::read(repo.join(".git/index")).or_abort("saved index remains"),
+                    fs::read(repo.join("user.txt")).or_abort("saved user remains"),
+                    reference_read.as_ref().map_err(io::Error::kind)
+                ),
+                (
+                    world.expected_stdout.as_str(),
+                    "",
+                    world.expected_calls.as_slice(),
+                    world.expected_writes,
+                    b"saved index".to_vec(),
+                    b"saved user bytes".to_vec(),
+                    world.expected_reference.as_ref().map_err(Clone::clone)
+                )
+            );
+        }
+
+        #[test]
+        fn output_write_26_preserves_exact_prefix_and_saved_bytes() {
+            let world = write_failed(
+                with_remaining(
+                    &NonEmptyString::try_from("2 files changed")
+                        .or_abort("nonempty fixed remaining"),
+                ),
+                &with_reference(),
+                &with_guidance(),
+                NonZeroUsize::new(26).or_abort("positive write ordinal"),
+            );
+            let repo = world.directory.path();
+            let ctx = Ctx {
+                cwd: repo.to_path_buf(),
+                env: &world.env,
+                runner: &world.runner,
+                io: &world.io,
+                fs: &REAL_FS,
+            };
+
+            let result = super::super::print_hints_with_remaining_in(&ctx, &world.remaining);
+
+            let (stdout, stderr, calls) = (
+                world.io.stdout.borrow(),
+                world.io.stderr.borrow(),
+                world.runner.calls.borrow(),
+            );
+
+            let reference_read = fs::read(repo.join("references/rust.md"));
+
+            assert_eq!(
+                result.as_ref().map_err(ToString::to_string),
+                world.expected_result.as_ref().map_err(Clone::clone)
+            );
+            assert_eq!(
+                (
+                    stdout.as_str(),
+                    stderr.as_str(),
+                    calls.as_slice(),
+                    world.io.attempted.get(),
+                    fs::read(repo.join(".git/index")).or_abort("saved index remains"),
+                    fs::read(repo.join("user.txt")).or_abort("saved user remains"),
+                    reference_read.as_ref().map_err(io::Error::kind)
+                ),
+                (
+                    world.expected_stdout.as_str(),
+                    "",
+                    world.expected_calls.as_slice(),
+                    world.expected_writes,
+                    b"saved index".to_vec(),
+                    b"saved user bytes".to_vec(),
+                    world.expected_reference.as_ref().map_err(Clone::clone)
+                )
+            );
+        }
+
+        #[test]
+        fn output_write_27_preserves_exact_prefix_and_saved_bytes() {
+            let world = write_failed(
+                with_remaining(
+                    &NonEmptyString::try_from("2 files changed")
+                        .or_abort("nonempty fixed remaining"),
+                ),
+                &with_reference(),
+                &with_guidance(),
+                NonZeroUsize::new(27).or_abort("positive write ordinal"),
+            );
+            let repo = world.directory.path();
+            let ctx = Ctx {
+                cwd: repo.to_path_buf(),
+                env: &world.env,
+                runner: &world.runner,
+                io: &world.io,
+                fs: &REAL_FS,
+            };
+
+            let result = super::super::print_hints_with_remaining_in(&ctx, &world.remaining);
+
+            let (stdout, stderr, calls) = (
+                world.io.stdout.borrow(),
+                world.io.stderr.borrow(),
+                world.runner.calls.borrow(),
+            );
+
+            let reference_read = fs::read(repo.join("references/rust.md"));
+
+            assert_eq!(
+                result.as_ref().map_err(ToString::to_string),
+                world.expected_result.as_ref().map_err(Clone::clone)
+            );
+            assert_eq!(
+                (
+                    stdout.as_str(),
+                    stderr.as_str(),
+                    calls.as_slice(),
+                    world.io.attempted.get(),
+                    fs::read(repo.join(".git/index")).or_abort("saved index remains"),
+                    fs::read(repo.join("user.txt")).or_abort("saved user remains"),
+                    reference_read.as_ref().map_err(io::Error::kind)
+                ),
+                (
+                    world.expected_stdout.as_str(),
+                    "",
+                    world.expected_calls.as_slice(),
+                    world.expected_writes,
+                    b"saved index".to_vec(),
+                    b"saved user bytes".to_vec(),
+                    world.expected_reference.as_ref().map_err(Clone::clone)
+                )
+            );
+        }
+
+        #[test]
+        fn output_write_28_preserves_exact_prefix_and_saved_bytes() {
+            let world = write_failed(
+                with_remaining(
+                    &NonEmptyString::try_from("2 files changed")
+                        .or_abort("nonempty fixed remaining"),
+                ),
+                &with_reference(),
+                &with_guidance(),
+                NonZeroUsize::new(28).or_abort("positive write ordinal"),
+            );
+            let repo = world.directory.path();
+            let ctx = Ctx {
+                cwd: repo.to_path_buf(),
+                env: &world.env,
+                runner: &world.runner,
+                io: &world.io,
+                fs: &REAL_FS,
+            };
+
+            let result = super::super::print_hints_with_remaining_in(&ctx, &world.remaining);
+
+            let (stdout, stderr, calls) = (
+                world.io.stdout.borrow(),
+                world.io.stderr.borrow(),
+                world.runner.calls.borrow(),
+            );
+
+            let reference_read = fs::read(repo.join("references/rust.md"));
+
+            assert_eq!(
+                result.as_ref().map_err(ToString::to_string),
+                world.expected_result.as_ref().map_err(Clone::clone)
+            );
+            assert_eq!(
+                (
+                    stdout.as_str(),
+                    stderr.as_str(),
+                    calls.as_slice(),
+                    world.io.attempted.get(),
+                    fs::read(repo.join(".git/index")).or_abort("saved index remains"),
+                    fs::read(repo.join("user.txt")).or_abort("saved user remains"),
+                    reference_read.as_ref().map_err(io::Error::kind)
+                ),
+                (
+                    world.expected_stdout.as_str(),
+                    "",
+                    world.expected_calls.as_slice(),
+                    world.expected_writes,
+                    b"saved index".to_vec(),
+                    b"saved user bytes".to_vec(),
+                    world.expected_reference.as_ref().map_err(Clone::clone)
+                )
+            );
+        }
+
+        #[test]
+        fn output_write_29_preserves_exact_prefix_and_saved_bytes() {
+            let world = write_failed(
+                with_remaining(
+                    &NonEmptyString::try_from("2 files changed")
+                        .or_abort("nonempty fixed remaining"),
+                ),
+                &with_reference(),
+                &with_guidance(),
+                NonZeroUsize::new(29).or_abort("positive write ordinal"),
+            );
+            let repo = world.directory.path();
+            let ctx = Ctx {
+                cwd: repo.to_path_buf(),
+                env: &world.env,
+                runner: &world.runner,
+                io: &world.io,
+                fs: &REAL_FS,
+            };
+
+            let result = super::super::print_hints_with_remaining_in(&ctx, &world.remaining);
+
+            let (stdout, stderr, calls) = (
+                world.io.stdout.borrow(),
+                world.io.stderr.borrow(),
+                world.runner.calls.borrow(),
+            );
+
+            let reference_read = fs::read(repo.join("references/rust.md"));
+
+            assert_eq!(
+                result.as_ref().map_err(ToString::to_string),
+                world.expected_result.as_ref().map_err(Clone::clone)
+            );
+            assert_eq!(
+                (
+                    stdout.as_str(),
+                    stderr.as_str(),
+                    calls.as_slice(),
+                    world.io.attempted.get(),
+                    fs::read(repo.join(".git/index")).or_abort("saved index remains"),
+                    fs::read(repo.join("user.txt")).or_abort("saved user remains"),
+                    reference_read.as_ref().map_err(io::Error::kind)
+                ),
+                (
+                    world.expected_stdout.as_str(),
+                    "",
+                    world.expected_calls.as_slice(),
+                    world.expected_writes,
+                    b"saved index".to_vec(),
+                    b"saved user bytes".to_vec(),
+                    world.expected_reference.as_ref().map_err(Clone::clone)
+                )
+            );
+        }
+
+        #[test]
+        fn output_write_30_preserves_exact_prefix_and_saved_bytes() {
+            let world = write_failed(
+                with_remaining(
+                    &NonEmptyString::try_from("2 files changed")
+                        .or_abort("nonempty fixed remaining"),
+                ),
+                &with_reference(),
+                &with_guidance(),
+                NonZeroUsize::new(30).or_abort("positive write ordinal"),
+            );
+            let repo = world.directory.path();
+            let ctx = Ctx {
+                cwd: repo.to_path_buf(),
+                env: &world.env,
+                runner: &world.runner,
+                io: &world.io,
+                fs: &REAL_FS,
+            };
+
+            let result = super::super::print_hints_with_remaining_in(&ctx, &world.remaining);
+
+            let (stdout, stderr, calls) = (
+                world.io.stdout.borrow(),
+                world.io.stderr.borrow(),
+                world.runner.calls.borrow(),
+            );
+
+            let reference_read = fs::read(repo.join("references/rust.md"));
+
+            assert_eq!(
+                result.as_ref().map_err(ToString::to_string),
+                world.expected_result.as_ref().map_err(Clone::clone)
+            );
+            assert_eq!(
+                (
+                    stdout.as_str(),
+                    stderr.as_str(),
+                    calls.as_slice(),
+                    world.io.attempted.get(),
+                    fs::read(repo.join(".git/index")).or_abort("saved index remains"),
+                    fs::read(repo.join("user.txt")).or_abort("saved user remains"),
+                    reference_read.as_ref().map_err(io::Error::kind)
+                ),
+                (
+                    world.expected_stdout.as_str(),
+                    "",
+                    world.expected_calls.as_slice(),
+                    world.expected_writes,
+                    b"saved index".to_vec(),
+                    b"saved user bytes".to_vec(),
+                    world.expected_reference.as_ref().map_err(Clone::clone)
+                )
+            );
+        }
+    }
+
     use super::*;
     use std::env;
     use std::ffi::OsString;
@@ -811,5 +2962,444 @@ mod tests {
             footer_err.to_string().contains("io fail"),
             "unexpected error: {footer_err:?}"
         );
+    }
+}
+
+#[cfg(test)]
+#[path = "ui_hint_contracts.rs"]
+mod hint_contracts;
+
+#[cfg(test)]
+mod proptests {
+    mod print_hints_with_remaining_in {
+        use super::super::hint_contracts::{
+            complete, rejected, spawn_failed, with_guidance, with_guidance_value, with_reference,
+            with_remaining, without_guidance, without_reference, without_remaining, write_failed,
+        };
+        use super::super::*;
+        use crate::non_empty_string::NonEmptyString;
+        use crate::test_support::OrAbort as _;
+        use core::num::{NonZeroU8, NonZeroUsize};
+        use core::ops::RangeInclusive;
+        use proptest::prelude::*;
+
+        proptest! {
+            #[test]
+            fn renders_generated_remaining_reference_and_environment(
+                remaining in prop_oneof![Just(()).prop_map(|()| without_remaining()),
+                    "[A-Za-z0-9 ,]{1,40}".prop_map(|input| {
+                        with_remaining(
+                            &NonEmptyString::try_from(input).or_abort("nonempty generated remaining"),
+                        )
+                    })],
+                reference in prop_oneof![Just(()).prop_map(|()| without_reference()),
+                    Just(()).prop_map(|()| with_reference())],
+                guidance in prop_oneof![Just(()).prop_map(|()| without_guidance()),
+                    any::<String>().prop_map(|value| with_guidance_value(OsString::from(value)))]
+            ) {
+                let world = complete(remaining, &reference, &guidance);
+                let repo = world.directory.path();
+                let ctx = Ctx {
+                    cwd: repo.to_path_buf(),
+                    env: &world.env,
+                    runner: &world.runner,
+                    io: &world.io,
+                    fs: &REAL_FS,
+                };
+
+                let result =
+                    super::super::print_hints_with_remaining_in(&ctx, &world.remaining);
+
+                let (stdout, stderr, calls) = (
+                    world.io.stdout.borrow(),
+                    world.io.stderr.borrow(),
+                    world.runner.calls.borrow(),
+                );
+
+                let reference_read = fs::read(repo.join("references/rust.md"));
+
+                prop_assert_eq!(
+                    result.as_ref().map_err(ToString::to_string),
+                    world.expected_result.as_ref().map_err(Clone::clone)
+                );
+                prop_assert_eq!(
+                    (
+                        stdout.as_str(),
+                        stderr.as_str(),
+                        calls.as_slice(),
+                        world.io.attempted.get(),
+                        fs::read(repo.join(".git/index")).or_abort("saved index remains"),
+                        fs::read(repo.join("user.txt")).or_abort("saved user remains"),
+                        reference_read.as_ref().map_err(io::Error::kind)
+                    ),
+                    (
+                        world.expected_stdout.as_str(),
+                        "",
+                        world.expected_calls.as_slice(),
+                        world.expected_writes,
+                        b"saved index".to_vec(),
+                        b"saved user bytes".to_vec(),
+                        world.expected_reference.as_ref().map_err(Clone::clone)
+                    )
+                );
+            }
+
+            #[test]
+            fn query_rejections_preserve_generated_inputs(
+                remaining in "[A-Za-z0-9 ,]{0,40}",
+                code in RangeInclusive::<u8>::new(1, u8::MAX),
+                reference in prop_oneof![Just(()).prop_map(|()| without_reference()),
+                    Just(()).prop_map(|()| with_reference())],
+                guidance in prop_oneof![Just(()).prop_map(|()| without_guidance()),
+                    Just(()).prop_map(|()| with_guidance())]
+            ) {
+                let world = rejected(
+                    remaining,
+                    &reference,
+                    &guidance,
+                    NonZeroU8::new(code).or_abort("generated nonzero rejection"),
+                );
+                let repo = world.directory.path();
+                let ctx = Ctx {
+                    cwd: repo.to_path_buf(),
+                    env: &world.env,
+                    runner: &world.runner,
+                    io: &world.io,
+                    fs: &REAL_FS,
+                };
+
+                let result =
+                    super::super::print_hints_with_remaining_in(&ctx, &world.remaining);
+
+                let (stdout, stderr, calls) = (
+                    world.io.stdout.borrow(),
+                    world.io.stderr.borrow(),
+                    world.runner.calls.borrow(),
+                );
+
+                let reference_read = fs::read(repo.join("references/rust.md"));
+
+                prop_assert_eq!(
+                    result.as_ref().map_err(ToString::to_string),
+                    world.expected_result.as_ref().map_err(Clone::clone)
+                );
+                prop_assert_eq!(
+                    (
+                        stdout.as_str(),
+                        stderr.as_str(),
+                        calls.as_slice(),
+                        world.io.attempted.get(),
+                        fs::read(repo.join(".git/index")).or_abort("saved index remains"),
+                        fs::read(repo.join("user.txt")).or_abort("saved user remains"),
+                        reference_read.as_ref().map_err(io::Error::kind)
+                    ),
+                    (
+                        world.expected_stdout.as_str(),
+                        "",
+                        world.expected_calls.as_slice(),
+                        world.expected_writes,
+                        b"saved index".to_vec(),
+                        b"saved user bytes".to_vec(),
+                        world.expected_reference.as_ref().map_err(Clone::clone)
+                    )
+                );
+            }
+
+            #[test]
+            fn query_spawn_preserves_generated_inputs(
+                remaining in "[A-Za-z0-9 ,]{0,40}",
+                reference in prop_oneof![Just(()).prop_map(|()| without_reference()),
+                    Just(()).prop_map(|()| with_reference())],
+                guidance in prop_oneof![Just(()).prop_map(|()| without_guidance()),
+                    Just(()).prop_map(|()| with_guidance())]
+            ) {
+                let world = spawn_failed(remaining, &reference, &guidance);
+                let repo = world.directory.path();
+                let ctx = Ctx {
+                    cwd: repo.to_path_buf(),
+                    env: &world.env,
+                    runner: &world.runner,
+                    io: &world.io,
+                    fs: &REAL_FS,
+                };
+
+                let result =
+                    super::super::print_hints_with_remaining_in(&ctx, &world.remaining);
+
+                let (stdout, stderr, calls) = (
+                    world.io.stdout.borrow(),
+                    world.io.stderr.borrow(),
+                    world.runner.calls.borrow(),
+                );
+
+                let reference_read = fs::read(repo.join("references/rust.md"));
+
+                prop_assert_eq!(
+                    result.as_ref().map_err(ToString::to_string),
+                    world.expected_result.as_ref().map_err(Clone::clone)
+                );
+                prop_assert_eq!(
+                    (
+                        stdout.as_str(),
+                        stderr.as_str(),
+                        calls.as_slice(),
+                        world.io.attempted.get(),
+                        fs::read(repo.join(".git/index")).or_abort("saved index remains"),
+                        fs::read(repo.join("user.txt")).or_abort("saved user remains"),
+                        reference_read.as_ref().map_err(io::Error::kind)
+                    ),
+                    (
+                        world.expected_stdout.as_str(),
+                        "",
+                        world.expected_calls.as_slice(),
+                        world.expected_writes,
+                        b"saved index".to_vec(),
+                        b"saved user bytes".to_vec(),
+                        world.expected_reference.as_ref().map_err(Clone::clone)
+                    )
+                );
+            }
+
+            #[test]
+            fn base_hint_writes(
+                remaining in "[A-Za-z0-9 ,]{1,40}",
+                slot in RangeInclusive::<usize>::new(1, 12)
+            ) {
+                let world = write_failed(
+                    with_remaining(
+                        &NonEmptyString::try_from(remaining)
+                            .or_abort("nonempty generated remaining"),
+                    ),
+                    &with_reference(),
+                    &with_guidance(),
+                    NonZeroUsize::new(slot).or_abort("generated write ordinal"),
+                );
+                let repo = world.directory.path();
+                let ctx = Ctx {
+                    cwd: repo.to_path_buf(),
+                    env: &world.env,
+                    runner: &world.runner,
+                    io: &world.io,
+                    fs: &REAL_FS,
+                };
+
+                let result =
+                    super::super::print_hints_with_remaining_in(&ctx, &world.remaining);
+
+                let (stdout, stderr, calls) = (
+                    world.io.stdout.borrow(),
+                    world.io.stderr.borrow(),
+                    world.runner.calls.borrow(),
+                );
+
+                let reference_read = fs::read(repo.join("references/rust.md"));
+
+                prop_assert_eq!(
+                    result.as_ref().map_err(ToString::to_string),
+                    world.expected_result.as_ref().map_err(Clone::clone)
+                );
+                prop_assert_eq!(
+                    (
+                        stdout.as_str(),
+                        stderr.as_str(),
+                        calls.as_slice(),
+                        world.io.attempted.get(),
+                        fs::read(repo.join(".git/index")).or_abort("saved index remains"),
+                        fs::read(repo.join("user.txt")).or_abort("saved user remains"),
+                        reference_read.as_ref().map_err(io::Error::kind)
+                    ),
+                    (
+                        world.expected_stdout.as_str(),
+                        "",
+                        world.expected_calls.as_slice(),
+                        world.expected_writes,
+                        b"saved index".to_vec(),
+                        b"saved user bytes".to_vec(),
+                        world.expected_reference.as_ref().map_err(Clone::clone)
+                    )
+                );
+            }
+
+            #[test]
+            fn remaining_and_reference_writes(
+                remaining in "[A-Za-z0-9 ,]{1,40}",
+                slot in RangeInclusive::<usize>::new(13, 16)
+            ) {
+                let world = write_failed(
+                    with_remaining(
+                        &NonEmptyString::try_from(remaining)
+                            .or_abort("nonempty generated remaining"),
+                    ),
+                    &with_reference(),
+                    &with_guidance(),
+                    NonZeroUsize::new(slot).or_abort("generated write ordinal"),
+                );
+                let repo = world.directory.path();
+                let ctx = Ctx {
+                    cwd: repo.to_path_buf(),
+                    env: &world.env,
+                    runner: &world.runner,
+                    io: &world.io,
+                    fs: &REAL_FS,
+                };
+
+                let result =
+                    super::super::print_hints_with_remaining_in(&ctx, &world.remaining);
+
+                let (stdout, stderr, calls) = (
+                    world.io.stdout.borrow(),
+                    world.io.stderr.borrow(),
+                    world.runner.calls.borrow(),
+                );
+
+                let reference_read = fs::read(repo.join("references/rust.md"));
+
+                prop_assert_eq!(
+                    result.as_ref().map_err(ToString::to_string),
+                    world.expected_result.as_ref().map_err(Clone::clone)
+                );
+                prop_assert_eq!(
+                    (
+                        stdout.as_str(),
+                        stderr.as_str(),
+                        calls.as_slice(),
+                        world.io.attempted.get(),
+                        fs::read(repo.join(".git/index")).or_abort("saved index remains"),
+                        fs::read(repo.join("user.txt")).or_abort("saved user remains"),
+                        reference_read.as_ref().map_err(io::Error::kind)
+                    ),
+                    (
+                        world.expected_stdout.as_str(),
+                        "",
+                        world.expected_calls.as_slice(),
+                        world.expected_writes,
+                        b"saved index".to_vec(),
+                        b"saved user bytes".to_vec(),
+                        world.expected_reference.as_ref().map_err(Clone::clone)
+                    )
+                );
+            }
+
+            #[test]
+            fn recovery_writes(
+                remaining in "[A-Za-z0-9 ,]{1,40}",
+                slot in RangeInclusive::<usize>::new(17, 18)
+            ) {
+                let world = write_failed(
+                    with_remaining(
+                        &NonEmptyString::try_from(remaining)
+                            .or_abort("nonempty generated remaining"),
+                    ),
+                    &with_reference(),
+                    &with_guidance(),
+                    NonZeroUsize::new(slot).or_abort("generated write ordinal"),
+                );
+                let repo = world.directory.path();
+                let ctx = Ctx {
+                    cwd: repo.to_path_buf(),
+                    env: &world.env,
+                    runner: &world.runner,
+                    io: &world.io,
+                    fs: &REAL_FS,
+                };
+
+                let result =
+                    super::super::print_hints_with_remaining_in(&ctx, &world.remaining);
+
+                let (stdout, stderr, calls) = (
+                    world.io.stdout.borrow(),
+                    world.io.stderr.borrow(),
+                    world.runner.calls.borrow(),
+                );
+
+                let reference_read = fs::read(repo.join("references/rust.md"));
+
+                prop_assert_eq!(
+                    result.as_ref().map_err(ToString::to_string),
+                    world.expected_result.as_ref().map_err(Clone::clone)
+                );
+                prop_assert_eq!(
+                    (
+                        stdout.as_str(),
+                        stderr.as_str(),
+                        calls.as_slice(),
+                        world.io.attempted.get(),
+                        fs::read(repo.join(".git/index")).or_abort("saved index remains"),
+                        fs::read(repo.join("user.txt")).or_abort("saved user remains"),
+                        reference_read.as_ref().map_err(io::Error::kind)
+                    ),
+                    (
+                        world.expected_stdout.as_str(),
+                        "",
+                        world.expected_calls.as_slice(),
+                        world.expected_writes,
+                        b"saved index".to_vec(),
+                        b"saved user bytes".to_vec(),
+                        world.expected_reference.as_ref().map_err(Clone::clone)
+                    )
+                );
+            }
+
+            #[test]
+            fn claude_guidance_writes(
+                remaining in "[A-Za-z0-9 ,]{1,40}",
+                slot in RangeInclusive::<usize>::new(19, 30)
+            ) {
+                let world = write_failed(
+                    with_remaining(
+                        &NonEmptyString::try_from(remaining)
+                            .or_abort("nonempty generated remaining"),
+                    ),
+                    &with_reference(),
+                    &with_guidance(),
+                    NonZeroUsize::new(slot).or_abort("generated write ordinal"),
+                );
+                let repo = world.directory.path();
+                let ctx = Ctx {
+                    cwd: repo.to_path_buf(),
+                    env: &world.env,
+                    runner: &world.runner,
+                    io: &world.io,
+                    fs: &REAL_FS,
+                };
+
+                let result =
+                    super::super::print_hints_with_remaining_in(&ctx, &world.remaining);
+
+                let (stdout, stderr, calls) = (
+                    world.io.stdout.borrow(),
+                    world.io.stderr.borrow(),
+                    world.runner.calls.borrow(),
+                );
+
+                let reference_read = fs::read(repo.join("references/rust.md"));
+
+                prop_assert_eq!(
+                    result.as_ref().map_err(ToString::to_string),
+                    world.expected_result.as_ref().map_err(Clone::clone)
+                );
+                prop_assert_eq!(
+                    (
+                        stdout.as_str(),
+                        stderr.as_str(),
+                        calls.as_slice(),
+                        world.io.attempted.get(),
+                        fs::read(repo.join(".git/index")).or_abort("saved index remains"),
+                        fs::read(repo.join("user.txt")).or_abort("saved user remains"),
+                        reference_read.as_ref().map_err(io::Error::kind)
+                    ),
+                    (
+                        world.expected_stdout.as_str(),
+                        "",
+                        world.expected_calls.as_slice(),
+                        world.expected_writes,
+                        b"saved index".to_vec(),
+                        b"saved user bytes".to_vec(),
+                        world.expected_reference.as_ref().map_err(Clone::clone)
+                    )
+                );
+            }
+
+        }
     }
 }
