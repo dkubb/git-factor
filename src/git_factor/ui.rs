@@ -27,24 +27,6 @@ pub(in crate::git_factor) fn is_mid_rebase_in(ctx: &Ctx<'_>) -> bool {
     })
 }
 
-/// Prints contextual hints to guide the next commit.
-///
-/// Displays remaining diff size, reference file locations, and recovery
-/// instructions after each successful split or session start. When running
-/// under Claude Code (`CLAUDECODE=1`), adds LLM-specific guidance.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "tests exercise the full hint bundle through this convenience wrapper"
-    )
-)]
-pub(in crate::git_factor) fn print_hints_in(ctx: &Ctx<'_>) -> Result<(), FactorError> {
-    let stat = git_output(ctx, &["diff", "--stat"])?;
-    let remaining = stat.lines().last().unwrap_or_default().to_owned();
-    print_hints_with_remaining_in(ctx, remaining.as_str())
-}
-
 /// Prints contextual hints using a precomputed remaining-stat line.
 pub(in crate::git_factor) fn print_hints_with_remaining_in(
     ctx: &Ctx<'_>,
@@ -2497,6 +2479,17 @@ mod tests {
         assert_eq!(outln_err.to_string(), "io fail");
 
         assert!(git_command_message(&FactorError::NoActiveSession).is_none());
+    }
+
+    /// Prints contextual hints to guide the next commit.
+    ///
+    /// Displays remaining diff size, reference file locations, and recovery
+    /// instructions after each successful split or session start. When running
+    /// under Claude Code (`CLAUDECODE=1`), adds LLM-specific guidance.
+    pub(in crate::git_factor) fn print_hints_in(ctx: &Ctx<'_>) -> Result<(), FactorError> {
+        let stat = git_output(ctx, &["diff", "--stat"])?;
+        let remaining = stat.lines().last().unwrap_or_default().to_owned();
+        print_hints_with_remaining_in(ctx, remaining.as_str())
     }
 
     #[test]
