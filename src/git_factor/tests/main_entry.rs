@@ -3936,7 +3936,7 @@ fn public_continue_completes_a_staged_atom() {
     assert_eq!(code, EXIT_OK);
     assert_eq!(
         fixture.stdout(),
-        "FACTOR: Complete. Final commit split into 1 commits.\n"
+        "{\"operation\":\"continue\",\"split_count\":1}\n"
     );
     assert_eq!(fixture.stderr(), "");
     assert_eq!(fixture.journal(), fixture.expected_journal());
@@ -5005,7 +5005,7 @@ fn public_continue_makes_no_filesystem_removal() {
     assert_eq!(code, EXIT_OK);
     assert_eq!(
         fixture.stdout(),
-        "FACTOR: Complete. Final commit split into 1 commits.\n"
+        "{\"operation\":\"continue\",\"split_count\":1}\n"
     );
     assert_eq!(fixture.stderr(), "");
     assert_eq!(fixture.journal(), fixture.expected_journal());
@@ -5246,7 +5246,7 @@ fn public_continue_completes_the_last_admitted_split_count() {
     assert_eq!(code, EXIT_OK);
     assert_eq!(
         fixture.stdout(),
-        "FACTOR: Complete. Final commit split into 255 commits.\n"
+        "{\"operation\":\"continue\",\"split_count\":255}\n"
     );
     assert_eq!(fixture.stderr(), "");
     assert_eq!(fixture.journal(), fixture.expected_journal());
@@ -6622,4 +6622,12 @@ fn public_finish_original_message_preserves_interior_and_trims_outer_whitespace(
         "  interior body  ",
         b"protected bytes",
     );
+}
+
+#[test]
+fn public_completion_reports_terminal_commands_and_count_boundaries() {
+    verify_public_completion(false, 0);
+    verify_public_completion(false, u8::MAX - 1);
+    verify_public_completion(true, 0);
+    verify_public_completion(true, u8::MAX - 1);
 }

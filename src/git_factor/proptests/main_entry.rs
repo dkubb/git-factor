@@ -15,7 +15,8 @@ use crate::git_factor::tests::status_contracts;
 use crate::git_factor::tests::verify_public_abort_fallback_refusal;
 use crate::git_factor::tests::verify_public_status_phase_refusal;
 use crate::git_factor::tests::{
-    verify_public_abort, verify_public_inactive_status, verify_public_status,
+    verify_public_abort, verify_public_completion, verify_public_inactive_status,
+    verify_public_status,
 };
 use core::iter::repeat_n;
 use core::num::{NonZeroU8, NonZeroUsize};
@@ -599,7 +600,7 @@ proptest! {
 
         prop_assert_eq!(code, EXIT_OK);
         prop_assert_eq!(fixture.stdout(), format!(
-            "FACTOR: Complete. Final commit split into {} commits.\n", u16::from(split_count) + 1,
+            "{{\"operation\":\"continue\",\"split_count\":{}}}\n", u16::from(split_count) + 1,
         ));
         prop_assert_eq!(fixture.stderr(), "");
         prop_assert_eq!(fixture.journal(), fixture.expected_journal());
@@ -1521,4 +1522,13 @@ proptest! {
         verify_finish(case, &sha, previous, &subject, &body, &user);
     }
 
+}
+
+proptest! {
+    #[test]
+    fn public_completion_reports_generated_positive_count_and_actual_command(
+        finish in any::<bool>(), previous in RangeInclusive::<u8>::new(0, u8::MAX - 1),
+    ) {
+        verify_public_completion(finish, previous);
+    }
 }

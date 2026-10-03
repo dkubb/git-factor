@@ -5533,7 +5533,7 @@ fn cmd_finish_propagates_io_error_when_completion_summary_write_fails() {
             0,
         );
     let io = MatchingOutlnFailureIo {
-        fail_on: "FACTOR: Complete. Final commit split into 1 commits.",
+        fail_on: "{\"operation\":\"finish\",\"split_count\":1}",
     };
     let env = TestEnv {
         cwd: repo.to_path_buf(),
@@ -7112,7 +7112,7 @@ fn cmd_continue_converged_tree_completes_session_without_remainder() {
     assert_eq!(code, EXIT_OK);
     assert_eq!(
         io.stdout(),
-        "FACTOR: Complete. Final commit split into 1 commits.\n"
+        "{\"operation\":\"continue\",\"split_count\":1}\n"
     );
     assert!(io.stderr().is_empty(), "stderr should be empty");
     assert!(
@@ -7240,7 +7240,7 @@ fn cmd_continue_propagates_io_error_when_completion_summary_write_fails() {
         TREE_EXPECTED_NL,
     );
     let io = MatchingOutlnFailureIo {
-        fail_on: "FACTOR: Complete. Final commit split into 1 commits.",
+        fail_on: "{\"operation\":\"continue\",\"split_count\":1}",
     };
     let env = TestEnv {
         cwd: repo.to_path_buf(),
@@ -7304,7 +7304,7 @@ fn cmd_continue_completes_when_rebase_finishes_after_tree_converges() {
     assert_eq!(code, EXIT_OK);
     assert_eq!(
         io.stdout(),
-        "FACTOR: Complete. Final commit split into 1 commits.\n"
+        "{\"operation\":\"continue\",\"split_count\":1}\n"
     );
     assert!(io.stderr().is_empty(), "stderr should be empty");
     assert!(
@@ -9299,4 +9299,161 @@ pub(in crate::git_factor) fn verify_public_abort(in_progress: bool, sha: &str) {
         );
     }
     assert!(runner.statuses.borrow().values().all(VecDeque::is_empty));
+}
+
+/// Actual public completion dispatch over the existing native-adapter contracts.
+#[expect(
+    clippy::too_many_lines,
+    reason = "the public completion fixture keeps each real command script, single dispatch Act, exact count output and full status-consumption oracle together"
+)]
+pub(in crate::git_factor) fn verify_public_completion(finish: bool, previous: u8) {
+    let directory = TempDir::new().or_abort("public completion fixture");
+    let repo = directory.path();
+    let original = "a".repeat(SHA_LEN);
+    let state = setup_factor_state(
+        repo,
+        &original,
+        &previous.to_string(),
+        Some("false"),
+        Some(TREE_EXPECTED_NL),
+    );
+    let runner = if finish {
+        ScriptedRunner::default()
+            .with_output("git", &["rev-parse", "--git-dir"], repo, ".git\n")
+            .with_status(
+                "git",
+                &["checkout", "--quiet", "--", "."],
+                &[],
+                false,
+                repo,
+                0,
+            )
+            .with_status(
+                "git",
+                &["clean", "--force", "--quiet", "-d"],
+                &[],
+                false,
+                repo,
+                0,
+            )
+            .with_status(
+                "git",
+                &[
+                    "restore",
+                    "--source",
+                    original.as_str(),
+                    "--staged",
+                    "--worktree",
+                    "--",
+                    ".",
+                ],
+                &[],
+                false,
+                repo,
+                0,
+            )
+            .with_output("git", &["write-tree"], repo, TREE_EXPECTED_NL)
+            .with_status("git", &["diff", "--quiet", "--staged"], &[], false, repo, 1)
+            .with_output(
+                "git",
+                &[
+                    "show",
+                    "--format=%an%x00%ae%x00%aI%x00%cn%x00%ce%x00%cI",
+                    "--no-patch",
+                    original.as_str(),
+                ],
+                repo,
+                TEST_COMMIT_META,
+            )
+            .with_status(
+                "git",
+                &["commit", "--quiet", "--message", "test: message"],
+                &TEST_COMMIT_ENVS,
+                false,
+                repo,
+                0,
+            )
+    } else {
+        with_git_dir_outputs(ScriptedRunner::default(), repo, 6)
+            .with_status("git", &["diff", "--quiet", "--staged"], &[], false, repo, 1)
+            .with_status(
+                "git",
+                &["checkout", "--quiet", "--", "."],
+                &[],
+                false,
+                repo,
+                0,
+            )
+            .with_status(
+                "git",
+                &["clean", "--force", "--quiet", "-d"],
+                &[],
+                false,
+                repo,
+                0,
+            )
+            .with_status(
+                "git",
+                &["checkout-index", "--all", "--force", "--quiet"],
+                &[],
+                false,
+                repo,
+                0,
+            )
+            .with_output("git", &["status", "--porcelain=v1"], repo, "M  file.txt\n")
+            .with_status("bash", &["-c", "true"], &[], false, repo, 0)
+            .with_output("git", &["status", "--porcelain=v1"], repo, "M  file.txt\n")
+            .with_output(
+                "git",
+                &[
+                    "show",
+                    "--format=%an%x00%ae%x00%aI%x00%cn%x00%ce%x00%cI",
+                    "--no-patch",
+                    original.as_str(),
+                ],
+                repo,
+                TEST_COMMIT_META,
+            )
+            .with_status(
+                "git",
+                &["commit", "--quiet", "--message", "test: message"],
+                &TEST_COMMIT_ENVS,
+                false,
+                repo,
+                0,
+            )
+            .with_output("git", &["status", "--porcelain=v1"], repo, "")
+            .with_output("git", &["rev-parse", "HEAD^{tree}"], repo, TREE_EXPECTED_NL)
+    };
+    let io = TestIo::default();
+    let environment = TestEnv {
+        cwd: repo.to_path_buf(),
+    };
+    let mode = if finish { "--finish" } else { "--continue" };
+    let code = main_entry_with_vec(
+        &io,
+        ctx_from_parts(&environment, &runner, &io, &REAL_FS),
+        &[
+            OsString::from("git-factor"),
+            OsString::from(mode),
+            OsString::from("--message"),
+            OsString::from("test: message"),
+        ],
+    );
+    assert_eq!(code, EXIT_OK);
+    let operation = if finish { "finish" } else { "continue" };
+    let count = u16::from(previous)
+        .checked_add(1)
+        .or_abort("admitted completion count");
+    assert_eq!(
+        io.stdout(),
+        format!("{{\"operation\":\"{operation}\",\"split_count\":{count}}}\n")
+    );
+    assert_eq!(io.stderr(), "");
+    assert!(!state.exists());
+    assert!(
+        runner.statuses.borrow().values().all(VecDeque::is_empty),
+        "actual completion commands must all be consumed: {:?}",
+        runner.statuses.borrow()
+    );
 }
