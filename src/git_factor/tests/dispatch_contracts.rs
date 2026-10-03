@@ -282,15 +282,12 @@ pub(in crate::git_factor) fn default_head_failure(resolution: HeadResolutionFaul
     assert_eq!(code, EXIT_DATAERR);
     assert_eq!(output.stdout(), "");
     assert_eq!(output.stderr(), "invalid commit: HEAD\n");
-    let mut expected_calls = vec![
+    let expected_calls = vec![
         "output git [\"rev-parse\", \"--git-dir\"]",
         "output git [\"rev-parse\", \"--git-dir\"]",
         "output git [\"status\", \"--porcelain=v1\"]",
         "output git [\"rev-parse\", \"--verify\", \"HEAD\"]",
     ];
-    if matches!(resolution, HeadResolutionFault::LaunchFailure) {
-        expected_calls.extend(["output git [\"rev-parse\", \"--verify\", \"HEAD\"]", "output git [\"rev-parse\", \"--verify\", \"HEAD^{tree}\"]", "output git [\"rev-parse\", \"--git-dir\"]", "output git [\"rev-parse\", \"--show-toplevel\"]", "output git [\"--no-optional-locks\", \"status\", \"--porcelain=v1\", \"--untracked-files=all\"]"]);
-    }
     assert_eq!(runner.calls.borrow().as_slice(), expected_calls.as_slice());
     for cwd in runner.cwds.borrow().iter() {
         assert_eq!(cwd, repo);

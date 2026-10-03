@@ -115,16 +115,6 @@ impl QueryCase {
         }
     }
 
-    fn is_io_output(&self, is_output: bool) -> bool {
-        matches!(
-            *self,
-            Self::Failure {
-                reply: QueryReply::Io,
-                ..
-            }
-        ) && is_output
-    }
-
     fn root(&self, requested: bool) -> bool {
         requested
             || matches!(
@@ -224,10 +214,6 @@ impl QueryStep {
                 envs: Vec::new(),
             },
         }
-    }
-
-    fn is_output(&self) -> bool {
-        matches!(*self, Self::Output { .. })
     }
 
     fn output(target: QueryTarget, bin: &str, args: &[&str], repo: &Path, text: &str) -> Self {
@@ -346,34 +332,6 @@ fn admission_steps(
         QueryStep::output(QueryTarget::Gate, "bash", &["-c", "true"], repo, stdout),
     ]);
     steps
-}
-
-fn after_output_io(mut runner: ObservedRunner, repo: &Path, tip: &str) -> ObservedRunner {
-    // Baseline command_output snapshots even with tracing disabled; keep answers valid.
-    for (args, text) in [
-        (vec!["rev-parse", "--verify", "HEAD"], format!("{tip}\n")),
-        (
-            vec!["rev-parse", "--verify", "HEAD^{tree}"],
-            TREE_EXPECTED_NL.to_owned(),
-        ),
-        (vec!["rev-parse", "--git-dir"], ".git\n".to_owned()),
-        (
-            vec!["rev-parse", "--show-toplevel"],
-            format!("{}\n", repo.display()),
-        ),
-        (
-            vec![
-                "--no-optional-locks",
-                "status",
-                "--porcelain=v1",
-                "--untracked-files=all",
-            ],
-            String::new(),
-        ),
-    ] {
-        runner = runner.with_output("git", &args, repo, &text);
-    }
-    runner
 }
 
 fn append_query_step(
@@ -500,9 +458,6 @@ pub(in crate::git_factor) fn selected_start(
         runner = append_query_step(runner, step, is_target, case);
         if is_target {
             seen = true;
-            if case.is_io_output(true) {
-                runner = after_output_io(runner, repo, selected.last().as_str());
-            }
             break;
         }
     }
@@ -555,7 +510,6 @@ pub(in crate::git_factor) fn direct_start(
     let mut seen = false;
     for step in steps {
         let is_target = step.target() == target;
-        let snapshots = is_target && case.is_io_output(step.is_output());
         let is_gate = matches!(step.target(), QuerySite::Query(QueryTarget::Gate));
         if is_gate && !is_target {
             runner = runner.with_output_status("bash", &["-c", "true"], repo, 0, stdout, stderr);
@@ -564,9 +518,6 @@ pub(in crate::git_factor) fn direct_start(
         }
         if is_target {
             seen = true;
-            if snapshots {
-                runner = after_output_io(runner, repo, selected.last().as_str());
-            }
             break;
         }
     }

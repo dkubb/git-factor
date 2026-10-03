@@ -1,5 +1,5 @@
 use super::*;
-use core::cell::{Cell, RefCell};
+use core::cell::RefCell;
 use std::os::unix::process::ExitStatusExt as _;
 
 #[derive(Clone)]
@@ -10,7 +10,6 @@ pub(in crate::git_factor::validation) enum Reply {
 
 pub(in crate::git_factor::validation) struct Observation<'calls> {
     calls: &'calls RefCell<Vec<String>>,
-    consumed: Cell<bool>,
     reply: Reply,
 }
 
@@ -19,11 +18,7 @@ impl<'calls> Observation<'calls> {
         calls: &'calls RefCell<Vec<String>>,
         reply: Reply,
     ) -> Self {
-        Self {
-            calls,
-            consumed: Cell::new(false),
-            reply,
-        }
+        Self { calls, reply }
     }
 
     fn refused<T>(&self, call: String) -> io::Result<T> {
@@ -37,9 +32,6 @@ impl Runner for Observation<'_> {
         self.calls
             .borrow_mut()
             .push(format!("output {bin} {args:?} cwd={cwd:?}"));
-        if self.consumed.replace(true) {
-            return Err(io::Error::other("no snapshot reply"));
-        }
         match self.reply.clone() {
             Reply::IoFailure => Err(io::Error::other("resolution launch failed")),
             Reply::Output { exit_code, stdout } => Ok(Output {
