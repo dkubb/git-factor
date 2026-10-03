@@ -5760,4 +5760,64 @@ fi
         assert_eq!(fs::read(repo.join("atom")).or_abort(), b"atom\n");
         assert_eq!(fs::read(repo.join("unrelated")).or_abort(), b"user bytes\n");
     }
+
+    #[test]
+    fn abort_message_preserves_active_native_session_before_mutation() {
+        let directory = init_repo();
+        let repo = directory.path();
+        commit_file(repo, "base", "base\n", "Base");
+        commit_file(repo, "selected", "selected\n", "Selected source");
+        start_session(repo);
+        write_file(repo, "selected", "staged user bytes\n");
+        git(repo, &["add", "selected"]);
+        write_file(repo, "unrelated", "untracked user bytes\n");
+        let head = git(repo, &["rev-parse", "HEAD"]);
+        let refs = git(repo, &["show-ref"]);
+        let index = fs::read(repo.join(".git/index")).or_abort();
+        let state = repo.join(".git/factor");
+        let mut saved = fs::read_dir(&state)
+            .or_abort()
+            .map(|candidate| {
+                let entry = candidate.or_abort();
+                (entry.file_name(), fs::read(entry.path()).or_abort())
+            })
+            .collect::<Vec<_>>();
+        saved.sort_by(|left, right| left.0.cmp(&right.0));
+
+        run_git_factor(
+            repo,
+            &["--abort", "--message", "Preserve this active session"],
+            GitFactorExpectation {
+                code: EXIT_USAGE,
+                stdout: Some(StreamExpectation::new_exact(String::new())),
+                stderr: Some(StreamExpectation::new_exact(
+                    "--abort cannot be combined with other options\n".to_owned(),
+                )),
+                ..GitFactorExpectation::default()
+            },
+        );
+
+        assert_eq!(fs::read(repo.join(".git/index")).or_abort(), index);
+        assert_eq!(git(repo, &["rev-parse", "HEAD"]), head);
+        assert_eq!(git(repo, &["show-ref"]), refs);
+        let mut observed = fs::read_dir(&state)
+            .or_abort()
+            .map(|candidate| {
+                let entry = candidate.or_abort();
+                (entry.file_name(), fs::read(entry.path()).or_abort())
+            })
+            .collect::<Vec<_>>();
+        observed.sort_by(|left, right| left.0.cmp(&right.0));
+        assert_eq!(observed, saved);
+        assert_eq!(
+            fs::read(repo.join("selected")).or_abort(),
+            b"staged user bytes\n"
+        );
+        assert_eq!(
+            fs::read(repo.join("unrelated")).or_abort(),
+            b"untracked user bytes\n"
+        );
+        assert!(!repo.join(".git/rebase-merge").exists());
+        assert!(!repo.join(".git/rebase-apply").exists());
+    }
 }

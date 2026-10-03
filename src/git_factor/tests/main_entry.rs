@@ -5880,3 +5880,11 @@ fn public_abort_reports_cleanup_and_external_rebase_action() {
     verify_public_abort(false, &"a".repeat(SHA_LEN));
     verify_public_abort(true, &"f".repeat(SHA_LEN));
 }
+
+#[test]
+fn abort_message_refuses_before_native_or_saved_state_effects() {
+    refusal(
+        &["--abort", "--message", "Keep the saved session"],
+        "--abort cannot be combined with other options",
+    );
+}
