@@ -584,16 +584,10 @@ proptest! {
             1 => Just(253),
             1 => Just(254),
         ],
-        deleted in any::<bool>(),
     ) {
-        let fixture = if deleted {
-            continue_contracts::Continuation::with_deleted(
-                &original, split_count)
-        } else {
-            continue_contracts::Continuation::new(
-                &original, split_count,
-                continue_contracts::ContinueCase::Complete)
-        };
+        let fixture = continue_contracts::Continuation::new(
+            &original, split_count, continue_contracts::ContinueCase::Complete,
+        );
         let before = fixture.protected_bytes();
         let args = ["git-factor", "--continue", "--message", "test: message"].map(OsString::from);
 
@@ -604,17 +598,11 @@ proptest! {
             "FACTOR: Complete. Final commit split into {} commits.\n", u16::from(split_count) + 1,
         ));
         prop_assert_eq!(fixture.stderr(), "");
-        prop_assert!(!fixture.deleted_exists());
         prop_assert_eq!(fixture.journal(), fixture.expected_journal());
         prop_assert_eq!(fixture.protected_bytes(), before);
         prop_assert_eq!(fixture.full_effect_requests(), fixture.expected_effect_requests());
         prop_assert!(!fixture.session_active());
-        let expected_removals = if deleted {
-            vec![PathBuf::from("deleted.txt")]
-        } else {
-            Vec::new()
-        };
-        prop_assert_eq!(fixture.deleted_requests(), expected_removals);
+        prop_assert_eq!(fixture.deleted_requests(), Vec::<PathBuf>::new());
     }
 }
 
@@ -628,7 +616,6 @@ proptest! {
             continue_contracts::ContinueFault::Checkout,
             continue_contracts::ContinueFault::Clean,
             continue_contracts::ContinueFault::CheckoutIndex,
-            continue_contracts::ContinueFault::DeletedPaths,
             continue_contracts::ContinueFault::BeforeStatus,
             continue_contracts::ContinueFault::AfterStatus,
             continue_contracts::ContinueFault::Metadata,

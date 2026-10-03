@@ -1258,11 +1258,6 @@ fn cmd_continue_in(ctx: &Ctx<'_>, messages: &NonEmpty<NonEmptyString>) -> Result
     run_git(ctx, &["checkout", "--quiet", "--", "."])?;
     run_git(ctx, &["clean", "--force", "--quiet", "-d"])?;
     run_git(ctx, &["checkout-index", "--all", "--force", "--quiet"])?;
-    let deleted = git_output(ctx, &["diff", "--diff-filter=D", "--name-only", "--staged"])?;
-    for raw_path in deleted.lines() {
-        let path = raw_path.trim();
-        drop(ctx.fs.remove_file(Path::new(path)));
-    }
     ensure_repo_state(
         ctx,
         RepoStatePolicy::StagedOnly,

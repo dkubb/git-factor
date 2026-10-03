@@ -22,7 +22,6 @@ pub(in crate::git_factor) enum ContinueFault {
     CheckoutIndex,
     Clean,
     Commit,
-    DeletedPaths,
     DiffStat,
     HeadTree,
     Metadata,
@@ -38,7 +37,7 @@ impl ContinueFault {
     fn command(self) -> &'static str {
         match self {
             Self::SessionDir | Self::HeadTree => "rev-parse",
-            Self::StagedStatus | Self::DeletedPaths | Self::DiffStat => "diff",
+            Self::StagedStatus | Self::DiffStat => "diff",
             Self::Checkout => "checkout",
             Self::Clean => "clean",
             Self::CheckoutIndex => "checkout-index",
@@ -64,9 +63,6 @@ impl ContinueFault {
             | Self::Reset => !output && args.first().is_some_and(|arg| *arg == self.command()),
             Self::BeforeStatus => output && args == ["status", "--porcelain=v1"] && ordinal == 0,
             Self::AfterStatus => output && args == ["status", "--porcelain=v1"] && ordinal == 1,
-            Self::DeletedPaths => {
-                output && args == ["diff", "--diff-filter=D", "--name-only", "--staged"]
-            }
             Self::HeadTree => output && args == ["rev-parse", HEAD_TREEISH],
             Self::DiffStat => output && args == ["diff", "--stat"],
             Self::Metadata | Self::RestoredTree | Self::Untracked => {
@@ -116,7 +112,6 @@ struct ContinueFs {
     observed: Cell<bool>,
     reads: Cell<usize>,
     removals: RefCell<Vec<PathBuf>>,
-    root: PathBuf,
 }
 
 impl Fs for ContinueFs {
@@ -161,13 +156,10 @@ impl Fs for ContinueFs {
 
     fn remove_file(&self, path: &Path) -> io::Result<()> {
         self.removals.borrow_mut().push(path.to_path_buf());
-        // This injected filesystem binds relative removal to its owned fixture, not process cwd.
-        let owned = if path.is_absolute() {
-            path.to_path_buf()
-        } else {
-            self.root.join(path)
-        };
-        REAL_FS.remove_file(&owned)
+        if path.is_relative() {
+            return Err(io::Error::other("relative test removal refused"));
+        }
+        REAL_FS.remove_file(path)
     }
 
     fn write_string(&self, path: &Path, content: &str) -> io::Result<()> {
@@ -287,7 +279,6 @@ pub(in crate::git_factor) enum ContinueRecoveryFailure {
 struct ContinueRunner {
     calls: RefCell<Vec<RecordedCall>>,
     case: ContinueCase,
-    deleted: Option<String>,
     fault: Option<ContinueFault>,
     gate_code: u8,
     git_dir_queries: Cell<usize>,
@@ -305,17 +296,6 @@ impl Runner for ContinueRunner {
             return Ok(Output {
                 status: exit_status(0),
                 stdout: tree.as_bytes().to_vec(),
-                stderr: Vec::new(),
-            });
-        }
-
-        if bin == "git"
-            && args == ["diff", "--diff-filter=D", "--name-only", "--staged"]
-            && let Some(deleted) = self.deleted.as_ref()
-        {
-            return Ok(Output {
-                status: exit_status(0),
-                stdout: deleted.as_bytes().to_vec(),
                 stderr: Vec::new(),
             });
         }
@@ -429,10 +409,6 @@ impl Continuation {
         }
     }
 
-    pub(in crate::git_factor) fn deleted_exists(&self) -> bool {
-        self.dir.path().join("deleted.txt").exists()
-    }
-
     pub(in crate::git_factor) fn deleted_requests(&self) -> Vec<PathBuf> {
         self.filesystem.removals.borrow().clone()
     }
@@ -472,11 +448,7 @@ impl Continuation {
             Some(ContinueFault::StagedStatus) => 1,
             Some(ContinueFault::Checkout) => 2,
             Some(ContinueFault::Clean) => 3,
-            Some(
-                ContinueFault::CheckoutIndex
-                | ContinueFault::DeletedPaths
-                | ContinueFault::BeforeStatus,
-            ) => 4,
+            Some(ContinueFault::CheckoutIndex | ContinueFault::BeforeStatus) => 4,
             Some(ContinueFault::Metadata) => 5,
             Some(ContinueFault::Commit | ContinueFault::HeadTree) => 6,
             Some(ContinueFault::RestoredTree)
@@ -765,7 +737,7 @@ impl Continuation {
             | ContinueCase::GateSpawn
             | ContinueCase::NoStaged
             | ContinueCase::PostGateDirty
-            | ContinueCase::PreGateDirty => continue_runner_with_commit(repo, original, "")
+            | ContinueCase::PreGateDirty => continue_runner_with_commit(repo, original)
                 .with_output("git", &["rev-parse", HEAD_TREEISH], repo, TREE_EXPECTED_NL),
         };
         let inner = source_runner
@@ -802,14 +774,12 @@ impl Continuation {
                 observed: Cell::new(false),
                 reads: Cell::new(0),
                 removals: RefCell::new(Vec::new()),
-                root: repo.to_path_buf(),
             },
             original: original.to_owned(),
             runner: ContinueRunner {
                 calls: RefCell::new(Vec::new()),
                 case,
                 fault: None,
-                deleted: None,
                 head_tree: None,
                 inner,
                 status_queries: Cell::new(0),
@@ -856,14 +826,6 @@ impl Continuation {
 
     pub(in crate::git_factor) fn with_counter_overflow(original: &str) -> Self {
         Self::new(original, u8::MAX, ContinueCase::Complete)
-    }
-
-    pub(in crate::git_factor) fn with_deleted(original: &str, split_count: u8) -> Self {
-        let mut fixture = Self::new(original, split_count, ContinueCase::Complete);
-        let deleted = fixture.dir.path().join("deleted.txt");
-        fs::write(&deleted, "staged deletion witness").or_abort("deleted tracked file");
-        fixture.runner.deleted = Some("deleted.txt\n".to_owned());
-        fixture
     }
 
     pub(in crate::git_factor) fn with_fault(original: &str, fault: ContinueFault) -> Self {
