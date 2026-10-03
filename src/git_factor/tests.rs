@@ -887,6 +887,106 @@ impl Fs for StickyStatePathFs {
     fs_delegate!(write_string);
 }
 
+/// Closed inputs for message submission and its session boundary.
+#[derive(Clone, Copy)]
+pub(in crate::git_factor) enum MessageCase {
+    NoSession,
+    NoStaged,
+}
+
+struct MessageRunner {
+    calls: RefCell<Vec<start_contracts::RecordedCall>>,
+    inner: ScriptedRunner,
+}
+
+impl Runner for MessageRunner {
+    fn output(&self, bin: &str, args: &[&str], cwd: &Path) -> io::Result<Output> {
+        self.calls
+            .borrow_mut()
+            .push(start_contracts::RecordedCall::Output {
+                args: args.iter().map(|arg| (*arg).to_owned()).collect(),
+                bin: bin.to_owned(),
+                cwd: cwd.to_path_buf(),
+            });
+        self.inner.output(bin, args, cwd)
+    }
+
+    fn status(
+        &self,
+        bin: &str,
+        args: &[&str],
+        envs: &[(&str, &str)],
+        quiet: bool,
+        cwd: &Path,
+    ) -> io::Result<ExitStatus> {
+        self.calls
+            .borrow_mut()
+            .push(start_contracts::RecordedCall::Status {
+                args: args.iter().map(|arg| (*arg).to_owned()).collect(),
+                bin: bin.to_owned(),
+                cwd: cwd.to_path_buf(),
+                envs: envs
+                    .iter()
+                    .map(|&(key, value)| (key.to_owned(), value.to_owned()))
+                    .collect(),
+                quiet,
+            });
+        self.inner.status(bin, args, envs, quiet, cwd)
+    }
+}
+
+/// Arrangement only: no public entry invocation or result assertions.
+pub(in crate::git_factor) struct MessageFixture {
+    directory: TempDir,
+    environment: TestEnv,
+    expected_calls: Vec<start_contracts::RecordedCall>,
+    io: TestIo,
+    protected: PathBuf,
+    runner: MessageRunner,
+    saved: Vec<(PathBuf, Vec<u8>)>,
+    state: PathBuf,
+}
+
+impl MessageFixture {
+    pub(in crate::git_factor) fn ctx(&self) -> Ctx<'_> {
+        Ctx {
+            runner: &self.runner,
+            cwd: self.directory.path().to_path_buf(),
+            io: &self.io,
+            env: &self.environment,
+            fs: &REAL_FS,
+        }
+    }
+
+    pub(in crate::git_factor) fn expected_requests(&self) -> Vec<start_contracts::RecordedCall> {
+        self.expected_calls.clone()
+    }
+
+    pub(in crate::git_factor) fn observed_requests(&self) -> Vec<start_contracts::RecordedCall> {
+        self.runner.calls.borrow().clone()
+    }
+
+    pub(in crate::git_factor) fn protected_bytes(&self) -> Vec<u8> {
+        fs::read(&self.protected).or_abort("protected file")
+    }
+
+    pub(in crate::git_factor) fn saved_facts(&self) -> Vec<(PathBuf, Vec<u8>)> {
+        self.saved.clone()
+    }
+
+    pub(in crate::git_factor) fn session_active(&self) -> bool {
+        self.state.exists()
+    }
+
+    pub(in crate::git_factor) fn stderr(&self) -> String {
+        self.io.stderr()
+    }
+
+    pub(in crate::git_factor) fn stdout(&self) -> String {
+        self.io.stdout()
+    }
+}
+
 fn with_git_dir_outputs(mut runner: ScriptedRunner, repo: &Path, count: usize) -> ScriptedRunner {
     for _ in 0..count {
         runner = runner.with_output("git", &["rev-parse", "--git-dir"], repo, ".git\n");
@@ -4727,7 +4827,7 @@ fn run_with_args_rejects_continue_without_message() {
 }
 
 #[test]
-fn run_with_args_rejects_message_when_not_continuing_or_finishing() {
+fn run_with_args_rejects_message_with_start_arguments() {
     let dir = TempDir::new().or_abort("tempdir");
     let io = TestIo::default();
     let ctx = Ctx {
@@ -4748,40 +4848,28 @@ fn run_with_args_rejects_message_when_not_continuing_or_finishing() {
             OsString::from("msg"),
         ],
     )
-    .err_or_abort("message without continue/finish should be rejected");
+    .err_or_abort("message with start arguments should be rejected");
 
     assert_eq!(
         err.to_string(),
-        "--message can only be used with --continue or --finish"
+        "--message cannot be combined with --exec or COMMIT"
     );
 }
 
 #[test]
-fn run_with_args_rejects_message_without_exec_or_commit() {
-    let dir = TempDir::new().or_abort("tempdir");
-    let io = TestIo::default();
-    let ctx = Ctx {
-        runner: &REAL_RUNNER,
-        cwd: dir.path().to_path_buf(),
-        io: &io,
-        env: &REAL_ENV,
-        fs: &REAL_FS,
-    };
+fn run_with_args_message_only_refuses_without_active_session() {
+    let fixture = arrange_message(MessageCase::NoSession);
+    let args = ["git-factor", "--message", "Selected atom"].map(OsString::from);
 
-    let err = run_with_args_vec(
-        &ctx,
-        vec![
-            OsString::from("git-factor"),
-            OsString::from("--message"),
-            OsString::from("msg"),
-        ],
-    )
-    .err_or_abort("message without exec/commit should be rejected");
+    let error = run_with_args_vec(&fixture.ctx(), args.to_vec())
+        .err_or_abort("message submission requires a session");
 
-    assert_eq!(
-        err.to_string(),
-        "--exec <COMMAND> is required when starting a factor session"
-    );
+    assert_eq!(error.to_string(), "no active factor session");
+    assert_eq!(fixture.observed_requests(), fixture.expected_requests());
+    assert_eq!(fixture.stdout(), "");
+    assert_eq!(fixture.stderr(), "");
+    assert!(!fixture.session_active());
+    assert_eq!(fixture.protected_bytes(), b"user bytes\0\n");
 }
 
 #[test]
@@ -9456,4 +9544,180 @@ pub(in crate::git_factor) fn verify_public_completion(finish: bool, previous: u8
         "actual completion commands must all be consumed: {:?}",
         runner.statuses.borrow()
     );
+}
+
+pub(in crate::git_factor) fn arrange_message(case: MessageCase) -> MessageFixture {
+    let directory = TempDir::new().or_abort("message fixture");
+    let repo = directory.path();
+    let state = repo.join(".git/factor");
+    fs::create_dir_all(repo.join(".git")).or_abort("Git directory");
+    let protected = repo.join("unrelated");
+    fs::write(&protected, b"user bytes\0\n").or_abort("protected file");
+    let original = "a".repeat(SHA_LEN);
+    match case {
+        MessageCase::NoSession => {}
+        MessageCase::NoStaged => {
+            setup_factor_state(
+                repo,
+                &original,
+                "0\n",
+                Some("false\n"),
+                Some(TREE_EXPECTED_NL),
+            );
+        }
+    }
+    let saved = match case {
+        MessageCase::NoSession => Vec::new(),
+        MessageCase::NoStaged => [
+            "commits",
+            "current_index",
+            "split_count",
+            "exec",
+            "requires_rebase",
+            "expected_tree",
+        ]
+        .into_iter()
+        .map(|name| {
+            let path = state.join(name);
+            let bytes = fs::read(&path).or_abort("saved fact");
+            (path, bytes)
+        })
+        .collect(),
+    };
+    let query = |args: &[&str]| start_contracts::RecordedCall::Output {
+        args: args.iter().map(|arg| (*arg).to_owned()).collect(),
+        bin: "git".to_owned(),
+        cwd: repo.to_path_buf(),
+    };
+    let effect =
+        |bin: &str, args: &[&str], envs: &[(&str, &str)]| start_contracts::RecordedCall::Status {
+            args: args.iter().map(|arg| (*arg).to_owned()).collect(),
+            bin: bin.to_owned(),
+            cwd: repo.to_path_buf(),
+            envs: envs
+                .iter()
+                .map(|&(key, value)| (key.to_owned(), value.to_owned()))
+                .collect(),
+            quiet: false,
+        };
+    let mut expected_calls = vec![query(&["rev-parse", "--git-dir"])];
+    let mut inner = with_git_dir_outputs(ScriptedRunner::default(), repo, 1);
+    match case {
+        MessageCase::NoSession => {}
+        MessageCase::NoStaged => {
+            inner = inner
+                .with_output("git", &["rev-parse", "--git-dir"], repo, ".git\n")
+                .with_status("git", &["diff", "--quiet", "--staged"], &[], false, repo, 0);
+            expected_calls.extend([
+                query(&["rev-parse", "--git-dir"]),
+                effect("git", &["diff", "--quiet", "--staged"], &[]),
+            ]);
+        }
+    }
+    let environment = TestEnv {
+        cwd: repo.to_path_buf(),
+    };
+    MessageFixture {
+        directory,
+        environment,
+        expected_calls,
+        io: TestIo::default(),
+        protected,
+        runner: MessageRunner {
+            calls: RefCell::new(Vec::new()),
+            inner,
+        },
+        saved,
+        state,
+    }
+}
+
+pub(in crate::git_factor) fn arrange_message_completion(paragraphs: &[String]) -> MessageFixture {
+    let mut fixture = arrange_message(MessageCase::NoStaged);
+    let repo = fixture.directory.path();
+    let original = "a".repeat(SHA_LEN);
+    let query = |args: &[&str]| start_contracts::RecordedCall::Output {
+        args: args.iter().map(|arg| (*arg).to_owned()).collect(),
+        bin: "git".to_owned(),
+        cwd: repo.to_path_buf(),
+    };
+    let effect =
+        |bin: &str, args: &[&str], envs: &[(&str, &str)]| start_contracts::RecordedCall::Status {
+            args: args.iter().map(|arg| (*arg).to_owned()).collect(),
+            bin: bin.to_owned(),
+            cwd: repo.to_path_buf(),
+            envs: envs
+                .iter()
+                .map(|&(key, value)| (key.to_owned(), value.to_owned()))
+                .collect(),
+            quiet: false,
+        };
+    let mut inner = with_git_dir_outputs(ScriptedRunner::default(), repo, 1);
+    let mut expected_calls = vec![query(&["rev-parse", "--git-dir"])];
+
+    let mut commit = vec!["commit", "--quiet"];
+    for paragraph in paragraphs {
+        commit.extend(["--message", paragraph.as_str()]);
+    }
+    let metadata = [
+        "show",
+        "--format=%an%x00%ae%x00%aI%x00%cn%x00%ce%x00%cI",
+        "--no-patch",
+        original.as_str(),
+    ];
+    inner = inner
+        .with_output("git", &["rev-parse", "--git-dir"], repo, ".git\n")
+        .with_status("git", &["diff", "--quiet", "--staged"], &[], false, repo, 1)
+        .with_status(
+            "git",
+            &["checkout", "--quiet", "--", "."],
+            &[],
+            false,
+            repo,
+            0,
+        )
+        .with_status(
+            "git",
+            &["clean", "--force", "--quiet", "-d"],
+            &[],
+            false,
+            repo,
+            0,
+        )
+        .with_status(
+            "git",
+            &["checkout-index", "--all", "--force", "--quiet"],
+            &[],
+            false,
+            repo,
+            0,
+        )
+        .with_output("git", &["status", "--porcelain=v1"], repo, "M  file.txt\n")
+        .with_status("bash", &["-c", "true"], &[], false, repo, 0)
+        .with_output("git", &["status", "--porcelain=v1"], repo, "M  file.txt\n")
+        .with_output("git", &metadata, repo, TEST_COMMIT_META)
+        .with_status("git", &commit, &TEST_COMMIT_ENVS, false, repo, 0)
+        .with_output("git", &["rev-parse", "HEAD^{tree}"], repo, TREE_EXPECTED_NL);
+    expected_calls.extend([
+        query(&["rev-parse", "--git-dir"]),
+        effect("git", &["diff", "--quiet", "--staged"], &[]),
+        effect("git", &["checkout", "--quiet", "--", "."], &[]),
+        effect("git", &["clean", "--force", "--quiet", "-d"], &[]),
+        effect(
+            "git",
+            &["checkout-index", "--all", "--force", "--quiet"],
+            &[],
+        ),
+        query(&["status", "--porcelain=v1"]),
+        effect("bash", &["-c", "true"], &[]),
+        query(&["status", "--porcelain=v1"]),
+        query(&metadata),
+        effect("git", &commit, &TEST_COMMIT_ENVS),
+        query(&["rev-parse", "HEAD^{tree}"]),
+    ]);
+
+    fixture.runner.inner = inner;
+    fixture.expected_calls = expected_calls;
+    fixture.saved.clear();
+    fixture
 }

@@ -14,6 +14,7 @@ use crate::git_factor::tests::start_contracts::{DirectStart, GateCase, query};
 use crate::git_factor::tests::status_contracts;
 use crate::git_factor::tests::verify_public_abort_fallback_refusal;
 use crate::git_factor::tests::verify_public_status_phase_refusal;
+use crate::git_factor::tests::{MessageCase, arrange_message, arrange_message_completion};
 use crate::git_factor::tests::{
     verify_public_abort, verify_public_completion, verify_public_inactive_status,
     verify_public_status,
@@ -1133,11 +1134,11 @@ proptest! {
     }
 
     #[test]
-    fn baseline_message_without_an_operation_is_refused(
+    fn baseline_message_with_start_gate_is_refused(
         gate in "[a-zA-Z][a-zA-Z0-9 ]{0,40}",
         message in "[a-zA-Z][a-zA-Z0-9 ]{0,40}",
     ) {
-        refusal(&["--exec", &gate, "--message", &message], "--message can only be used with --continue or --finish");
+        refusal(&["--exec", &gate, "--message", &message], "--message cannot be combined with --exec or COMMIT");
     }
 }
 
@@ -1183,10 +1184,20 @@ proptest! {
     }
 
     #[test]
-    fn message_only_without_exec_preserves_generated_refusals(
+    fn message_only_without_an_active_session_preserves_generated_refusals(
         message in "[a-zA-Z][a-zA-Z0-9 ]{0,40}",
     ) {
-        refusal(&["--message", &message], "--exec <COMMAND> is required when starting a factor session");
+        let fixture = arrange_message(MessageCase::NoSession);
+        let arguments = ["git-factor", "--message", message.as_str()].map(OsString::from);
+
+        let code = main_entry_with_vec(fixture.ctx().io, Ok(fixture.ctx()), &arguments);
+
+        prop_assert_eq!(code, EXIT_USAGE);
+        prop_assert_eq!(fixture.stdout(), "");
+        prop_assert_eq!(fixture.stderr(), "no active factor session\n");
+        prop_assert_eq!(fixture.observed_requests(), fixture.expected_requests());
+        prop_assert_eq!(fixture.protected_bytes(), b"user bytes\0\n");
+        prop_assert!(!fixture.session_active());
     }
 }
 
@@ -1530,5 +1541,55 @@ proptest! {
         finish in any::<bool>(), previous in RangeInclusive::<u8>::new(0, u8::MAX - 1),
     ) {
         verify_public_completion(finish, previous);
+    }
+}
+
+proptest! {
+    #[test]
+    fn message_submission_preserves_explicit_form_and_paragraphs(
+        explicit in any::<bool>(),
+        paragraphs in prop::collection::vec("[a-z]{1,20}", 1..=3),
+    ) {
+        let fixture = arrange_message_completion(&paragraphs);
+        let mut arguments = vec![OsString::from("git-factor")];
+        if explicit {
+            arguments.push(OsString::from("--continue"));
+        }
+        for paragraph in &paragraphs {
+            arguments.extend([OsString::from("--message"), OsString::from(paragraph.as_str())]);
+        }
+
+        let code = main_entry_with_vec(fixture.ctx().io, Ok(fixture.ctx()), &arguments);
+
+        prop_assert_eq!(code, EXIT_OK);
+        prop_assert_eq!(fixture.stdout(), "{\"operation\":\"continue\",\"split_count\":1}\n");
+        prop_assert_eq!(fixture.stderr(), "");
+        prop_assert_eq!(fixture.observed_requests(), fixture.expected_requests());
+        prop_assert_eq!(fixture.protected_bytes(), b"user bytes\0\n");
+        prop_assert!(!fixture.session_active());
+    }
+}
+
+proptest! {
+    #[test]
+    fn message_submission_requires_staging(
+        paragraphs in prop::collection::vec("[a-z]{1,20}", 1..=3),
+    ) {
+        let fixture = arrange_message(MessageCase::NoStaged);
+        let mut arguments = vec![OsString::from("git-factor")];
+        for paragraph in &paragraphs {
+            arguments.extend([OsString::from("--message"), OsString::from(paragraph.as_str())]);
+        }
+
+        let code = main_entry_with_vec(fixture.ctx().io, Ok(fixture.ctx()), &arguments);
+
+        prop_assert_eq!(code, EXIT_USAGE);
+        prop_assert_eq!(fixture.stdout(), "");
+        prop_assert_eq!(fixture.stderr(), "no staged changes to commit\nNEXT: stage exactly one atomic change, then rerun:\n  git factor --continue --message \"type: description\"\n");
+        prop_assert_eq!(fixture.observed_requests(), fixture.expected_requests());
+        prop_assert_eq!(fixture.protected_bytes(), b"user bytes\0\n");
+        for (path, bytes) in fixture.saved_facts() {
+            prop_assert_eq!(fs::read(path).or_abort("saved fact"), bytes);
+        }
     }
 }

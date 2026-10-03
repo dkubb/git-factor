@@ -2235,11 +2235,14 @@ fn run_with_args_vec(ctx: &Ctx<'_>, args: Vec<OsString>) -> Result<i32, FactorEr
         return cmd_finish_in(ctx, cli.message());
     }
 
-    if cli.continue_flag() {
+    if cli.continue_flag() || !cli.message().is_empty() {
         if has_start_args() {
-            return Err(FactorError::Usage(non_empty_msg(
-                "--continue cannot be combined with --exec or COMMIT".to_owned(),
-            )));
+            let diagnostic = if cli.continue_flag() {
+                "--continue cannot be combined with --exec or COMMIT"
+            } else {
+                "--message cannot be combined with --exec or COMMIT"
+            };
+            return Err(FactorError::Usage(non_empty_msg(diagnostic.to_owned())));
         }
         if let Some(messages) = NonEmpty::from_vec(cli.message().to_vec()) {
             return cmd_continue_in(ctx, &messages);
@@ -2263,11 +2266,6 @@ fn run_with_args_vec(ctx: &Ctx<'_>, args: Vec<OsString>) -> Result<i32, FactorEr
             "--exec <COMMAND> is required when starting a factor session".to_owned(),
         ))
     })?;
-    if !cli.message().is_empty() {
-        return Err(FactorError::Usage(non_empty_msg(
-            "--message can only be used with --continue or --finish".to_owned(),
-        )));
-    }
     trace_note(ctx, "factor_cmd_start", &[]);
     if let Some(commits) = NonEmpty::from_vec(cli.commits().to_vec()) {
         let state_dir = cmd_start_prep_in(ctx)?;

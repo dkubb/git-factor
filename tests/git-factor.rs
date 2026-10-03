@@ -504,7 +504,7 @@ Commit Options:
   -m, --message <MSG>
           Commit message for the split commit.
           
-          Required with --continue. Optional with --finish (defaults to the original commit message). Multiple --message flags produce separate paragraphs, matching git commit behavior.
+          Submits staged changes with or without --continue. Optional with --finish (defaults to the original commit message). Multiple --message flags produce separate paragraphs, matching git commit behavior.
 
 Session Control:
       --continue
@@ -1011,19 +1011,23 @@ fi
     }
 
     #[test]
-    fn start_requires_exec_command_when_only_message_is_provided() {
-        let dir = init_repo();
-        let repo = dir.path();
-
-        commit_file(repo, "file.txt", "one\n", "chore: base");
-
-        run_git_factor(
-            repo,
-            &["--message", "test: msg"],
-            GitFactorExpectation::default()
-                .code(EXIT_USAGE)
-                .stderr("--exec <COMMAND> is required when starting a factor session\n"),
-        );
+    fn message_only_without_session_preserves_native_state() {
+        let directory = init_repo();
+        let repo = directory.path();
+        commit_file(repo, "base", "base\n", "Base");
+        write_file(repo, "unrelated", "user bytes\n");
+        let head = git(repo, &["rev-parse", "HEAD"]);
+        let index = fs::read(repo.join(".git/index")).or_abort();
+        let mut expectation = GitFactorExpectation::default()
+            .code(EXIT_USAGE)
+            .stderr("no active factor session\n")
+            .factor_state_exists(false);
+        expectation.stdout = Some(StreamExpectation::new_exact(String::new()));
+        run_git_factor(repo, &["--message", "Selected atom"], expectation);
+        assert_eq!(git(repo, &["rev-parse", "HEAD"]), head);
+        assert_eq!(fs::read(repo.join(".git/index")).or_abort(), index);
+        assert_eq!(fs::read(repo.join("base")).or_abort(), b"base\n");
+        assert_eq!(fs::read(repo.join("unrelated")).or_abort(), b"user bytes\n");
     }
 
     #[test]
@@ -1347,7 +1351,7 @@ fi
             &["--exec", "true", "--message", "test: msg", "HEAD"],
             GitFactorExpectation::default()
                 .code(EXIT_USAGE)
-                .stderr("--message can only be used with --continue or --finish\n"),
+                .stderr("--message cannot be combined with --exec or COMMIT\n"),
         );
     }
 
@@ -5871,5 +5875,103 @@ fi
         );
         assert!(!repo.join(".git/rebase-merge").exists());
         assert!(!repo.join(".git/rebase-apply").exists());
+    }
+
+    #[test]
+    fn message_only_submission_and_explicit_continue_preserve_paragraphs_and_final_tree() {
+        for explicit in [false, true] {
+            let directory = init_repo();
+            let repo = directory.path();
+            commit_file(repo, "base", "base\n", "Base");
+            write_file(repo, "left", "left\n");
+            write_file(repo, "right", "right\n");
+            git(repo, &["add", "left", "right"]);
+            git(repo, &["commit", "-m", "Selected source"]);
+            let original_tree = git(repo, &["rev-parse", "HEAD^{tree}"]);
+            run_git_factor(
+                repo,
+                &["--exec", "true", "HEAD"],
+                GitFactorExpectation::default(),
+            );
+            git(repo, &["add", "left"]);
+            let mut intermediate = GitFactorExpectation::default().factor_state_exists(true);
+            intermediate.stderr = Some(StreamExpectation::new_exact(String::new()));
+            run_git_factor(
+                repo,
+                &["--message", "First atom", "--message", "First rationale"],
+                intermediate,
+            );
+            assert_eq!(
+                git(repo, &["show", "--format=%B", "--no-patch", "HEAD"]),
+                "First atom\n\nFirst rationale"
+            );
+            assert_eq!(git(repo, &["show", "HEAD:left"]), "left");
+            assert_eq!(fs::read(repo.join("right")).or_abort(), b"right\n");
+            git(repo, &["add", "right"]);
+            let mut final_arguments =
+                vec!["--message", "Second atom", "--message", "Second rationale"];
+            if explicit {
+                final_arguments.insert(0, "--continue");
+            }
+            let mut terminal = GitFactorExpectation::default()
+                .stdout("{\"operation\":\"continue\",\"split_count\":2}\n")
+                .factor_state_exists(false);
+            terminal.stderr = Some(StreamExpectation::new_exact(String::new()));
+            run_git_factor(repo, &final_arguments, terminal);
+            assert_eq!(
+                git(repo, &["show", "--format=%B", "--no-patch", "HEAD"]),
+                "Second atom\n\nSecond rationale"
+            );
+            assert_eq!(
+                git(repo, &["show", "--format=%B", "--no-patch", "HEAD~1"]),
+                "First atom\n\nFirst rationale"
+            );
+            assert_eq!(git(repo, &["rev-parse", "HEAD^{tree}"]), original_tree);
+            assert_eq!(git(repo, &["status", "--porcelain=v1"]), "");
+        }
+    }
+
+    #[test]
+    fn message_only_without_staging_preserves_native_session() {
+        let directory = init_repo();
+        let repo = directory.path();
+        commit_file(repo, "base", "base\n", "Base");
+        commit_file(repo, "atom", "atom\n", "Selected source");
+        run_git_factor(
+            repo,
+            &["--exec", "true", "HEAD"],
+            GitFactorExpectation::default(),
+        );
+        let head = git(repo, &["rev-parse", "HEAD"]);
+        let index = fs::read(repo.join(".git/index")).or_abort();
+        let saved = [
+            "commits",
+            "current_index",
+            "exec",
+            "expected_tree",
+            "is_root",
+            "phase",
+            "requires_rebase",
+            "split_count",
+            "start_head",
+            "started_rebase",
+        ]
+        .map(|key| (key, fs::read(repo.join(".git/factor").join(key)).or_abort()));
+        let mut expectation = GitFactorExpectation::default()
+            .code(EXIT_USAGE)
+            .stderr("no staged changes to commit\nNEXT: stage exactly one atomic change, then rerun:\n  git factor --continue --message \"type: description\"\n")
+            .factor_state_exists(true);
+        expectation.stdout = Some(StreamExpectation::new_exact(String::new()));
+        run_git_factor(repo, &["--message", "Selected atom"], expectation);
+        assert_eq!(git(repo, &["rev-parse", "HEAD"]), head);
+        assert_eq!(fs::read(repo.join(".git/index")).or_abort(), index);
+        for (key, bytes) in saved {
+            assert_eq!(
+                fs::read(repo.join(".git/factor").join(key)).or_abort(),
+                bytes
+            );
+        }
+        assert_eq!(fs::read(repo.join("base")).or_abort(), b"base\n");
+        assert_eq!(fs::read(repo.join("atom")).or_abort(), b"atom\n");
     }
 }

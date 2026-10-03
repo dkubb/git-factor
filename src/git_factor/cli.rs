@@ -128,9 +128,9 @@ pub(in crate::git_factor) struct Cli {
 
     /// Commit message for the split commit.
     ///
-    /// Required with --continue. Optional with --finish (defaults to
-    /// the original commit message). Multiple --message flags produce separate
-    /// paragraphs, matching git commit behavior.
+    /// Submits staged changes with or without --continue. Optional with --finish
+    /// (defaults to the original commit message). Multiple --message flags produce
+    /// separate paragraphs, matching git commit behavior.
     #[arg(
         long = "message",
         short = 'm',
