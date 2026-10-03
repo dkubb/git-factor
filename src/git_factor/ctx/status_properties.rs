@@ -28,15 +28,11 @@ mod real_runner {
                     );
 
                     prop_assert_eq!(actual.status.code(), Some(CHILD_SUCCESS));
-                    let stdout = if quiet {
-                        "\nrunning 1 test\n".to_owned()
-                    } else {
-                        format!("\nrunning 1 test\nstdout:<{payload}>\n")
-                    };
+                    let stdout = "\nrunning 1 test\n";
                     let stderr = if quiet {
                         String::new()
                     } else {
-                        format!("stderr:<{payload}>\n")
+                        format!("stdout:<{payload}>\nstderr:<{payload}>\n")
                     };
                     prop_assert_eq!(actual.stdout, stdout.as_bytes());
                     prop_assert_eq!(actual.stderr, stderr.as_bytes());

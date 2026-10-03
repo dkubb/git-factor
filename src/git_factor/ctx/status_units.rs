@@ -26,8 +26,8 @@ mod real_runner {
                 );
 
                 assert_eq!(actual.status.code(), Some(CHILD_SUCCESS));
-                assert_eq!(actual.stdout, b"\nrunning 1 test\nstdout:<a $; b>\n");
-                assert_eq!(actual.stderr, b"stderr:<a $; b>\n");
+                assert_eq!(actual.stdout, b"\nrunning 1 test\n");
+                assert_eq!(actual.stderr, b"stdout:<a $; b>\nstderr:<a $; b>\n");
                 assert_eq!(status_contracts::receipt(root.path()), b"exit:7\n");
                 assert_eq!(
                     status_contracts::native(root.path()).or_abort("status contract arrangement"),

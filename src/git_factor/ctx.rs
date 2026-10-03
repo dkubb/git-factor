@@ -197,6 +197,8 @@ impl Runner for RealRunner {
         }
         if quiet {
             command.stdout(Stdio::null()).stderr(Stdio::null());
+        } else {
+            command.stdout(Stdio::from(io::stderr()));
         }
         command.status()
     }
