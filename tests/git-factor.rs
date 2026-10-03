@@ -575,8 +575,8 @@ EXAMPLES:
 "
     }
 
-    fn expected_completion_stdout_suffix(split_count: u32) -> String {
-        format!("FACTOR: Complete. Final commit split into {split_count} commits.\n")
+    fn expected_completion_stdout_suffix(operation: &str, split_count: u32) -> String {
+        format!("{{\"operation\":\"{operation}\",\"split_count\":{split_count}}}\n")
     }
 
     fn execute_expectation(expectation: GitFactorExpectation) {
@@ -1076,7 +1076,8 @@ fi
         run_git_factor(
             repo,
             &["--continue", "--message", "test: split"],
-            GitFactorExpectation::default().stdout_suffix(expected_completion_stdout_suffix(1)),
+            GitFactorExpectation::default()
+                .stdout_suffix(expected_completion_stdout_suffix("continue", 1)),
         );
     }
 
@@ -2012,7 +2013,11 @@ fi
 
         let expected_tree = git(repo, &["rev-parse", "HEAD^{tree}"]);
 
-        start_session(repo);
+        run_git_factor(
+            repo,
+            &["--exec", "printf 'completion gate stdout\\n'", "HEAD"],
+            GitFactorExpectation::default(),
+        );
 
         // Stage all remaining changes and commit the slice.
         git(repo, &["add", "--all"]);
@@ -2020,6 +2025,8 @@ fi
             repo,
             &["--continue", "--message", "test: split"],
             GitFactorExpectation::default()
+                .stdout(expected_completion_stdout_suffix("continue", 1))
+                .stderr("completion gate stdout\n")
                 .git_output(&["rev-parse", "HEAD^{tree}"], expected_tree)
                 .git_status_porcelain("")
                 .factor_state_exists(false)
@@ -2907,7 +2914,8 @@ HINTS:
         run_git_factor(
             repo,
             &["--finish", "--message", "test: done"],
-            GitFactorExpectation::default().stdout_suffix(expected_completion_stdout_suffix(1)),
+            GitFactorExpectation::default()
+                .stdout_suffix(expected_completion_stdout_suffix("finish", 1)),
         );
     }
 
@@ -3028,7 +3036,7 @@ fi
         assert_eq!(finished.status.code(), Some(EXIT_OK));
         assert_eq!(
             finished.stdout,
-            b"FACTOR: Complete. Final commit split into 2 commits.\n",
+            b"{\"operation\":\"finish\",\"split_count\":2}\n",
         );
         assert_eq!(finished.stderr, b"");
         assert_eq!(git(repo, &["rev-parse", "refs/heads/other"]), selected);
@@ -3079,7 +3087,7 @@ fi
         assert_eq!(finished.status.code(), Some(EXIT_OK));
         assert_eq!(
             finished.stdout,
-            b"FACTOR: Complete. Final commit split into 2 commits.\n",
+            b"{\"operation\":\"finish\",\"split_count\":2}\n",
         );
         assert_eq!(finished.stderr, b"");
         assert_eq!(git(repo, &["rev-parse", "refs/heads/other"]), accepted);
@@ -3132,7 +3140,7 @@ fi
         assert_eq!(finished.status.code(), Some(EXIT_OK));
         assert_eq!(
             finished.stdout,
-            b"FACTOR: Complete. Final commit split into 2 commits.\n"
+            b"{\"operation\":\"finish\",\"split_count\":2}\n"
         );
         assert_eq!(finished.stderr, b"");
         assert_eq!(git(repo, &["rev-parse", "HEAD^{tree}"]), original_tree);
@@ -3153,6 +3161,47 @@ fi
     }
 
     #[test]
+    fn terminal_continue_emits_only_json_with_native_gate_output_on_stderr() {
+        let directory = init_repo();
+        let repo = directory.path();
+        commit_file(repo, "file.txt", "base\n", "Base");
+        commit_file(repo, "file.txt", "base\nselected\n", "Selected source");
+        let original_tree = git(repo, &["rev-parse", "HEAD^{tree}"]);
+        git(repo, &["branch", "unrelated", "HEAD~1"]);
+        let unrelated = git(repo, &["rev-parse", "refs/heads/unrelated"]);
+        run_git_factor(
+            repo,
+            &["--exec", "printf 'completion gate output\n'", "HEAD"],
+            GitFactorExpectation::default(),
+        );
+        git(repo, &["add", "file.txt"]);
+
+        run_git_factor(
+            repo,
+            &["--continue", "--message", "Complete selected source"],
+            GitFactorExpectation::default()
+                .stdout("{\"operation\":\"continue\",\"split_count\":1}\n")
+                .stderr("completion gate output\n")
+                .factor_state_exists(false)
+                .rebase_merge_exists(false)
+                .rebase_apply_exists(false)
+                .git_status_porcelain(""),
+        );
+
+        assert_eq!(git(repo, &["rev-parse", "HEAD^{tree}"]), original_tree);
+        assert_eq!(git(repo, &["write-tree"]), original_tree);
+        assert_eq!(
+            fs::read(repo.join("file.txt")).or_abort(),
+            b"base\nselected\n"
+        );
+        assert_eq!(git(repo, &["rev-parse", "refs/heads/unrelated"]), unrelated);
+        assert_eq!(
+            git(repo, &["show", "--format=%B", "--no-patch", "HEAD"]),
+            "Complete selected source"
+        );
+    }
+
+    #[test]
     fn finish_ignores_exec_gate_and_completes_session() {
         let dir = init_repo();
         let repo = dir.path();
@@ -3167,7 +3216,7 @@ fi
             repo,
             &["--finish"],
             GitFactorExpectation::default()
-                .stdout_suffix(expected_completion_stdout_suffix(1))
+                .stdout_suffix(expected_completion_stdout_suffix("finish", 1))
                 .factor_state_exists(false)
                 .path_exists(".git/factor", false),
         );
@@ -3540,7 +3589,7 @@ HINTS:
             repo,
             &["--continue", "--message", "test: split b"],
             GitFactorExpectation::default()
-                .stdout_suffix(expected_completion_stdout_suffix(2))
+                .stdout_suffix(expected_completion_stdout_suffix("continue", 2))
                 .git_output(&["rev-parse", "HEAD^{tree}"], expected_tree),
         );
     }
@@ -3570,7 +3619,8 @@ HINTS:
         run_git_factor(
             repo,
             &["--continue", "--message", "test: split a"],
-            GitFactorExpectation::default().stdout_suffix(expected_completion_stdout_suffix(1)),
+            GitFactorExpectation::default()
+                .stdout_suffix(expected_completion_stdout_suffix("continue", 1)),
         );
     }
 
@@ -3616,7 +3666,7 @@ HINTS:
             repo,
             &["--continue", "--message", "test: split a"],
             GitFactorExpectation::default()
-                .stdout_suffix(expected_completion_stdout_suffix(1))
+                .stdout_suffix(expected_completion_stdout_suffix("continue", 1))
                 .rebase_merge_exists(false),
         );
     }
@@ -3728,7 +3778,7 @@ HINTS:
             repo,
             &["--continue", "--message", "test: root split"],
             GitFactorExpectation::default()
-                .stdout_suffix(expected_completion_stdout_suffix(1))
+                .stdout_suffix(expected_completion_stdout_suffix("continue", 1))
                 .git_output(&["rev-parse", "HEAD^{tree}"], expected_tree)
                 .git_output_non_empty(&["ls-tree", root.as_str()]),
         );
@@ -3749,7 +3799,8 @@ HINTS:
         run_git_factor_with_env(
             repo,
             &["--continue", "--message", "test: root split"],
-            GitFactorExpectation::default().stdout_suffix(expected_completion_stdout_suffix(1)),
+            GitFactorExpectation::default()
+                .stdout_suffix(expected_completion_stdout_suffix("continue", 1)),
             "GIT_FACTOR_TRACE_LOG",
             trace_path.as_os_str().to_os_string(),
         );
@@ -3880,7 +3931,8 @@ fi
         run_git_factor_with_prefixed_path(
             repo,
             &["--continue", "--message", "test: root split"],
-            GitFactorExpectation::default().stdout_suffix(expected_completion_stdout_suffix(1)),
+            GitFactorExpectation::default()
+                .stdout_suffix(expected_completion_stdout_suffix("continue", 1)),
             prefixed_path,
         );
     }
@@ -5190,7 +5242,7 @@ fi
             repo,
             &["--continue", "--message", "test: first"],
             GitFactorExpectation::default()
-                .stdout_suffix(expected_completion_stdout_suffix(1))
+                .stdout_suffix(expected_completion_stdout_suffix("continue", 1))
                 .factor_state_exists(false)
                 .path_exists(".git/factor", false),
             "PATH",
@@ -5590,7 +5642,7 @@ fi
         assert_eq!(output.status.code(), Some(EXIT_OK));
         assert_eq!(
             output.stdout,
-            b"FACTOR: Complete. Final commit split into 1 commits.\n"
+            b"{\"operation\":\"continue\",\"split_count\":1}\n"
         );
         assert_eq!(output.stderr, b"");
         assert_eq!(fs::read(repo.join("sub/victim")).or_abort(), bytes);

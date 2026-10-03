@@ -241,3 +241,15 @@ followed by a newline. `rebase.in_progress` is observed after factor state is
 removed. When true, `actions.abort_rebase` contains `["git", "rebase", "--abort"]`;
 otherwise `actions` is empty. Existing reset, cleanup and external-rebase
 behavior is unchanged.
+
+## Completion Output
+
+A successful final `git factor --continue --message '…'` or `git factor --finish`
+reports `{"operation":"continue","split_count":N}` or the
+same object with `operation` equal to `finish`, followed by a newline. `N` is the
+existing positive count of commits created for the final selected commit. The
+existing completion, cleanup and replay behavior is unchanged.
+
+Only terminal completion results use this JSON form. Non-final `--continue`
+results, start, retry, and failure output retain their existing human-readable
+text. Gate output during terminal `--continue` is forwarded to stderr.

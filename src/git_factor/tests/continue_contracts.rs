@@ -635,7 +635,7 @@ impl Continuation {
     pub(in crate::git_factor) fn expected_stdout(&self) -> String {
         match self.case {
             ContinueCase::Complete => format!(
-                "FACTOR: Complete. Final commit split into {} commits.\n",
+                "{{\"operation\":\"continue\",\"split_count\":{}}}\n",
                 self.split_count
                     .checked_add(1)
                     .or_abort("admitted successful split count")

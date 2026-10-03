@@ -1,3 +1,22 @@
+mod completed {
+    use super::super::*;
+    use core::ops::RangeInclusive;
+    use proptest::prelude::*;
+
+    proptest! {
+        #[test]
+        fn reports_generated_positive_count_and_command(
+            finish in any::<bool>(), count in RangeInclusive::<u8>::new(1, u8::MAX),
+        ) {
+            let operation = if finish { CompletionOperation::Finish } else { CompletionOperation::Continue };
+            let positive_count = NonZeroU8::new(count).or_abort("generated positive completion count");
+            tests::verify_completed(operation, positive_count);
+        }
+    }
+
+    use crate::test_support::OrAbort as _;
+}
+
 mod aborted {
     use super::super::*;
     use proptest::prelude::*;

@@ -1271,7 +1271,7 @@ fn verify_streams(
     let final_count = previous.checked_add(1);
     let complete = if failure.is_none() || matches!(case, FinishCase::Output(2)) {
         format!(
-            "FACTOR: Complete. Final commit split into {} commits.",
+            "{{\"operation\":\"finish\",\"split_count\":{}}}",
             final_count.or_abort("admitted positive completed count")
         )
     } else {

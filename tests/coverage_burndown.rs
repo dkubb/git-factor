@@ -117,7 +117,7 @@ mod tests {
             .assert()
             .code(EXIT_OK)
             .stdout(predicate::str::contains(
-                "FACTOR: Complete. Final commit split into 1 commits.",
+                "{\"operation\":\"continue\",\"split_count\":1}",
             ))
             .stderr(predicate::str::is_empty());
     }
@@ -442,7 +442,7 @@ fi
             .assert()
             .code(EXIT_OK)
             .stdout(predicate::str::contains(
-                "FACTOR: Complete. Final commit split into 1 commits.",
+                "{\"operation\":\"continue\",\"split_count\":1}",
             ))
             .stderr(predicate::str::is_empty());
     }
@@ -619,7 +619,7 @@ fi
             .assert()
             .code(EXIT_OK)
             .stdout(predicate::str::contains(
-                "FACTOR: Complete. Final commit split into 2 commits.",
+                "{\"operation\":\"continue\",\"split_count\":2}",
             ))
             .stderr(predicate::str::is_empty());
     }
@@ -736,7 +736,7 @@ fi
             .assert()
             .code(EXIT_OK)
             .stdout(predicate::str::contains(
-                "FACTOR: Complete. Final commit split into 1 commits.",
+                "{\"operation\":\"finish\",\"split_count\":1}",
             ))
             .stderr(predicate::str::is_empty());
     }

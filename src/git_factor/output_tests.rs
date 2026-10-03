@@ -1,3 +1,15 @@
+mod completed {
+    use super::*;
+
+    #[test]
+    fn reports_both_commands_at_positive_count_boundaries() {
+        for operation in [CompletionOperation::Continue, CompletionOperation::Finish] {
+            verify_completed(operation, NonZeroU8::MIN);
+            verify_completed(operation, NonZeroU8::MAX);
+        }
+    }
+}
+
 mod aborted {
     use super::*;
 
@@ -213,6 +225,60 @@ pub(in crate::git_factor::output) fn verify_aborted(in_progress: bool) {
         match fail_at {
             None => {
                 result.or_abort("abort result");
+                assert_eq!(*capture.bytes.borrow(), format!("{expected}\n"));
+                assert_eq!(capture.calls.get(), 2);
+            }
+            Some(1) => {
+                assert!(
+                    matches!(result, Err(FactorError::Io(error)) if error.to_string() == "status write failure")
+                );
+                assert_eq!(*capture.bytes.borrow(), "");
+                assert_eq!(capture.calls.get(), 1);
+            }
+            Some(2) => {
+                assert!(
+                    matches!(result, Err(FactorError::Io(error)) if error.to_string() == "status write failure")
+                );
+                assert_eq!(*capture.bytes.borrow(), expected);
+                assert_eq!(capture.calls.get(), 2);
+            }
+            Some(_) => unreachable!("closed write boundaries"),
+        }
+        assert_eq!(runner.0.get(), 0);
+    }
+}
+
+/// Independent completion result and write-boundary oracle.
+#[expect(
+    clippy::unreachable,
+    reason = "the local failure loop admits only literal None, Some(1), and Some(2); no caller supplies a write boundary"
+)]
+pub(in crate::git_factor::output) fn verify_completed(
+    operation: CompletionOperation,
+    count: NonZeroU8,
+) {
+    let command = match operation {
+        CompletionOperation::Continue => "continue",
+        CompletionOperation::Finish => "finish",
+    };
+    let expected = format!("{{\"operation\":\"{command}\",\"split_count\":{count}}}");
+    for fail_at in [None, Some(1), Some(2)] {
+        let capture = Capture {
+            fail_at,
+            ..Capture::default()
+        };
+        let runner = NoQueries::default();
+        let ctx = Ctx {
+            cwd: PathBuf::from("."),
+            env: &REAL_ENV,
+            fs: &REAL_FS,
+            io: &capture,
+            runner: &runner,
+        };
+        let result = completed(&ctx, operation, count);
+        match fail_at {
+            None => {
+                result.or_abort("completion result");
                 assert_eq!(*capture.bytes.borrow(), format!("{expected}\n"));
                 assert_eq!(capture.calls.get(), 2);
             }

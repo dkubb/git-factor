@@ -1305,12 +1305,12 @@ fn cmd_continue_in(ctx: &Ctx<'_>, messages: &NonEmpty<NonEmptyString>) -> Result
     let expected_tree = session.expected_tree()?;
     if trace_tree_convergence(ctx, "tree_compare_continue", &head_tree, &expected_tree) {
         let AdvanceOutcome::Completed { final_split_count } = session.advance_to_next_commit()?;
-        return ctx
-            .outln(&format!(
-                "FACTOR: Complete. Final commit split into {} commits.",
-                final_split_count.get()
-            ))
-            .map(|()| EXIT_OK);
+        return output::completed(
+            ctx,
+            output::CompletionOperation::Continue,
+            final_split_count,
+        )
+        .map(|()| EXIT_OK);
     }
 
     let (stat_output, untracked_output) =
@@ -1551,10 +1551,7 @@ fn cmd_finish_in(ctx: &Ctx<'_>, messages: &[NonEmptyString]) -> Result<i32, Fact
     // Update split count and complete the factor span.
     session.increment_split_count()?;
     let AdvanceOutcome::Completed { final_split_count } = session.advance_to_next_commit()?;
-    ctx.outln(&format!(
-        "FACTOR: Complete. Final commit split into {} commits.",
-        final_split_count.get()
-    ))?;
+    output::completed(ctx, output::CompletionOperation::Finish, final_split_count)?;
 
     Ok(EXIT_OK)
 }

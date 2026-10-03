@@ -7,9 +7,30 @@ mod proptests;
 #[path = "output_tests.rs"]
 mod tests;
 
+use core::num::NonZeroU8;
+
 use serde::Serialize;
 
 use super::{CommitSha, Ctx, CurrentIndex, FactorError, SessionPhase, SplitCount, StateBool};
+
+/// Existing commands that complete a selected commit's split.
+#[derive(Clone, Copy, Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(in crate::git_factor) enum CompletionOperation {
+    /// Submission consumed the remaining change.
+    Continue,
+    /// The explicit finish command retained the remaining change.
+    Finish,
+}
+
+/// A completed split has a proved positive commit count.
+#[derive(Serialize)]
+struct Completed {
+    /// Command producing the result.
+    operation: CompletionOperation,
+    /// Positive count admitted by the existing completion boundary.
+    split_count: NonZeroU8,
+}
 
 /// Rebase requirements and the native observation.
 #[derive(Clone, Copy, Debug, Serialize)]
@@ -141,6 +162,25 @@ pub(in crate::git_factor) fn aborted(ctx: &Ctx<'_>, in_progress: bool) -> Result
         },
     };
     let json = serde_json::to_string(&result).expect("abort facts are JSON-compatible");
+    ctx.outln(&json)
+}
+
+/// Writes a complete result using the existing positive split count.
+#[expect(
+    clippy::expect_used,
+    clippy::unwrap_in_result,
+    reason = "the closed completion representation contains only JSON-compatible strings and a positive integer"
+)]
+pub(in crate::git_factor) fn completed(
+    ctx: &Ctx<'_>,
+    operation: CompletionOperation,
+    split_count: NonZeroU8,
+) -> Result<(), FactorError> {
+    let result = Completed {
+        operation,
+        split_count,
+    };
+    let json = serde_json::to_string(&result).expect("completion facts are JSON-compatible");
     ctx.outln(&json)
 }
 
