@@ -4261,29 +4261,6 @@ fn public_continue_reports_checkout_index_failure() {
 }
 
 #[test]
-fn public_continue_reports_deleted_paths_failure() {
-    use super::continue_contracts::{Continuation, ContinueFault};
-    let fixture = Continuation::with_fault(&"a".repeat(SHA_LEN), ContinueFault::DeletedPaths);
-    let before = fixture.protected_bytes();
-    let args = ["git-factor", "--continue", "--message", "test: message"].map(OsString::from);
-
-    let code = main_entry_with_vec(fixture.ctx().io, Ok(fixture.ctx()), &args);
-
-    assert_eq!(code, EXIT_SOFTWARE);
-    assert_eq!(fixture.stdout(), "");
-    assert_eq!(
-        fixture.stderr(),
-        Continuation::fault_stderr(ContinueFault::DeletedPaths)
-    );
-    assert_eq!(fixture.journal(), fixture.expected_journal());
-    assert_eq!(fixture.protected_bytes(), before);
-    assert_eq!(
-        fixture.full_effect_requests(),
-        fixture.expected_effect_requests()
-    );
-}
-
-#[test]
 fn public_continue_reports_before_status_failure() {
     use super::continue_contracts::{Continuation, ContinueFault};
     let fixture = Continuation::with_fault(&"a".repeat(SHA_LEN), ContinueFault::BeforeStatus);
@@ -5031,11 +5008,14 @@ fn public_continue_reports_remainder_write_failure() {
 }
 
 #[test]
-fn public_continue_applies_staged_deletions_before_the_gate() {
+fn public_continue_makes_no_filesystem_removal() {
     use super::continue_contracts::Continuation;
-    let fixture = Continuation::with_deleted(&"a".repeat(SHA_LEN), 0);
+    let fixture = Continuation::new(
+        &"a".repeat(SHA_LEN),
+        0,
+        super::continue_contracts::ContinueCase::Complete,
+    );
     let bytes = fixture.protected_bytes();
-    assert!(fixture.deleted_exists());
     let args = ["git-factor", "--continue", "--message", "test: message"].map(OsString::from);
 
     let code = main_entry_with_vec(fixture.ctx().io, Ok(fixture.ctx()), &args);
@@ -5046,7 +5026,6 @@ fn public_continue_applies_staged_deletions_before_the_gate() {
         "FACTOR: Complete. Final commit split into 1 commits.\n"
     );
     assert_eq!(fixture.stderr(), "");
-    assert!(!fixture.deleted_exists());
     assert_eq!(fixture.journal(), fixture.expected_journal());
     assert_eq!(fixture.protected_bytes(), bytes);
     assert_eq!(
@@ -5054,10 +5033,7 @@ fn public_continue_applies_staged_deletions_before_the_gate() {
         fixture.expected_effect_requests()
     );
     assert!(!fixture.session_active());
-    assert_eq!(
-        fixture.deleted_requests(),
-        vec![PathBuf::from("deleted.txt")]
-    );
+    assert_eq!(fixture.deleted_requests(), Vec::<PathBuf>::new());
 }
 
 #[test]

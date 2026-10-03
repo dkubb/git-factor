@@ -5222,7 +5222,7 @@ fi
     }
 
     #[test]
-    fn continue_materializes_deleted_paths_reported_by_git_diff() {
+    fn continue_cleans_untracked_files_before_the_gate() {
         let dir = init_repo();
         let repo = dir.path();
 
@@ -5233,31 +5233,19 @@ fi
         git(repo, &["add", "--all"]);
         write_file(repo, "deleted-path.txt", "ephemeral\n");
 
-        let (wrap_dir, wrap_bin) = make_git_wrapper_named(
-            "git",
-            r#"if [ "${1-}" = "diff" ] && [ "${2-}" = "--diff-filter=D" ] && [ "${3-}" = "--name-only" ] && [ "${4-}" = "--staged" ]; then
-  printf "deleted-path.txt\n \n"
-  exit 0
-fi
-"#,
-        );
-        let _keep_alive = wrap_dir;
-
-        run_git_factor_with_env(
+        run_git_factor(
             repo,
             &[
                 "--continue",
                 "--message",
-                "test: split with forced delete list",
+                "test: split after untracked cleanup",
             ],
             GitFactorExpectation::default(),
-            "PATH",
-            format!("{}:{}", wrap_bin.display(), env::var("PATH").or_abort()),
         );
 
         assert!(
             !repo.join("deleted-path.txt").exists(),
-            "materialization should remove paths returned by git diff --diff-filter=D"
+            "native cleanup should remove unrelated untracked files"
         );
     }
 
@@ -5516,5 +5504,56 @@ fi
             &["--unknown-flag"],
             GitFactorExpectation::default().code(EXIT_USAGE),
         );
+    }
+    #[test]
+    fn continue_from_child_preserves_same_named_tracked_file() {
+        let dir = init_repo();
+        let repo = dir.path();
+        fs::create_dir_all(repo.join("sub")).or_abort();
+        write_file(repo, "victim", "original root bytes\n");
+        write_file(repo, "sub/victim", "protected tracked child bytes\n");
+        git(repo, &["add", "--all"]);
+        git(repo, &["commit", "--message", "Add original files"]);
+        git(repo, &["rm", "--", "victim"]);
+        git(repo, &["commit", "--message", "Remove root file"]);
+        start_session(repo);
+        git(repo, &["add", "--", "victim"]);
+        assert_eq!(
+            git(
+                repo,
+                &[
+                    "diff",
+                    "--cached",
+                    "--name-status",
+                    "--no-relative",
+                    "--no-renames"
+                ]
+            ),
+            "D\tvictim"
+        );
+        assert!(!repo.join("victim").exists());
+        let expected_tree = git(repo, &["write-tree"]);
+        let bytes = fs::read(repo.join("sub/victim")).or_abort();
+
+        let output = Command::new(git_factor_bin())
+            .current_dir(repo.join("sub"))
+            .args(["--continue", "--message", "Remove root file"])
+            .output()
+            .or_abort();
+
+        assert_eq!(output.status.code(), Some(EXIT_OK));
+        assert_eq!(
+            output.stdout,
+            b"FACTOR: Complete. Final commit split into 1 commits.\n"
+        );
+        assert_eq!(output.stderr, b"");
+        assert_eq!(fs::read(repo.join("sub/victim")).or_abort(), bytes);
+        assert!(!repo.join("victim").exists());
+        assert_eq!(git(repo, &["rev-parse", "HEAD^{tree}"]), expected_tree);
+        assert_eq!(git(repo, &["write-tree"]), expected_tree);
+        assert_eq!(git_status_porcelain(repo), "");
+        assert!(!git_dir(repo).join("factor").exists());
+        assert!(!git_dir(repo).join("rebase-merge").exists());
+        assert!(!git_dir(repo).join("rebase-apply").exists());
     }
 }

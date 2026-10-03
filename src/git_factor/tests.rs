@@ -995,7 +995,7 @@ fn setup_factor_state(
     state_dir
 }
 
-fn continue_runner_with_commit(repo: &Path, original: &str, deleted_paths: &str) -> ScriptedRunner {
+fn continue_runner_with_commit(repo: &Path, original: &str) -> ScriptedRunner {
     with_git_dir_outputs(ScriptedRunner::default(), repo, 6)
         .with_status(
             "git",
@@ -1030,12 +1030,6 @@ fn continue_runner_with_commit(repo: &Path, original: &str, deleted_paths: &str)
             repo,
             0,
         )
-        .with_output(
-            "git",
-            &["diff", "--diff-filter=D", "--name-only", "--staged"],
-            repo,
-            deleted_paths,
-        )
         .with_output("git", &["status", "--porcelain=v1"], repo, "M  file.txt\n")
         .with_status("bash", &["-c", "true"], &[], false, repo, 0)
         .with_output("git", &["status", "--porcelain=v1"], repo, "M  file.txt\n")
@@ -1068,7 +1062,7 @@ fn continue_runner_with_remaining_output(
     untracked: &str,
 ) -> ScriptedRunner {
     let repo_top = repo.to_string_lossy().into_owned();
-    continue_runner_with_commit(repo, original, "")
+    continue_runner_with_commit(repo, original)
         .with_output(
             "git",
             &["rev-parse", "HEAD^{tree}"],
@@ -2236,7 +2230,7 @@ fn cmd_continue_returns_original_exec_error_when_rehydrate_succeeds() {
     );
 
     let idx_tree = format!("{}\n", "c".repeat(SHA_LEN));
-    let base = continue_runner_with_commit(repo, &original, "")
+    let base = continue_runner_with_commit(repo, &original)
         .with_output("git", &["write-tree"], repo, &idx_tree)
         .with_status(
             "git",
@@ -2288,7 +2282,7 @@ fn cmd_continue_returns_rehydrate_error_when_exec_status_call_fails() {
         Some(TREE_EXPECTED_NL),
     );
 
-    let base = continue_runner_with_commit(repo, &original, "");
+    let base = continue_runner_with_commit(repo, &original);
     let runner = BashStatusFailureRunner { inner: base };
     let io = TestIo::default();
     let env = TestEnv {
@@ -5133,12 +5127,6 @@ fn cmd_continue_errors_on_split_count_overflow() {
             repo,
             0,
         )
-        .with_output(
-            "git",
-            &["diff", "--diff-filter=D", "--name-only", "--staged"],
-            repo,
-            "deleted-path\n \n",
-        )
         .with_output("git", &["status", "--porcelain=v1"], repo, "M  file.txt\n")
         .with_status("bash", &["-c", "true"], &[], false, repo, 0)
         .with_output("git", &["status", "--porcelain=v1"], repo, "M  file.txt\n")
@@ -5191,7 +5179,7 @@ fn cmd_continue_propagates_restore_status_error() {
     let original = "a".repeat(SHA_LEN);
     setup_factor_state(repo, &original, "0\n", None, None);
     let messages = test_messages();
-    let runner = continue_runner_with_commit(repo, &original, "deleted-path\n \n")
+    let runner = continue_runner_with_commit(repo, &original)
         .with_output(
             "git",
             &["rev-parse", "HEAD^{tree}"],
@@ -6080,7 +6068,7 @@ fn cmd_continue_reports_tree_mismatch_after_restore() {
     let original = "a".repeat(SHA_LEN);
     setup_factor_state(repo, &original, "0\n", Some("false\n"), None);
     let messages = test_messages();
-    let runner = continue_runner_with_commit(repo, &original, "")
+    let runner = continue_runner_with_commit(repo, &original)
         .with_output(
             "git",
             &["rev-parse", "HEAD^{tree}"],
@@ -6214,10 +6202,6 @@ fn cmd_continue_runner_failures_cover_command_error_paths() {
 }
 
 #[test]
-#[expect(
-    clippy::too_many_lines,
-    reason = "continue gate failure coverage enumerates many distinct IO breakpoints in one transcript"
-)]
 fn cmd_continue_io_failures_cover_exec_gate_failure_output_paths() {
     let dir = TempDir::new().or_abort("tempdir");
     let repo = dir.path();
@@ -6263,12 +6247,6 @@ fn cmd_continue_io_failures_cover_exec_gate_failure_output_paths() {
             false,
             repo,
             0,
-        )
-        .with_output(
-            "git",
-            &["diff", "--diff-filter=D", "--name-only", "--staged"],
-            repo,
-            "",
         )
         .with_output("git", &["status", "--porcelain=v1"], repo, "M  file.txt\n")
         .with_status("bash", &["-c", "false"], &[], false, repo, 1)
@@ -6944,12 +6922,6 @@ fn cmd_continue_errors_when_repo_has_unstaged_changes_before_gate() {
             repo,
             0,
         )
-        .with_output(
-            "git",
-            &["diff", "--diff-filter=D", "--name-only", "--staged"],
-            repo,
-            "",
-        )
         .with_output_status(
             "git",
             &["status", "--porcelain=v1"],
@@ -7115,7 +7087,7 @@ fn cmd_continue_converged_tree_completes_session_without_remainder() {
     let message = NonEmptyString::try_from("test: message".to_owned()).or_abort("non-empty");
     let messages = NonEmpty::new(message);
 
-    let runner = continue_runner_with_commit(repo, &original, "").with_output(
+    let runner = continue_runner_with_commit(repo, &original).with_output(
         "git",
         &["rev-parse", "HEAD^{tree}"],
         repo,
@@ -7159,7 +7131,7 @@ fn cmd_continue_rejects_invalid_head_tree_hash_after_commit() {
         Some(TREE_EXPECTED_NL),
     );
     let messages = test_messages();
-    let runner = continue_runner_with_commit(repo, &original, "").with_output(
+    let runner = continue_runner_with_commit(repo, &original).with_output(
         "git",
         &["rev-parse", "HEAD^{tree}"],
         repo,
@@ -7198,7 +7170,7 @@ fn cmd_continue_propagates_invalid_restored_tree_hash_after_restore() {
     );
 
     let messages = test_messages();
-    let runner = continue_runner_with_commit(repo, &original, "")
+    let runner = continue_runner_with_commit(repo, &original)
         .with_output(
             "git",
             &["rev-parse", "HEAD^{tree}"],
@@ -7258,7 +7230,7 @@ fn cmd_continue_propagates_io_error_when_completion_summary_write_fails() {
     fs::write(state_dir.join("expected_tree"), TREE_EXPECTED_NL).or_abort("write expected_tree");
 
     let messages = test_messages();
-    let runner = continue_runner_with_commit(repo, &original, "").with_output(
+    let runner = continue_runner_with_commit(repo, &original).with_output(
         "git",
         &["rev-parse", "HEAD^{tree}"],
         repo,
@@ -7302,7 +7274,7 @@ fn cmd_continue_completes_when_rebase_finishes_after_tree_converges() {
         Some(TREE_EXPECTED_NL),
     );
     let messages = test_messages();
-    let base_runner = continue_runner_with_commit(repo, &original, "")
+    let base_runner = continue_runner_with_commit(repo, &original)
         .with_output("git", &["rev-parse", "HEAD^{tree}"], repo, TREE_EXPECTED_NL)
         .with_status(
             "git",
@@ -8074,7 +8046,7 @@ fn cmd_continue_propagates_expected_tree_fallback_lookup_error() {
     fs::write(state_dir.join("exec"), "true\n").or_abort("write exec");
     fs::write(state_dir.join("requires_rebase"), "false\n").or_abort("write requires_rebase");
 
-    let runner = continue_runner_with_commit(repo, &original, "").with_output(
+    let runner = continue_runner_with_commit(repo, &original).with_output(
         "git",
         &["rev-parse", "HEAD^{tree}"],
         repo,
@@ -8698,12 +8670,6 @@ fn cmd_continue_propagates_rehydrate_write_tree_error_when_exec_fails() {
             repo,
             0,
         )
-        .with_output(
-            "git",
-            &["diff", "--diff-filter=D", "--name-only", "--staged"],
-            repo,
-            "",
-        )
         .with_output("git", &["status", "--porcelain=v1"], repo, "M  file.txt\n")
         .with_status("bash", &["-c", "true"], &[], false, repo, 1);
     let io = TestIo::default();
@@ -8769,12 +8735,6 @@ fn cmd_continue_propagates_exec_status_io_error_after_rehydrating_pool() {
             false,
             repo,
             0,
-        )
-        .with_output(
-            "git",
-            &["diff", "--diff-filter=D", "--name-only", "--staged"],
-            repo,
-            "",
         )
         .with_output("git", &["status", "--porcelain=v1"], repo, "M  file.txt\n")
         .with_output("git", &["write-tree"], repo, TREE_REHYDRATE_NL)
@@ -8901,12 +8861,6 @@ fn cmd_continue_propagates_rehydrate_error_when_exec_status_io_error_rehydrate_f
             repo,
             0,
         )
-        .with_output(
-            "git",
-            &["diff", "--diff-filter=D", "--name-only", "--staged"],
-            repo,
-            "",
-        )
         .with_output("git", &["status", "--porcelain=v1"], repo, "M  file.txt\n");
     let io = TestIo::default();
     let env = TestEnv {
@@ -8946,7 +8900,7 @@ fn cmd_continue_converged_path_propagates_advance_split_count_error() {
 
     let message = NonEmptyString::try_from("test: message".to_owned()).or_abort("non-empty");
     let messages = NonEmpty::new(message);
-    let runner = continue_runner_with_commit(repo, &original, "").with_output(
+    let runner = continue_runner_with_commit(repo, &original).with_output(
         "git",
         &["rev-parse", "HEAD^{tree}"],
         repo,
@@ -9129,7 +9083,7 @@ fn cmd_continue_converged_path_propagates_advance_split_count_read_error() {
         Some(TREE_EXPECTED_NL),
     );
     let messages = test_messages();
-    let runner = continue_runner_with_commit(repo, &original, "").with_output(
+    let runner = continue_runner_with_commit(repo, &original).with_output(
         "git",
         &["rev-parse", "HEAD^{tree}"],
         repo,
