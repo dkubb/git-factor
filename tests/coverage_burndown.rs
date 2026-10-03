@@ -365,7 +365,9 @@ fi
             .arg("--status")
             .assert()
             .code(EXIT_OK)
-            .stdout(predicate::str::contains("FACTOR: No active session."))
+            .stdout(predicate::eq(
+                "{\"operation\":\"status\",\"session\":null}\n",
+            ))
             .stderr(predicate::str::is_empty());
     }
 

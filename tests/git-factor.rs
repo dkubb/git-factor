@@ -1402,7 +1402,7 @@ fi
         run_git_factor_in_dir(
             dir.path(),
             &["--status"],
-            GitFactorExpectation::default().stdout("FACTOR: No active session.\n"),
+            GitFactorExpectation::default().stdout("{\"operation\":\"status\",\"session\":null}\n"),
         );
     }
 
@@ -1423,7 +1423,7 @@ fi
             repo,
             &["--status"],
             GitFactorExpectation::default().stdout(format!(
-                "FACTOR: Active session.\nCURRENT_COMMIT: {current_commit}\nCURRENT_INDEX: 0\nSPLIT_COUNT: 0\nPHASE: splitting\nREQUIRES_REBASE: false\nREBASE_IN_PROGRESS: false\nIS_ROOT: false\n"
+                "{{\"operation\":\"status\",\"session\":{{\"phase\":\"splitting\",\"rebase\":{{\"in_progress\":false,\"required\":false}},\"split_count\":0,\"target\":{{\"commit\":\"{current_commit}\",\"index\":0,\"span_starts_at_root\":false}}}}}}\n"
             )),
         );
     }
@@ -2192,7 +2192,7 @@ fi
         run_git_factor_with_env(
             repo,
             &["--status"],
-            GitFactorExpectation::default().stdout("FACTOR: No active session.\n"),
+            GitFactorExpectation::default().stdout("{\"operation\":\"status\",\"session\":null}\n"),
             "GIT_FACTOR_TRACE_LOG",
             "",
         );
@@ -2284,7 +2284,7 @@ fi
         run_git_factor_with_env(
             repo,
             &["--status"],
-            GitFactorExpectation::default().stdout("FACTOR: No active session.\n"),
+            GitFactorExpectation::default().stdout("{\"operation\":\"status\",\"session\":null}\n"),
             "GIT_FACTOR_TRACE_LOG",
             trace_path.as_os_str().to_os_string(),
         );
@@ -2320,7 +2320,7 @@ fi
         run_git_factor_with_env(
             repo,
             &["--status"],
-            GitFactorExpectation::default().stdout("FACTOR: No active session.\n"),
+            GitFactorExpectation::default().stdout("{\"operation\":\"status\",\"session\":null}\n"),
             "GIT_FACTOR_TRACE_LOG",
             trace_path.as_os_str().to_os_string(),
         );
@@ -2391,7 +2391,10 @@ fi
             .or_abort();
 
         assert_eq!(output.status.code(), Some(EXIT_OK));
-        assert_eq!(output.stdout.as_slice(), b"FACTOR: No active session.\n");
+        assert_eq!(
+            output.stdout.as_slice(),
+            b"{\"operation\":\"status\",\"session\":null}\n"
+        );
         assert_eq!(output.stderr.as_slice(), b"");
         assert_eq!(fs::read(&index_path).or_abort(), index_before);
         assert_eq!(
@@ -2469,7 +2472,7 @@ fi
         run_git_factor_with_prefixed_path_and_env(
             repo,
             &["--status"],
-            GitFactorExpectation::default().stdout("FACTOR: No active session.\n"),
+            GitFactorExpectation::default().stdout("{\"operation\":\"status\",\"session\":null}\n"),
             format!("{}:{}", wrap_bin.display(), env::var("PATH").or_abort()).into(),
             "GIT_FACTOR_TRACE_LOG",
             trace_path.as_os_str().to_os_string(),
@@ -2516,7 +2519,7 @@ fi
         run_git_factor_with_prefixed_path_and_env(
             repo,
             &["--status"],
-            GitFactorExpectation::default().stdout("FACTOR: No active session.\n"),
+            GitFactorExpectation::default().stdout("{\"operation\":\"status\",\"session\":null}\n"),
             format!("{}:{}", wrap_bin.display(), env::var("PATH").or_abort()).into(),
             "GIT_FACTOR_TRACE_LOG",
             trace_path.as_os_str().to_os_string(),
@@ -5593,5 +5596,121 @@ fi
         assert!(!git_dir(repo).join("factor").exists());
         assert!(!git_dir(repo).join("rebase-merge").exists());
         assert!(!git_dir(repo).join("rebase-apply").exists());
+    }
+
+    #[test]
+    fn json_status_preserves_native_tip_session() {
+        verify_json_status_preservation(false, false);
+    }
+
+    #[test]
+    fn json_status_preserves_native_root_session() {
+        verify_json_status_preservation(true, false);
+    }
+
+    #[test]
+    fn json_status_preserves_native_pending_start_session() {
+        verify_json_status_preservation(false, true);
+    }
+
+    fn verify_json_status_preservation(root: bool, pending: bool) {
+        let directory = init_repo();
+        let repo = directory.path();
+        if !root {
+            commit_file(repo, "base", "base\n", "Base");
+        }
+        commit_file(repo, "atom", "atom\n", "Selected source");
+        let selected = git(repo, &["rev-parse", "HEAD"]);
+        let selected_tree = git(repo, &["rev-parse", "HEAD^{tree}"]);
+        if pending {
+            commit_file(repo, "descendant", "descendant\n", "Later history");
+        }
+        if pending {
+            let (wrapper, bin) = make_git_wrapper_named(
+                "git",
+                &format!(
+                    "if [ \"$#\" -eq 3 ] && [ \"$1\" = reset ] && [ \"$2\" = --quiet ] && [ \"$3\" = '{selected}^' ]; then\n  exit 1\nfi\n"
+                ),
+            );
+            let mut path = OsString::from(bin.as_os_str());
+            path.push(OsStr::new(":"));
+            path.push(env::var_os("PATH").or_abort());
+            run_git_factor_with_prefixed_path(
+                repo,
+                &["--exec", "true", "HEAD~1"],
+                GitFactorExpectation::default()
+                    .code(EXIT_SOFTWARE)
+                    .stderr_suffix("git command failed: git reset failed (exit 1)\n")
+                    .factor_state_exists(true),
+                path,
+            );
+            assert!(
+                wrapper.path().exists(),
+                "native reset wrapper retained during start"
+            );
+            assert_eq!(git(repo, &["rev-parse", "HEAD"]), selected);
+            assert_eq!(git(repo, &["rev-parse", "HEAD^{tree}"]), selected_tree);
+            assert_eq!(
+                fs::read(repo.join(".git/factor/phase")).or_abort(),
+                b"pending_start\n"
+            );
+        } else {
+            run_git_factor(
+                repo,
+                &["--exec", "true", "HEAD"],
+                GitFactorExpectation::default(),
+            );
+        }
+        let head = git(repo, &["rev-parse", "HEAD"]);
+        let refs = git(repo, &["show-ref"]);
+        let index = fs::read(repo.join(".git/index")).or_abort();
+        let state = repo.join(".git/factor");
+        let mut facts = fs::read_dir(&state)
+            .or_abort()
+            .map(|candidate| {
+                let entry = candidate.or_abort();
+                (entry.file_name(), fs::read(entry.path()).or_abort())
+            })
+            .collect::<Vec<_>>();
+        facts.sort_by(|left, right| left.0.cmp(&right.0));
+        let native = repo.join(".git/rebase-merge");
+        let transcript = pending.then(|| {
+            (
+                fs::read(native.join("done")).or_abort(),
+                fs::read(native.join("git-rebase-todo")).or_abort(),
+            )
+        });
+        write_file(repo, "unrelated", "user bytes\n");
+        let phase = if pending {
+            "pending_start"
+        } else {
+            "splitting"
+        };
+        let expected = format!(
+            "{{\"operation\":\"status\",\"session\":{{\"phase\":\"{phase}\",\"rebase\":{{\"in_progress\":{pending},\"required\":{pending}}},\"split_count\":0,\"target\":{{\"commit\":\"{selected}\",\"index\":0,\"span_starts_at_root\":{root}}}}}}}\n",
+        );
+        run_git_factor(
+            repo,
+            &["--status"],
+            GitFactorExpectation::default().stdout(expected),
+        );
+        assert_eq!(git(repo, &["rev-parse", "HEAD"]), head);
+        assert_eq!(git(repo, &["show-ref"]), refs);
+        assert_eq!(fs::read(repo.join(".git/index")).or_abort(), index);
+        let mut observed = fs::read_dir(&state)
+            .or_abort()
+            .map(|candidate| {
+                let entry = candidate.or_abort();
+                (entry.file_name(), fs::read(entry.path()).or_abort())
+            })
+            .collect::<Vec<_>>();
+        observed.sort_by(|left, right| left.0.cmp(&right.0));
+        assert_eq!(observed, facts);
+        if let Some((done, todo)) = transcript {
+            assert_eq!(fs::read(native.join("done")).or_abort(), done);
+            assert_eq!(fs::read(native.join("git-rebase-todo")).or_abort(), todo);
+        }
+        assert_eq!(fs::read(repo.join("atom")).or_abort(), b"atom\n");
+        assert_eq!(fs::read(repo.join("unrelated")).or_abort(), b"user bytes\n");
     }
 }

@@ -1,0 +1,108 @@
+//! Normalized command results, serialized completely before stdout emission.
+
+#[cfg(test)]
+#[path = "output_proptests.rs"]
+mod proptests;
+#[cfg(test)]
+#[path = "output_tests.rs"]
+mod tests;
+
+use serde::Serialize;
+
+use super::{CommitSha, Ctx, CurrentIndex, FactorError, SessionPhase, SplitCount, StateBool};
+
+/// Rebase requirements and the native observation.
+#[derive(Clone, Copy, Debug, Serialize)]
+struct Rebase {
+    /// Whether Git currently has an active rebase.
+    in_progress: bool,
+    /// Whether the session requires a rebase.
+    required: bool,
+}
+
+/// The existing session's current selected commit and original range boundary.
+#[derive(Clone, Copy, Debug, Serialize)]
+struct Target<'session> {
+    /// Current selected commit identity.
+    commit: &'session str,
+    /// `CurrentIndex`: the zero-based position in the saved selected commit sequence.
+    index: usize,
+    /// Whether the selected span starts at the repository root.
+    span_starts_at_root: bool,
+}
+
+/// Admitted session observations exposed by the status command.
+#[derive(Clone, Copy, Debug, Serialize)]
+pub(in crate::git_factor) struct SessionStatus<'session> {
+    /// Existing saved phase, including `pending_start` and `splitting`.
+    phase: &'static str,
+    /// Native rebase requirements and observation.
+    rebase: Rebase,
+    /// Existing per-commit split count.
+    split_count: u8,
+    /// Current selected identity and position.
+    target: Target<'session>,
+}
+
+impl<'session> SessionStatus<'session> {
+    /// Projects the existing checked session facts into their JSON representation.
+    #[cfg_attr(
+        not(test),
+        expect(
+            clippy::single_call_fn,
+            reason = "checked status observations are projected at their first serializer consumer"
+        )
+    )]
+    #[inline]
+    #[must_use]
+    pub(in crate::git_factor) const fn new(
+        commit: &'session CommitSha,
+        index: CurrentIndex,
+        split_count: SplitCount,
+        phase: SessionPhase,
+        requires_rebase: StateBool,
+        is_root: StateBool,
+        in_progress: bool,
+    ) -> Self {
+        Self {
+            phase: phase.as_str(),
+            rebase: Rebase {
+                in_progress,
+                required: requires_rebase.as_bool(),
+            },
+            split_count: split_count.as_u8(),
+            target: Target {
+                commit: commit.as_str(),
+                index: index.as_usize(),
+                span_starts_at_root: is_root.as_bool(),
+            },
+        }
+    }
+}
+
+/// One status result; null denotes the absence of a session.
+#[derive(Serialize)]
+struct Status<'session> {
+    /// Identifies the public command.
+    operation: &'static str,
+    /// Active session facts, or absence.
+    session: Option<SessionStatus<'session>>,
+}
+
+/// Writes one complete normalized status result, followed by a newline.
+#[expect(
+    clippy::expect_used,
+    clippy::unwrap_in_result,
+    reason = "the closed status representation contains only JSON-compatible strings, integers, booleans and null"
+)]
+pub(in crate::git_factor) fn status(
+    ctx: &Ctx<'_>,
+    session: Option<SessionStatus<'_>>,
+) -> Result<(), FactorError> {
+    let result = Status {
+        operation: "status",
+        session,
+    };
+    let json = serde_json::to_string(&result).expect("status facts are JSON-compatible");
+    ctx.outln(&json)
+}

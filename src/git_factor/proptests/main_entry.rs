@@ -13,6 +13,7 @@ use crate::git_factor::tests::start_contracts::{DirectStart, GateCase, query};
 use crate::git_factor::tests::status_contracts;
 use crate::git_factor::tests::verify_public_abort_fallback_refusal;
 use crate::git_factor::tests::verify_public_status_phase_refusal;
+use crate::git_factor::tests::{verify_public_inactive_status, verify_public_status};
 use core::iter::repeat_n;
 use core::num::{NonZeroU8, NonZeroUsize};
 use core::ops::RangeInclusive;
@@ -69,7 +70,7 @@ proptest! {
         root in any::<bool>(),
         phase in prop::sample::select(vec!["splitting", "pending_start"]),
         rebase in any::<bool>(),
-        fail_at in RangeInclusive::<usize>::new(0, 16),
+        fail_at in RangeInclusive::<usize>::new(0, 2),
     ) {
         status_contracts::active(&sha, split, requires, root, phase, rebase, fail_at);
     }
@@ -929,6 +930,16 @@ proptest! {
         prop_assert_eq!(fixture.protected_bytes(), bytes);
         prop_assert_eq!(fixture.full_effect_requests(), fixture.expected_effect_requests());
     }
+
+    #[test]
+    fn public_status_preserves_generated_session_facts(
+        index in RangeInclusive::<usize>::new(0, 2), count in any::<u8>(), pending in any::<bool>(),
+        required in any::<bool>(), root in any::<bool>(), progress in any::<bool>(),
+    ) {
+        verify_public_status(index, count,
+            if pending { SessionPhase::PendingStart } else { SessionPhase::Splitting },
+            required, root, progress);
+    }
 }
 
 proptest! {
@@ -1195,5 +1206,12 @@ proptest! {
         user_bytes in generated_bytes(any::<u8>(), 0..32),
     ) {
         supplied_commit_failure(&format!("topic-{revision_suffix}"), rejected_exit, &user_bytes);
+    }
+
+    #[test]
+    fn public_inactive_status_preserves_unrelated_work(
+        body in string_regex("[a-z]{0,24}").or_abort("inactive user bytes strategy"),
+    ) {
+        verify_public_inactive_status(&body);
     }
 }

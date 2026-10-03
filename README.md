@@ -222,3 +222,15 @@ again.
 ## Related Documentation
 
 - [SKILL.md](./SKILL.md): agent workflow and detailed operational guidance
+
+## Status Output
+
+`git factor --status` writes one JSON object followed by a newline. An inactive
+session is `{"operation":"status","session":null}`. An active session exposes
+`phase`, `split_count`, `rebase.in_progress`, `rebase.required`, and
+`target.commit`, `target.index`, `target.span_starts_at_root`.
+
+`target.index` is the zero-based position in the saved selected commit sequence;
+`target.commit` is that position's current commit. The root flag describes the
+selected span's original root boundary. Status observes the current session;
+other command outputs retain their existing format.

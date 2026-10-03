@@ -16,15 +16,7 @@ fn public_abort_refuses_unavailable_fallback_without_changing_saved_facts() {
 
 #[test]
 fn public_status_reports_final_newline_failure_with_saved_facts_retained() {
-    status_contracts::active(
-        &"a".repeat(SHA_LEN),
-        0,
-        false,
-        false,
-        "splitting",
-        false,
-        16,
-    );
+    status_contracts::active(&"a".repeat(SHA_LEN), 0, false, false, "splitting", false, 2);
 }
 
 #[test]
@@ -2759,7 +2751,7 @@ fn cmd_status_reports_no_active_session_message() {
     let code = cmd_status_in(&ctx).or_abort("status should succeed");
 
     assert_eq!(code, EXIT_OK);
-    assert_eq!(io.stdout(), "FACTOR: No active session.\n");
+    assert_eq!(io.stdout(), "{\"operation\":\"status\",\"session\":null}\n");
     assert!(io.stderr().is_empty(), "stderr should be empty");
 }
 
@@ -2799,14 +2791,9 @@ fn cmd_status_reports_active_session_fields() {
         io.stdout(),
         format!(
             concat!(
-                "FACTOR: Active session.\n",
-                "CURRENT_COMMIT: {}\n",
-                "CURRENT_INDEX: 0\n",
-                "SPLIT_COUNT: 2\n",
-                "PHASE: splitting\n",
-                "REQUIRES_REBASE: false\n",
-                "REBASE_IN_PROGRESS: true\n",
-                "IS_ROOT: true\n"
+                "{{\"operation\":\"status\",\"session\":{{\"phase\":\"splitting\",",
+                "\"rebase\":{{\"in_progress\":true,\"required\":false}},\"split_count\":2,",
+                "\"target\":{{\"commit\":\"{}\",\"index\":0,\"span_starts_at_root\":true}}}}}}\n"
             ),
             sha
         )
@@ -2836,7 +2823,7 @@ fn cmd_status_io_failures_cover_active_session_output_paths() {
         cwd: repo.to_path_buf(),
     };
 
-    for fail_at in 1..=14 {
+    for fail_at in 1..=2 {
         let runner = NthRunnerFailure::new(base_runner.clone(), usize::MAX);
         let io = NthIoFailure::new(fail_at);
         let ctx = Ctx {
@@ -5875,4 +5862,21 @@ fn continue_without_message_reports_invalid_phase() {
         "unsupported",
         b"saved\0bytes",
     );
+}
+
+#[test]
+fn public_status_reports_null_without_creating_state() {
+    verify_public_inactive_status("user bytes\n");
+}
+
+#[test]
+fn public_status_preserves_pending_start_and_splitting_observations() {
+    for phase in [SessionPhase::PendingStart, SessionPhase::Splitting] {
+        for index in [0, 2] {
+            for count in [0, u8::MAX] {
+                verify_public_status(index, count, phase, true, true, false);
+                verify_public_status(index, count, phase, false, false, true);
+            }
+        }
+    }
 }
