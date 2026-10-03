@@ -1,3 +1,4 @@
+use super::finish_contracts::{FinishCase, FinishStage, verify_finish};
 use crate::exit_codes::{EXIT_OK, EXIT_SOFTWARE, EXIT_USAGE};
 use crate::git_factor::tests::dispatch_contracts::{
     HeadResolutionFault, ReopenFault, default_head_failure, default_head_success, dirty_route,
@@ -5886,5 +5887,739 @@ fn abort_message_refuses_before_native_or_saved_state_effects() {
     refusal(
         &["--abort", "--message", "Keep the saved session"],
         "--abort cannot be combined with other options",
+    );
+}
+
+// Public Finish observations use a strict request ledger, not native Git effects.
+
+#[test]
+fn public_finish_supplied_paragraphs_complete() {
+    verify_finish(
+        FinishCase::Supplied,
+        &"a".repeat(SHA_LEN),
+        0,
+        "Finish subject",
+        "Finish body",
+        b"saved user bytes\n",
+    );
+}
+
+#[test]
+fn public_finish_original_message_trims_trailing_whitespace() {
+    verify_finish(
+        FinishCase::Original,
+        &"a".repeat(SHA_LEN),
+        0,
+        "Finish subject",
+        "Finish body",
+        b"saved user bytes\n",
+    );
+}
+
+#[test]
+fn public_finish_empty_staged_tree_requests_allow_empty() {
+    verify_finish(
+        FinishCase::Empty,
+        &"a".repeat(SHA_LEN),
+        0,
+        "Finish subject",
+        "Finish body",
+        b"saved user bytes\n",
+    );
+}
+
+#[test]
+fn public_finish_missing_expected_tree_uses_original_tree() {
+    verify_finish(
+        FinishCase::Fallback,
+        &"a".repeat(SHA_LEN),
+        0,
+        "Finish subject",
+        "Finish body",
+        b"saved user bytes\n",
+    );
+}
+
+#[test]
+fn public_finish_required_rebase_completes_before_cleanup() {
+    verify_finish(
+        FinishCase::RebaseComplete,
+        &"a".repeat(SHA_LEN),
+        0,
+        "Finish subject",
+        "Finish body",
+        b"saved user bytes\n",
+    );
+}
+
+#[test]
+fn public_finish_root_session_queries_original_root_after_cleanup() {
+    verify_finish(
+        FinishCase::RootComplete,
+        &"a".repeat(SHA_LEN),
+        0,
+        "Finish subject",
+        "Finish body",
+        b"saved user bytes\n",
+    );
+}
+
+#[test]
+fn public_finish_count_254_completes_as_255() {
+    verify_finish(
+        FinishCase::Supplied,
+        &"a".repeat(SHA_LEN),
+        254,
+        "Finish subject",
+        "Finish body",
+        b"saved user bytes\n",
+    );
+}
+
+#[test]
+fn public_finish_count_255_refuses_after_commit_request() {
+    verify_finish(
+        FinishCase::Overflow,
+        &"a".repeat(SHA_LEN),
+        0,
+        "Finish subject",
+        "Finish body",
+        b"saved user bytes\n",
+    );
+}
+
+#[test]
+fn public_finish_inactive_session_refuses_without_effects() {
+    verify_finish(
+        FinishCase::Absent,
+        &"a".repeat(SHA_LEN),
+        0,
+        "Finish subject",
+        "Finish body",
+        b"saved user bytes\n",
+    );
+}
+
+#[test]
+fn public_finish_reopen_query_refuses_without_effects() {
+    verify_finish(
+        FinishCase::ReopenQuery,
+        &"a".repeat(SHA_LEN),
+        0,
+        "Finish subject",
+        "Finish body",
+        b"saved user bytes\n",
+    );
+}
+
+#[test]
+fn public_finish_pending_phase_refuses_without_effects() {
+    verify_finish(
+        FinishCase::Pending,
+        &"a".repeat(SHA_LEN),
+        0,
+        "Finish subject",
+        "Finish body",
+        b"saved user bytes\n",
+    );
+}
+
+#[test]
+fn public_finish_invalid_phase_refuses_without_effects() {
+    verify_finish(
+        FinishCase::InvalidPhase,
+        &"a".repeat(SHA_LEN),
+        0,
+        "Finish subject",
+        "Finish body",
+        b"saved user bytes\n",
+    );
+}
+
+#[test]
+fn public_finish_invalid_commit_refuses_without_effects() {
+    verify_finish(
+        FinishCase::InvalidCommits,
+        &"a".repeat(SHA_LEN),
+        0,
+        "Finish subject",
+        "Finish body",
+        b"saved user bytes\n",
+    );
+}
+
+#[test]
+fn public_finish_invalid_index_refuses_without_effects() {
+    verify_finish(
+        FinishCase::InvalidIndex,
+        &"a".repeat(SHA_LEN),
+        0,
+        "Finish subject",
+        "Finish body",
+        b"saved user bytes\n",
+    );
+}
+
+#[test]
+fn public_finish_out_of_range_index_refuses_without_effects() {
+    verify_finish(
+        FinishCase::OutsideIndex,
+        &"a".repeat(SHA_LEN),
+        0,
+        "Finish subject",
+        "Finish body",
+        b"saved user bytes\n",
+    );
+}
+
+#[test]
+fn public_finish_invalid_rebase_policy_refuses_without_effects() {
+    verify_finish(
+        FinishCase::InvalidRequires,
+        &"a".repeat(SHA_LEN),
+        0,
+        "Finish subject",
+        "Finish body",
+        b"saved user bytes\n",
+    );
+}
+
+#[test]
+fn public_finish_missing_required_rebase_refuses_without_effects() {
+    verify_finish(
+        FinishCase::RebaseMissing,
+        &"a".repeat(SHA_LEN),
+        0,
+        "Finish subject",
+        "Finish body",
+        b"saved user bytes\n",
+    );
+}
+
+#[test]
+fn public_finish_invalid_expected_tree_refuses_without_effects() {
+    verify_finish(
+        FinishCase::InvalidExpected,
+        &"a".repeat(SHA_LEN),
+        0,
+        "Finish subject",
+        "Finish body",
+        b"saved user bytes\n",
+    );
+}
+
+#[test]
+fn public_finish_invalid_actual_tree_refuses_after_restore() {
+    verify_finish(
+        FinishCase::InvalidActual,
+        &"a".repeat(SHA_LEN),
+        0,
+        "Finish subject",
+        "Finish body",
+        b"saved user bytes\n",
+    );
+}
+
+#[test]
+fn public_finish_different_actual_tree_refuses_after_restore() {
+    verify_finish(
+        FinishCase::UnequalTree,
+        &"a".repeat(SHA_LEN),
+        0,
+        "Finish subject",
+        "Finish body",
+        b"saved user bytes\n",
+    );
+}
+
+#[test]
+fn public_finish_empty_original_message_refuses_after_restore() {
+    verify_finish(
+        FinishCase::EmptyOriginal,
+        &"a".repeat(SHA_LEN),
+        0,
+        "Finish subject",
+        "Finish body",
+        b"saved user bytes\n",
+    );
+}
+
+#[test]
+fn public_finish_invalid_metadata_refuses_before_commit() {
+    verify_finish(
+        FinishCase::InvalidMetadata,
+        &"a".repeat(SHA_LEN),
+        0,
+        "Finish subject",
+        "Finish body",
+        b"saved user bytes\n",
+    );
+}
+
+#[test]
+fn public_finish_invalid_count_refuses_after_commit() {
+    verify_finish(
+        FinishCase::InvalidCount,
+        &"a".repeat(SHA_LEN),
+        0,
+        "Finish subject",
+        "Finish body",
+        b"saved user bytes\n",
+    );
+}
+
+#[test]
+fn public_finish_count_write_failure_preserves_old_count() {
+    verify_finish(
+        FinishCase::WriteCount,
+        &"a".repeat(SHA_LEN),
+        0,
+        "Finish subject",
+        "Finish body",
+        b"saved user bytes\n",
+    );
+}
+
+#[test]
+fn public_finish_cleanup_error_preserves_incremented_count() {
+    verify_finish(
+        FinishCase::RemoveDenied,
+        &"a".repeat(SHA_LEN),
+        0,
+        "Finish subject",
+        "Finish body",
+        b"saved user bytes\n",
+    );
+}
+
+#[test]
+fn public_finish_cleanup_retention_preserves_incremented_count() {
+    verify_finish(
+        FinishCase::RemoveRetained,
+        &"a".repeat(SHA_LEN),
+        0,
+        "Finish subject",
+        "Finish body",
+        b"saved user bytes\n",
+    );
+}
+
+#[test]
+fn public_finish_remaining_rebase_preserves_incremented_count() {
+    verify_finish(
+        FinishCase::RebaseRetained,
+        &"a".repeat(SHA_LEN),
+        0,
+        "Finish subject",
+        "Finish body",
+        b"saved user bytes\n",
+    );
+}
+
+#[test]
+fn public_finish_body_output_failure_observes_removed_journal() {
+    verify_finish(
+        FinishCase::Output(1),
+        &"a".repeat(SHA_LEN),
+        0,
+        "Finish subject",
+        "Finish body",
+        b"saved user bytes\n",
+    );
+}
+
+#[test]
+fn public_finish_newline_output_failure_retains_exact_body() {
+    verify_finish(
+        FinishCase::Output(2),
+        &"a".repeat(SHA_LEN),
+        0,
+        "Finish subject",
+        "Finish body",
+        b"saved user bytes\n",
+    );
+}
+
+#[test]
+fn public_finish_commits_read_1_has_exact_failure_frontier() {
+    verify_finish(
+        FinishCase::Read("commits", 1),
+        &"a".repeat(SHA_LEN),
+        0,
+        "Finish subject",
+        "Finish body",
+        b"saved user bytes\n",
+    );
+}
+
+#[test]
+fn public_finish_phase_read_1_has_exact_failure_frontier() {
+    verify_finish(
+        FinishCase::Read("phase", 1),
+        &"a".repeat(SHA_LEN),
+        0,
+        "Finish subject",
+        "Finish body",
+        b"saved user bytes\n",
+    );
+}
+
+#[test]
+fn public_finish_requires_rebase_read_1_has_exact_failure_frontier() {
+    verify_finish(
+        FinishCase::Read("requires_rebase", 1),
+        &"a".repeat(SHA_LEN),
+        0,
+        "Finish subject",
+        "Finish body",
+        b"saved user bytes\n",
+    );
+}
+
+#[test]
+fn public_finish_current_index_read_1_has_exact_failure_frontier() {
+    verify_finish(
+        FinishCase::Read("current_index", 1),
+        &"a".repeat(SHA_LEN),
+        0,
+        "Finish subject",
+        "Finish body",
+        b"saved user bytes\n",
+    );
+}
+
+#[test]
+fn public_finish_current_index_read_2_has_exact_failure_frontier() {
+    verify_finish(
+        FinishCase::Read("current_index", 2),
+        &"a".repeat(SHA_LEN),
+        0,
+        "Finish subject",
+        "Finish body",
+        b"saved user bytes\n",
+    );
+}
+
+#[test]
+fn public_finish_expected_tree_read_1_has_exact_failure_frontier() {
+    verify_finish(
+        FinishCase::Read("expected_tree", 1),
+        &"a".repeat(SHA_LEN),
+        0,
+        "Finish subject",
+        "Finish body",
+        b"saved user bytes\n",
+    );
+}
+
+#[test]
+fn public_finish_split_count_read_1_has_exact_failure_frontier() {
+    verify_finish(
+        FinishCase::Read("split_count", 1),
+        &"a".repeat(SHA_LEN),
+        0,
+        "Finish subject",
+        "Finish body",
+        b"saved user bytes\n",
+    );
+}
+
+#[test]
+fn public_finish_split_count_read_2_has_exact_failure_frontier() {
+    verify_finish(
+        FinishCase::Read("split_count", 2),
+        &"a".repeat(SHA_LEN),
+        0,
+        "Finish subject",
+        "Finish body",
+        b"saved user bytes\n",
+    );
+}
+
+#[test]
+fn public_finish_requires_rebase_read_2_has_exact_failure_frontier() {
+    verify_finish(
+        FinishCase::Read("requires_rebase", 2),
+        &"a".repeat(SHA_LEN),
+        0,
+        "Finish subject",
+        "Finish body",
+        b"saved user bytes\n",
+    );
+}
+
+#[test]
+fn public_finish_checkout_spawn_reply_has_exact_effect_frontier() {
+    verify_finish(
+        FinishCase::Process(FinishStage::Checkout, true),
+        &"a".repeat(SHA_LEN),
+        0,
+        "Finish subject",
+        "Finish body",
+        b"saved user bytes\n",
+    );
+}
+
+#[test]
+fn public_finish_checkout_status_reply_has_exact_effect_frontier() {
+    verify_finish(
+        FinishCase::Process(FinishStage::Checkout, false),
+        &"a".repeat(SHA_LEN),
+        0,
+        "Finish subject",
+        "Finish body",
+        b"saved user bytes\n",
+    );
+}
+
+#[test]
+fn public_finish_clean_spawn_reply_has_exact_effect_frontier() {
+    verify_finish(
+        FinishCase::Process(FinishStage::Clean, true),
+        &"a".repeat(SHA_LEN),
+        0,
+        "Finish subject",
+        "Finish body",
+        b"saved user bytes\n",
+    );
+}
+
+#[test]
+fn public_finish_clean_status_reply_has_exact_effect_frontier() {
+    verify_finish(
+        FinishCase::Process(FinishStage::Clean, false),
+        &"a".repeat(SHA_LEN),
+        0,
+        "Finish subject",
+        "Finish body",
+        b"saved user bytes\n",
+    );
+}
+
+#[test]
+fn public_finish_restore_spawn_reply_has_exact_effect_frontier() {
+    verify_finish(
+        FinishCase::Process(FinishStage::Restore, true),
+        &"a".repeat(SHA_LEN),
+        0,
+        "Finish subject",
+        "Finish body",
+        b"saved user bytes\n",
+    );
+}
+
+#[test]
+fn public_finish_restore_status_reply_has_exact_effect_frontier() {
+    verify_finish(
+        FinishCase::Process(FinishStage::Restore, false),
+        &"a".repeat(SHA_LEN),
+        0,
+        "Finish subject",
+        "Finish body",
+        b"saved user bytes\n",
+    );
+}
+
+#[test]
+fn public_finish_originalmessage_spawn_reply_has_exact_effect_frontier() {
+    verify_finish(
+        FinishCase::Process(FinishStage::OriginalMessage, true),
+        &"a".repeat(SHA_LEN),
+        0,
+        "Finish subject",
+        "Finish body",
+        b"saved user bytes\n",
+    );
+}
+
+#[test]
+fn public_finish_originalmessage_status_reply_has_exact_effect_frontier() {
+    verify_finish(
+        FinishCase::Process(FinishStage::OriginalMessage, false),
+        &"a".repeat(SHA_LEN),
+        0,
+        "Finish subject",
+        "Finish body",
+        b"saved user bytes\n",
+    );
+}
+
+#[test]
+fn public_finish_expectedtree_spawn_reply_has_exact_effect_frontier() {
+    verify_finish(
+        FinishCase::Process(FinishStage::ExpectedTree, true),
+        &"a".repeat(SHA_LEN),
+        0,
+        "Finish subject",
+        "Finish body",
+        b"saved user bytes\n",
+    );
+}
+
+#[test]
+fn public_finish_expectedtree_status_reply_has_exact_effect_frontier() {
+    verify_finish(
+        FinishCase::Process(FinishStage::ExpectedTree, false),
+        &"a".repeat(SHA_LEN),
+        0,
+        "Finish subject",
+        "Finish body",
+        b"saved user bytes\n",
+    );
+}
+
+#[test]
+fn public_finish_writetree_spawn_reply_has_exact_effect_frontier() {
+    verify_finish(
+        FinishCase::Process(FinishStage::WriteTree, true),
+        &"a".repeat(SHA_LEN),
+        0,
+        "Finish subject",
+        "Finish body",
+        b"saved user bytes\n",
+    );
+}
+
+#[test]
+fn public_finish_writetree_status_reply_has_exact_effect_frontier() {
+    verify_finish(
+        FinishCase::Process(FinishStage::WriteTree, false),
+        &"a".repeat(SHA_LEN),
+        0,
+        "Finish subject",
+        "Finish body",
+        b"saved user bytes\n",
+    );
+}
+
+#[test]
+fn public_finish_stageddiff_spawn_reply_has_exact_effect_frontier() {
+    verify_finish(
+        FinishCase::Process(FinishStage::StagedDiff, true),
+        &"a".repeat(SHA_LEN),
+        0,
+        "Finish subject",
+        "Finish body",
+        b"saved user bytes\n",
+    );
+}
+
+#[test]
+fn public_finish_stageddiff_status_reply_has_exact_effect_frontier() {
+    verify_finish(
+        FinishCase::Process(FinishStage::StagedDiff, false),
+        &"a".repeat(SHA_LEN),
+        0,
+        "Finish subject",
+        "Finish body",
+        b"saved user bytes\n",
+    );
+}
+
+#[test]
+fn public_finish_metadata_spawn_reply_has_exact_effect_frontier() {
+    verify_finish(
+        FinishCase::Process(FinishStage::Metadata, true),
+        &"a".repeat(SHA_LEN),
+        0,
+        "Finish subject",
+        "Finish body",
+        b"saved user bytes\n",
+    );
+}
+
+#[test]
+fn public_finish_metadata_status_reply_has_exact_effect_frontier() {
+    verify_finish(
+        FinishCase::Process(FinishStage::Metadata, false),
+        &"a".repeat(SHA_LEN),
+        0,
+        "Finish subject",
+        "Finish body",
+        b"saved user bytes\n",
+    );
+}
+
+#[test]
+fn public_finish_commit_spawn_reply_has_exact_effect_frontier() {
+    verify_finish(
+        FinishCase::Process(FinishStage::Commit, true),
+        &"a".repeat(SHA_LEN),
+        0,
+        "Finish subject",
+        "Finish body",
+        b"saved user bytes\n",
+    );
+}
+
+#[test]
+fn public_finish_commit_status_reply_has_exact_effect_frontier() {
+    verify_finish(
+        FinishCase::Process(FinishStage::Commit, false),
+        &"a".repeat(SHA_LEN),
+        0,
+        "Finish subject",
+        "Finish body",
+        b"saved user bytes\n",
+    );
+}
+
+#[test]
+fn public_finish_rebase_spawn_reply_has_exact_effect_frontier() {
+    verify_finish(
+        FinishCase::Process(FinishStage::Rebase, true),
+        &"a".repeat(SHA_LEN),
+        0,
+        "Finish subject",
+        "Finish body",
+        b"saved user bytes\n",
+    );
+}
+
+#[test]
+fn public_finish_rebase_status_reply_has_exact_effect_frontier() {
+    verify_finish(
+        FinishCase::Process(FinishStage::Rebase, false),
+        &"a".repeat(SHA_LEN),
+        0,
+        "Finish subject",
+        "Finish body",
+        b"saved user bytes\n",
+    );
+}
+
+#[test]
+fn public_finish_root_spawn_reply_has_exact_effect_frontier() {
+    verify_finish(
+        FinishCase::Process(FinishStage::Root, true),
+        &"a".repeat(SHA_LEN),
+        0,
+        "Finish subject",
+        "Finish body",
+        b"saved user bytes\n",
+    );
+}
+
+#[test]
+fn public_finish_root_status_reply_has_exact_effect_frontier() {
+    verify_finish(
+        FinishCase::Process(FinishStage::Root, false),
+        &"a".repeat(SHA_LEN),
+        0,
+        "Finish subject",
+        "Finish body",
+        b"saved user bytes\n",
+    );
+}
+
+#[test]
+fn public_finish_original_message_preserves_interior_and_trims_outer_whitespace() {
+    verify_finish(
+        FinishCase::Original,
+        &"f".repeat(SHA_LEN),
+        0,
+        "  original subject  ",
+        "  interior body  ",
+        b"protected bytes",
     );
 }

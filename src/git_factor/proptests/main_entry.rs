@@ -7,6 +7,7 @@ use crate::git_factor::tests::dispatch_contracts::{
     parser, parser_write_failure, refusal, reopen_failure, supplied_commit_failure,
     supplied_commit_success,
 };
+use crate::git_factor::tests::finish_contracts::{FinishCase, FinishStage, verify_finish};
 use crate::git_factor::tests::start_contracts::launcher::{LaunchFault, LaunchFixture};
 use crate::git_factor::tests::start_contracts::replay;
 use crate::git_factor::tests::start_contracts::{DirectStart, GateCase, query};
@@ -1237,4 +1238,287 @@ proptest! {
             "--abort cannot be combined with other options",
         );
     }
+}
+
+proptest! {
+    #[test]
+    fn public_finish_generated_reconstructed_message_and_tree(
+        case in prop::sample::select(vec![
+            FinishCase::Supplied,
+            FinishCase::Original,
+            FinishCase::Empty,
+            FinishCase::Fallback,
+        ]),
+        sha in "[0-9a-f]{40}",
+        previous in RangeInclusive::<u8>::new(0, 254),
+        subject in "[A-Za-z][A-Za-z 0-9]{0,20}",
+        body in "[A-Za-z][A-Za-z 0-9]{0,30}",
+        user in generated_bytes(any::<u8>(), 0..64),
+    ) {
+        verify_finish(case, &sha, previous, &subject, &body, &user);
+    }
+
+    #[test]
+    fn public_finish_generated_native_and_root_completion(
+        case in prop::sample::select(vec![
+            FinishCase::RebaseComplete,
+            FinishCase::RootComplete,
+        ]),
+        sha in "[0-9a-f]{40}",
+        previous in RangeInclusive::<u8>::new(0, 254),
+        subject in "[A-Za-z][A-Za-z 0-9]{0,20}",
+        body in "[A-Za-z][A-Za-z 0-9]{0,30}",
+        user in generated_bytes(any::<u8>(), 0..64),
+    ) {
+        verify_finish(case, &sha, previous, &subject, &body, &user);
+    }
+
+    #[test]
+    fn public_finish_generated_session_admission(
+        case in prop::sample::select(vec![
+            FinishCase::Absent,
+            FinishCase::ReopenQuery,
+            FinishCase::Pending,
+            FinishCase::InvalidPhase,
+        ]),
+        sha in "[0-9a-f]{40}",
+        previous in RangeInclusive::<u8>::new(0, 254),
+        subject in "[A-Za-z][A-Za-z 0-9]{0,20}",
+        body in "[A-Za-z][A-Za-z 0-9]{0,30}",
+        user in generated_bytes(any::<u8>(), 0..64),
+    ) {
+        verify_finish(case, &sha, previous, &subject, &body, &user);
+    }
+
+    #[test]
+    fn public_finish_generated_saved_commit_selection(
+        case in prop::sample::select(vec![
+            FinishCase::InvalidCommits,
+            FinishCase::InvalidIndex,
+            FinishCase::OutsideIndex,
+            FinishCase::InvalidRequires,
+        ]),
+        sha in "[0-9a-f]{40}",
+        previous in RangeInclusive::<u8>::new(0, 254),
+        subject in "[A-Za-z][A-Za-z 0-9]{0,20}",
+        body in "[A-Za-z][A-Za-z 0-9]{0,30}",
+        user in generated_bytes(any::<u8>(), 0..64),
+    ) {
+        verify_finish(case, &sha, previous, &subject, &body, &user);
+    }
+
+    #[test]
+    fn public_finish_generated_required_rebase_and_tree(
+        case in prop::sample::select(vec![
+            FinishCase::RebaseMissing,
+            FinishCase::InvalidExpected,
+            FinishCase::InvalidActual,
+            FinishCase::UnequalTree,
+        ]),
+        sha in "[0-9a-f]{40}",
+        previous in RangeInclusive::<u8>::new(0, 254),
+        subject in "[A-Za-z][A-Za-z 0-9]{0,20}",
+        body in "[A-Za-z][A-Za-z 0-9]{0,30}",
+        user in generated_bytes(any::<u8>(), 0..64),
+    ) {
+        verify_finish(case, &sha, previous, &subject, &body, &user);
+    }
+
+    #[test]
+    fn public_finish_generated_message_metadata_and_count(
+        case in prop::sample::select(vec![
+            FinishCase::EmptyOriginal,
+            FinishCase::InvalidMetadata,
+            FinishCase::InvalidCount,
+            FinishCase::Overflow,
+        ]),
+        sha in "[0-9a-f]{40}",
+        previous in RangeInclusive::<u8>::new(0, 254),
+        subject in "[A-Za-z][A-Za-z 0-9]{0,20}",
+        body in "[A-Za-z][A-Za-z 0-9]{0,30}",
+        user in generated_bytes(any::<u8>(), 0..64),
+    ) {
+        verify_finish(case, &sha, previous, &subject, &body, &user);
+    }
+
+    #[test]
+    fn public_finish_generated_count_and_cleanup_durability(
+        case in prop::sample::select(vec![
+            FinishCase::WriteCount,
+            FinishCase::RemoveDenied,
+            FinishCase::RemoveRetained,
+            FinishCase::RebaseRetained,
+        ]),
+        sha in "[0-9a-f]{40}",
+        previous in RangeInclusive::<u8>::new(0, 254),
+        subject in "[A-Za-z][A-Za-z 0-9]{0,20}",
+        body in "[A-Za-z][A-Za-z 0-9]{0,30}",
+        user in generated_bytes(any::<u8>(), 0..64),
+    ) {
+        verify_finish(case, &sha, previous, &subject, &body, &user);
+    }
+
+    #[test]
+    fn public_finish_generated_session_and_selection_reads(
+        case in prop::sample::select(vec![
+            FinishCase::Read("commits", 1),
+            FinishCase::Read("phase", 1),
+            FinishCase::Read("requires_rebase", 1),
+            FinishCase::Read("current_index", 1),
+        ]),
+        sha in "[0-9a-f]{40}",
+        previous in RangeInclusive::<u8>::new(0, 254),
+        subject in "[A-Za-z][A-Za-z 0-9]{0,20}",
+        body in "[A-Za-z][A-Za-z 0-9]{0,30}",
+        user in generated_bytes(any::<u8>(), 0..64),
+    ) {
+        verify_finish(case, &sha, previous, &subject, &body, &user);
+    }
+
+    #[test]
+    fn public_finish_generated_baseline_and_count_reads(
+        case in prop::sample::select(vec![
+            FinishCase::Read("current_index", 2),
+            FinishCase::Read("expected_tree", 1),
+            FinishCase::Read("split_count", 1),
+            FinishCase::Read("split_count", 2),
+        ]),
+        sha in "[0-9a-f]{40}",
+        previous in RangeInclusive::<u8>::new(0, 254),
+        subject in "[A-Za-z][A-Za-z 0-9]{0,20}",
+        body in "[A-Za-z][A-Za-z 0-9]{0,30}",
+        user in generated_bytes(any::<u8>(), 0..64),
+    ) {
+        verify_finish(case, &sha, previous, &subject, &body, &user);
+    }
+
+    #[test]
+    fn public_finish_generated_advance_policy_read(
+        case in prop::sample::select(vec![
+            FinishCase::Read("requires_rebase", 2),
+        ]),
+        sha in "[0-9a-f]{40}",
+        previous in RangeInclusive::<u8>::new(0, 254),
+        subject in "[A-Za-z][A-Za-z 0-9]{0,20}",
+        body in "[A-Za-z][A-Za-z 0-9]{0,30}",
+        user in generated_bytes(any::<u8>(), 0..64),
+    ) {
+        verify_finish(case, &sha, previous, &subject, &body, &user);
+    }
+
+    #[test]
+    fn public_finish_generated_final_output_writes(
+        case in prop::sample::select(vec![
+            FinishCase::Output(1),
+            FinishCase::Output(2),
+        ]),
+        sha in "[0-9a-f]{40}",
+        previous in RangeInclusive::<u8>::new(0, 254),
+        subject in "[A-Za-z][A-Za-z 0-9]{0,20}",
+        body in "[A-Za-z][A-Za-z 0-9]{0,30}",
+        user in generated_bytes(any::<u8>(), 0..64),
+    ) {
+        verify_finish(case, &sha, previous, &subject, &body, &user);
+    }
+
+    #[test]
+    fn public_finish_generated_checkout_and_clean_requests(
+        case in prop::sample::select(vec![
+            FinishCase::Process(FinishStage::Checkout, true),
+            FinishCase::Process(FinishStage::Checkout, false),
+            FinishCase::Process(FinishStage::Clean, true),
+            FinishCase::Process(FinishStage::Clean, false),
+        ]),
+        sha in "[0-9a-f]{40}",
+        previous in RangeInclusive::<u8>::new(0, 254),
+        subject in "[A-Za-z][A-Za-z 0-9]{0,20}",
+        body in "[A-Za-z][A-Za-z 0-9]{0,30}",
+        user in generated_bytes(any::<u8>(), 0..64),
+    ) {
+        verify_finish(case, &sha, previous, &subject, &body, &user);
+    }
+
+    #[test]
+    fn public_finish_generated_restore_and_original_message_requests(
+        case in prop::sample::select(vec![
+            FinishCase::Process(FinishStage::Restore, true),
+            FinishCase::Process(FinishStage::Restore, false),
+            FinishCase::Process(FinishStage::OriginalMessage, true),
+            FinishCase::Process(FinishStage::OriginalMessage, false),
+        ]),
+        sha in "[0-9a-f]{40}",
+        previous in RangeInclusive::<u8>::new(0, 254),
+        subject in "[A-Za-z][A-Za-z 0-9]{0,20}",
+        body in "[A-Za-z][A-Za-z 0-9]{0,30}",
+        user in generated_bytes(any::<u8>(), 0..64),
+    ) {
+        verify_finish(case, &sha, previous, &subject, &body, &user);
+    }
+
+    #[test]
+    fn public_finish_generated_expected_and_actual_tree_queries(
+        case in prop::sample::select(vec![
+            FinishCase::Process(FinishStage::ExpectedTree, true),
+            FinishCase::Process(FinishStage::ExpectedTree, false),
+            FinishCase::Process(FinishStage::WriteTree, true),
+            FinishCase::Process(FinishStage::WriteTree, false),
+        ]),
+        sha in "[0-9a-f]{40}",
+        previous in RangeInclusive::<u8>::new(0, 254),
+        subject in "[A-Za-z][A-Za-z 0-9]{0,20}",
+        body in "[A-Za-z][A-Za-z 0-9]{0,30}",
+        user in generated_bytes(any::<u8>(), 0..64),
+    ) {
+        verify_finish(case, &sha, previous, &subject, &body, &user);
+    }
+
+    #[test]
+    fn public_finish_generated_staged_diff_and_metadata_requests(
+        case in prop::sample::select(vec![
+            FinishCase::Process(FinishStage::StagedDiff, true),
+            FinishCase::Process(FinishStage::StagedDiff, false),
+            FinishCase::Process(FinishStage::Metadata, true),
+            FinishCase::Process(FinishStage::Metadata, false),
+        ]),
+        sha in "[0-9a-f]{40}",
+        previous in RangeInclusive::<u8>::new(0, 254),
+        subject in "[A-Za-z][A-Za-z 0-9]{0,20}",
+        body in "[A-Za-z][A-Za-z 0-9]{0,30}",
+        user in generated_bytes(any::<u8>(), 0..64),
+    ) {
+        verify_finish(case, &sha, previous, &subject, &body, &user);
+    }
+
+    #[test]
+    fn public_finish_generated_commit_and_native_advance_requests(
+        case in prop::sample::select(vec![
+            FinishCase::Process(FinishStage::Commit, true),
+            FinishCase::Process(FinishStage::Commit, false),
+            FinishCase::Process(FinishStage::Rebase, true),
+            FinishCase::Process(FinishStage::Rebase, false),
+        ]),
+        sha in "[0-9a-f]{40}",
+        previous in RangeInclusive::<u8>::new(0, 254),
+        subject in "[A-Za-z][A-Za-z 0-9]{0,20}",
+        body in "[A-Za-z][A-Za-z 0-9]{0,30}",
+        user in generated_bytes(any::<u8>(), 0..64),
+    ) {
+        verify_finish(case, &sha, previous, &subject, &body, &user);
+    }
+
+    #[test]
+    fn public_finish_generated_root_cleanup_queries(
+        case in prop::sample::select(vec![
+            FinishCase::Process(FinishStage::Root, true),
+            FinishCase::Process(FinishStage::Root, false),
+        ]),
+        sha in "[0-9a-f]{40}",
+        previous in RangeInclusive::<u8>::new(0, 254),
+        subject in "[A-Za-z][A-Za-z 0-9]{0,20}",
+        body in "[A-Za-z][A-Za-z 0-9]{0,30}",
+        user in generated_bytes(any::<u8>(), 0..64),
+    ) {
+        verify_finish(case, &sha, previous, &subject, &body, &user);
+    }
+
 }

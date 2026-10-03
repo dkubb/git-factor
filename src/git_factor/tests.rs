@@ -5,6 +5,9 @@ pub(in crate::git_factor) mod continue_contracts;
 #[path = "tests/dispatch_contracts.rs"]
 pub(in crate::git_factor) mod dispatch_contracts;
 
+#[path = "tests/finish_contracts.rs"]
+pub(in crate::git_factor) mod finish_contracts;
+
 #[path = "tests/main_entry.rs"]
 mod main_entry;
 #[path = "tests/start_contracts.rs"]
