@@ -4267,6 +4267,44 @@ fi
     }
 
     #[test]
+    fn nonquiet_native_commit_stdout_is_forwarded_to_stderr() {
+        let directory = init_repo();
+        let repo = directory.path();
+        commit_file(repo, "file.txt", "one\n", "chore: base");
+        commit_file(repo, "file.txt", "one\ntwo\n", "feat: change");
+        start_session(repo);
+        git(repo, &["add", "file.txt"]);
+        write_executable(
+            &git_dir(repo).join("hooks/commit-msg"),
+            "#!/bin/sh\nexit 1\n",
+        );
+        let (wrapper, bin) = make_git_wrapper_named(
+            "git",
+            "if [ \"${1-}\" = commit ]; then\n  printf 'native stdout\n'\n  printf 'native stderr\n' >&2\nfi\n",
+        );
+        let mut path = OsString::new();
+        path.push(bin.as_os_str());
+        path.push(OsStr::new(":"));
+        path.push(env::var_os("PATH").or_abort());
+
+        let mut expectation = GitFactorExpectation::default().code(EXIT_SOFTWARE).stderr(
+            "native stdout\nnative stderr\ngit command failed: git commit failed (exit 1)\n",
+        );
+        expectation.stdout = Some(StreamExpectation::new_exact(String::new()));
+        run_git_factor_with_prefixed_path(
+            repo,
+            &["--continue", "--message", "test: split"],
+            expectation,
+            path,
+        );
+
+        assert!(
+            wrapper.path().exists(),
+            "native wrapper remains alive for the Act"
+        );
+    }
+
+    #[test]
     fn start_reports_missing_git_binary_from_git_output() {
         let dir = init_repo();
         let repo = dir.path();
@@ -4498,9 +4536,9 @@ fi
         run_git_factor_with_env(
             repo,
             &["--continue", "--message", "test: slice"],
-            GitFactorExpectation::default()
-                .code(EXIT_SOFTWARE)
-                .stderr("git command failed: git read-tree failed (exit 1)\n"),
+            GitFactorExpectation::default().code(EXIT_SOFTWARE).stderr(
+                "Auto-merging file.txt\ngit command failed: git read-tree failed (exit 1)\n",
+            ),
             "PATH",
             wrapped_path,
         );
