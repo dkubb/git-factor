@@ -1509,8 +1509,9 @@ fi
         run_git_factor(
             repo,
             &["--abort"],
-            GitFactorExpectation::default()
-                .stdout("FACTOR: Session aborted for current commit step.\n"),
+            GitFactorExpectation::default().stdout(
+                "{\"operation\":\"abort\",\"rebase\":{\"in_progress\":false},\"actions\":{}}\n",
+            ),
         );
     }
 
@@ -3437,7 +3438,7 @@ HINTS:
             &["--abort"],
             GitFactorExpectation::default()
                 .stdout(
-                    "FACTOR: Session aborted for current commit step.\nFACTOR: Rebase still active. To abort full rebase, run: git rebase --abort\n",
+                    "{\"operation\":\"abort\",\"rebase\":{\"in_progress\":true},\"actions\":{\"abort_rebase\":[\"git\",\"rebase\",\"--abort\"]}}\n",
                 )
                 .rebase_apply_exists(true)
                 .rebase_merge_exists(false),
@@ -4978,9 +4979,7 @@ fi
             repo,
             &["--abort"],
             GitFactorExpectation::default()
-                .stdout_suffix(
-                    "FACTOR: Rebase still active. To abort full rebase, run: git rebase --abort\n",
-                )
+                .stdout("{\"operation\":\"abort\",\"rebase\":{\"in_progress\":true},\"actions\":{\"abort_rebase\":[\"git\",\"rebase\",\"--abort\"]}}\n")
                 .rebase_merge_exists(true)
                 .factor_state_exists(false),
             "PATH",
@@ -5020,7 +5019,9 @@ fi
             repo,
             &["--abort"],
             GitFactorExpectation::default()
-                .stdout("FACTOR: Session aborted for current commit step.\n")
+                .stdout(
+                    "{\"operation\":\"abort\",\"rebase\":{\"in_progress\":false},\"actions\":{}}\n",
+                )
                 .factor_state_exists(false),
         );
     }
@@ -5113,7 +5114,9 @@ fi
             repo,
             &["--abort"],
             GitFactorExpectation::default()
-                .stdout("FACTOR: Session aborted for current commit step.\n")
+                .stdout(
+                    "{\"operation\":\"abort\",\"rebase\":{\"in_progress\":false},\"actions\":{}}\n",
+                )
                 .factor_state_exists(false)
                 .path_exists(".git/factor", false),
             "PATH",
@@ -5316,7 +5319,9 @@ fi
             repo,
             &["--abort"],
             GitFactorExpectation::default()
-                .stdout("FACTOR: Session aborted for current commit step.\n")
+                .stdout(
+                    "{\"operation\":\"abort\",\"rebase\":{\"in_progress\":false},\"actions\":{}}\n",
+                )
                 .factor_state_exists(false),
             "PATH",
             format!("{}:{}", wrap_bin.display(), env::var("PATH").or_abort()),
@@ -5596,6 +5601,48 @@ fi
         assert!(!git_dir(repo).join("factor").exists());
         assert!(!git_dir(repo).join("rebase-merge").exists());
         assert!(!git_dir(repo).join("rebase-apply").exists());
+    }
+
+    #[test]
+    #[expect(
+        clippy::literal_string_with_formatting_args,
+        reason = "HEAD^{tree} is native Git revision syntax, not a Rust formatting placeholder"
+    )]
+    fn json_abort_retains_existing_reset_and_cleanup_contract() {
+        let directory = init_repo();
+        let repo = directory.path();
+        commit_file(repo, "base", "base\n", "Base");
+        commit_file(repo, "atom", "atom\n", "Selected source");
+        let head = git(repo, &["rev-parse", "HEAD"]);
+        let tree = git(repo, &["rev-parse", "HEAD^{tree}"]);
+        let refs = git(repo, &["show-ref"]);
+        run_git_factor(
+            repo,
+            &["--exec", "true", "HEAD"],
+            GitFactorExpectation::default(),
+        );
+        write_file(repo, "base", "attempt bytes\n");
+        git(repo, &["add", "base"]);
+        write_file(repo, "scratch", "attempt scratch\n");
+        run_git_factor(
+            repo,
+            &["--abort"],
+            GitFactorExpectation::default()
+                .stdout(
+                    "{\"operation\":\"abort\",\"rebase\":{\"in_progress\":false},\"actions\":{}}\n",
+                )
+                .factor_state_exists(false)
+                .rebase_merge_exists(false)
+                .rebase_apply_exists(false)
+                .git_status_porcelain("")
+                .path_exists("scratch", false),
+        );
+        assert_eq!(git(repo, &["rev-parse", "HEAD"]), head);
+        assert_eq!(git(repo, &["rev-parse", "HEAD^{tree}"]), tree);
+        assert_eq!(git(repo, &["write-tree"]), tree);
+        assert_eq!(git(repo, &["show-ref"]), refs);
+        assert_eq!(fs::read(repo.join("base")).or_abort(), b"base\n");
+        assert_eq!(fs::read(repo.join("atom")).or_abort(), b"atom\n");
     }
 
     #[test]

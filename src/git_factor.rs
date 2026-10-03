@@ -816,10 +816,7 @@ fn cmd_abort_in(ctx: &Ctx<'_>) -> Result<i32, FactorError> {
     run_git(ctx, &["clean", "--force", "--quiet", "-d"])?;
     session.remove_state_strict()?;
 
-    ctx.outln("FACTOR: Session aborted for current commit step.")?;
-    if is_mid_rebase_in(ctx) {
-        ctx.outln("FACTOR: Rebase still active. To abort full rebase, run: git rebase --abort")?;
-    }
+    output::aborted(ctx, is_mid_rebase_in(ctx))?;
 
     Ok(EXIT_OK)
 }

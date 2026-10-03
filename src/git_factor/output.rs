@@ -89,6 +89,61 @@ struct Status<'session> {
     session: Option<SessionStatus<'session>>,
 }
 
+/// Native rebase state observed after factor cleanup.
+#[derive(Serialize)]
+struct ObservedRebase {
+    /// Whether another rebase is still active.
+    in_progress: bool,
+}
+
+/// The action applicable when a rebase remains active.
+#[derive(Serialize)]
+struct AbortActions {
+    /// Native arguments for aborting the remaining rebase.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    abort_rebase: Option<[&'static str; 3]>,
+}
+
+/// Result of removing the current factor session.
+#[expect(
+    clippy::arbitrary_source_item_ordering,
+    reason = "field declaration order preserves the exact public abort JSON stream contract"
+)]
+#[derive(Serialize)]
+struct Aborted {
+    /// Command producing the result.
+    operation: &'static str,
+    /// Native observation after cleanup.
+    rebase: ObservedRebase,
+    /// Applicable recovery action.
+    actions: AbortActions,
+}
+
+/// Writes the observed abort result and applicable native action.
+#[cfg_attr(
+    not(test),
+    expect(
+        clippy::single_call_fn,
+        reason = "abort JSON is emitted through the owning command boundary"
+    )
+)]
+#[expect(
+    clippy::expect_used,
+    clippy::unwrap_in_result,
+    reason = "the closed abort representation contains only JSON-compatible strings and booleans"
+)]
+pub(in crate::git_factor) fn aborted(ctx: &Ctx<'_>, in_progress: bool) -> Result<(), FactorError> {
+    let result = Aborted {
+        operation: "abort",
+        rebase: ObservedRebase { in_progress },
+        actions: AbortActions {
+            abort_rebase: in_progress.then_some(["git", "rebase", "--abort"]),
+        },
+    };
+    let json = serde_json::to_string(&result).expect("abort facts are JSON-compatible");
+    ctx.outln(&json)
+}
+
 /// Writes one complete normalized status result, followed by a newline.
 #[expect(
     clippy::expect_used,

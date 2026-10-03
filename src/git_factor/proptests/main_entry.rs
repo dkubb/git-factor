@@ -13,7 +13,9 @@ use crate::git_factor::tests::start_contracts::{DirectStart, GateCase, query};
 use crate::git_factor::tests::status_contracts;
 use crate::git_factor::tests::verify_public_abort_fallback_refusal;
 use crate::git_factor::tests::verify_public_status_phase_refusal;
-use crate::git_factor::tests::{verify_public_inactive_status, verify_public_status};
+use crate::git_factor::tests::{
+    verify_public_abort, verify_public_inactive_status, verify_public_status,
+};
 use core::iter::repeat_n;
 use core::num::{NonZeroU8, NonZeroUsize};
 use core::ops::RangeInclusive;
@@ -28,7 +30,7 @@ proptest! {
 
     #[test]
     fn public_abort_reports_generated_output_refusals_after_cleanup(
-        sha in "[0-9a-f]{40}", fail_at in RangeInclusive::<usize>::new(1, 4),
+        sha in "[0-9a-f]{40}", fail_at in RangeInclusive::<usize>::new(1, 2),
     ) { abort_contracts::successful(&sha, false, true, false, fail_at); }
 
     #[test]
@@ -391,7 +393,7 @@ fn cmd_abort_uses_current_commit_when_start_head_is_missing() {
     assert_eq!(code, EXIT_OK);
     assert_eq!(
         io.out.borrow().as_str(),
-        "FACTOR: Session aborted for current commit step.\n"
+        "{\"operation\":\"abort\",\"rebase\":{\"in_progress\":false},\"actions\":{}}\n"
     );
     assert!(!state_dir.exists(), "state dir should be removed");
 }
@@ -1213,5 +1215,14 @@ proptest! {
         body in string_regex("[a-z]{0,24}").or_abort("inactive user bytes strategy"),
     ) {
         verify_public_inactive_status(&body);
+    }
+}
+
+proptest! {
+    #[test]
+    fn public_abort_reports_generated_reset_identity_and_rebase_observation(
+        in_progress in any::<bool>(), sha in "[0-9a-f]{40}",
+    ) {
+        verify_public_abort(in_progress, &sha);
     }
 }
