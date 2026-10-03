@@ -461,26 +461,6 @@ mod resolve_commit {
                     r#" cwd="/contract/repository""#,
                 )
                 .to_owned(),
-                concat!(
-                    r#"output git ["rev-parse", "--verify", "HEAD"]"#,
-                    r#" cwd="/contract/repository""#,
-                )
-                .to_owned(),
-                concat!(
-                    r#"output git ["rev-parse", "--verify", "HEAD^{tree}"]"#,
-                    r#" cwd="/contract/repository""#,
-                )
-                .to_owned(),
-                concat!(
-                    r#"output git ["rev-parse", "--git-dir"]"#,
-                    r#" cwd="/contract/repository""#,
-                )
-                .to_owned(),
-                concat!(
-                    r#"output git ["--no-optional-locks", "status", "--porcelain=v1", "--untracked-files=all"]"#,
-                    r#" cwd="/contract/repository""#,
-                )
-                .to_owned(),
             ]
         );
     }

@@ -1043,6 +1043,10 @@ fn root(case: FinishCase) -> bool {
     )
 }
 
+#[expect(
+    clippy::single_call_fn,
+    reason = "error-log snapshot request oracle stays separate from the public Act"
+)]
 fn snapshot_requests(repo: &Path) -> Vec<RecordedCall> {
     vec![
         output_request(&["rev-parse", "--verify", "HEAD"], repo),
@@ -1132,9 +1136,6 @@ pub(in crate::git_factor) fn verify_finish(
     .collect();
     let failure = expected_error(case, repo, sha);
     let mut requests = expected_requests(repo, case, sha, &commit);
-    if matches!(case, FinishCase::Process(effect, true) if effect.output()) {
-        requests.extend(snapshot_requests(repo));
-    }
     let removed = failure.is_none()
         || matches!(
             case,

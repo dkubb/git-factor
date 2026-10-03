@@ -1,3 +1,8 @@
+/// Arrange-only observations for direct Git-output contracts.
+#[cfg(test)]
+#[path = "git_output_contracts.rs"]
+mod output_contracts;
+
 #[cfg_attr(
     not(test),
     expect(
@@ -27,7 +32,11 @@ fn command_output(ctx: &Ctx<'_>, bin: &str, args: &[&str]) -> Result<Output, Fac
         Ok(output) => output,
         Err(err) => {
             let duration_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
-            let after = collect_repo_snapshot(ctx);
+            let after = if trace_enabled {
+                collect_repo_snapshot(ctx)
+            } else {
+                RepoSnapshot::default()
+            };
             let err_text = err.to_string();
             trace_process_command(
                 ctx,
@@ -315,6 +324,298 @@ mod tests {
     mod git_output {
         use super::*;
 
+        use super::super::output_contracts::{RecordingRunner, snapshot, successful};
+
+        #[test]
+        fn spawn_failure_without_trace_makes_only_the_requested_query() {
+            let directory = TempDir::new().or_abort("output contract directory");
+            let runner = RecordingRunner::new(vec![Err(io::Error::other("query launch refused"))]);
+            let environment = TestEnv {
+                cwd: directory.path().to_path_buf(),
+                trace_log: None,
+            };
+            let io = BufferIo::default();
+            let ctx = Ctx {
+                runner: &runner,
+                cwd: environment.cwd.clone(),
+                env: &environment,
+                io: &io,
+                fs: &REAL_FS,
+            };
+
+            let result = super::super::git_output(&ctx, &["rev-parse", "--short", "HEAD"]);
+
+            let error = result.err_or_abort("requested query cannot spawn");
+            assert!(
+                matches!(&error, FactorError::GitCommand(message) if message.as_str() == "git rev-parse: query launch refused"),
+                "unexpected error: {error:?}"
+            );
+            assert_eq!(
+                runner.requests(),
+                vec![(
+                    "git".to_owned(),
+                    vec![
+                        "rev-parse".to_owned(),
+                        "--short".to_owned(),
+                        "HEAD".to_owned()
+                    ],
+                    directory.path().to_path_buf()
+                )]
+            );
+            assert_eq!(io.stdout(), "");
+            assert_eq!(io.stderr(), "");
+            assert_eq!(
+                fs::read_dir(directory.path())
+                    .or_abort("read contract directory")
+                    .count(),
+                0
+            );
+        }
+        #[test]
+        fn spawn_failure_with_empty_trace_path_makes_only_the_requested_query() {
+            let directory = TempDir::new().or_abort("output contract directory");
+            let runner = RecordingRunner::new(vec![Err(io::Error::other("query launch refused"))]);
+            let environment = TestEnv {
+                cwd: directory.path().to_path_buf(),
+                trace_log: Some(OsString::new()),
+            };
+            let io = BufferIo::default();
+            let ctx = Ctx {
+                runner: &runner,
+                cwd: environment.cwd.clone(),
+                env: &environment,
+                io: &io,
+                fs: &REAL_FS,
+            };
+
+            let result = super::super::git_output(&ctx, &["rev-parse", "--short", "HEAD"]);
+
+            let error = result.err_or_abort("requested query cannot spawn");
+            assert!(
+                matches!(&error, FactorError::GitCommand(message) if message.as_str() == "git rev-parse: query launch refused"),
+                "unexpected error: {error:?}"
+            );
+            assert_eq!(
+                runner.requests(),
+                vec![(
+                    "git".to_owned(),
+                    vec![
+                        "rev-parse".to_owned(),
+                        "--short".to_owned(),
+                        "HEAD".to_owned()
+                    ],
+                    directory.path().to_path_buf()
+                )]
+            );
+            assert_eq!(io.stdout(), "");
+            assert_eq!(io.stderr(), "");
+            assert_eq!(
+                fs::read_dir(directory.path())
+                    .or_abort("read contract directory")
+                    .count(),
+                0
+            );
+        }
+        #[test]
+        fn enabled_trace_preserves_failed_query_and_both_snapshots() {
+            let directory = TempDir::new().or_abort("output contract directory");
+            let trace_path = directory.path().join("trace.jsonl");
+            let mut replies = snapshot("before-head", "before-tree", directory.path());
+            replies.push(Err(io::Error::other("query launch refused")));
+            replies.extend(snapshot("after-head", "after-tree", directory.path()));
+            let runner = RecordingRunner::new(replies);
+            let environment = TestEnv {
+                cwd: directory.path().to_path_buf(),
+                trace_log: Some(trace_path.as_os_str().to_os_string()),
+            };
+            let io = BufferIo::default();
+            let ctx = Ctx {
+                runner: &runner,
+                cwd: environment.cwd.clone(),
+                env: &environment,
+                io: &io,
+                fs: &REAL_FS,
+            };
+
+            let result = super::super::git_output(&ctx, &["contract-query"]);
+
+            let error = result.err_or_abort("requested query cannot spawn");
+            assert!(
+                matches!(&error, FactorError::GitCommand(message) if message.as_str() == "git contract-query: query launch refused"),
+                "unexpected error: {error:?}"
+            );
+            let stdout_json = "null";
+            let stderr_json = "\"query launch refused\"";
+            assert_eq!(
+                runner.requests(),
+                [
+                    vec!["rev-parse", "--verify", "HEAD"],
+                    vec!["rev-parse", "--verify", "HEAD^{tree}"],
+                    vec!["rev-parse", "--git-dir"],
+                    vec!["rev-parse", "--show-toplevel"],
+                    vec![
+                        "--no-optional-locks",
+                        "status",
+                        "--porcelain=v1",
+                        "--untracked-files=all"
+                    ],
+                    vec!["contract-query"],
+                    vec!["rev-parse", "--verify", "HEAD"],
+                    vec!["rev-parse", "--verify", "HEAD^{tree}"],
+                    vec!["rev-parse", "--git-dir"],
+                    vec!["rev-parse", "--show-toplevel"],
+                    vec![
+                        "--no-optional-locks",
+                        "status",
+                        "--porcelain=v1",
+                        "--untracked-files=all"
+                    ],
+                ]
+                .into_iter()
+                .map(|args| (
+                    "git".to_owned(),
+                    args.into_iter().map(str::to_owned).collect(),
+                    directory.path().to_path_buf()
+                ))
+                .collect::<Vec<_>>()
+            );
+            assert_eq!(io.stdout(), "");
+            assert_eq!(io.stderr(), "");
+            let trace = fs::read_to_string(&trace_path).or_abort("read output trace");
+            assert_eq!(trace.lines().count(), 1);
+            assert!(trace.ends_with('\n'));
+            let mut record: serde_json::Value =
+                serde_json::from_str(trace.trim_end_matches('\n')).or_abort("parse output trace");
+            let object = record.as_object_mut().or_abort("trace is an object");
+            assert!(
+                object
+                    .remove("ts_unix_ms")
+                    .and_then(|value| value.as_u64())
+                    .is_some()
+            );
+            assert!(
+                object
+                    .remove("duration_ms")
+                    .and_then(|value| value.as_u64())
+                    .is_some()
+            );
+            let cwd_json = serde_json::to_string(&directory.path().to_string_lossy())
+                .or_abort("serialize exact contract cwd");
+            let git_dir_json =
+                serde_json::to_string(&directory.path().join(".git").to_string_lossy())
+                    .or_abort("serialize exact Git directory");
+            let expected: serde_json::Value = serde_json::from_str(&format!(r#"{{
+                "event":"process","mode":"output","bin":"git","args":["contract-query"],"env":[],"quiet":false,
+                "spawned":false,"exit_code":null,"stdout":{stdout_json},"stderr":{stderr_json},
+                "before_head":"before-head","before_head_tree":"before-tree","before_git_dir":{git_dir_json},"before_toplevel":{cwd_json},
+                "before_staged_paths":[],"before_unstaged_paths":[],"before_untracked_paths":[],
+                "before_factor_current_index":null,"before_factor_split_count":null,"before_factor_requires_rebase":null,"before_factor_expected_tree":null,"before_factor_current_commit":null,
+                "before_rebase_state":null,"before_rebase_msgnum":null,"before_rebase_end":null,"before_rebase_todo_head":null,"before_rebase_done_tail":null,
+                "after_head":"after-head","after_head_tree":"after-tree","after_git_dir":{git_dir_json},"after_toplevel":{cwd_json},
+                "after_staged_paths":[],"after_unstaged_paths":[],"after_untracked_paths":[],
+                "after_factor_current_index":null,"after_factor_split_count":null,"after_factor_requires_rebase":null,"after_factor_expected_tree":null,"after_factor_current_commit":null,
+                "after_rebase_state":null,"after_rebase_msgnum":null,"after_rebase_end":null,"after_rebase_todo_head":null,"after_rebase_done_tail":null
+            }}"#)).or_abort("parse literal trace oracle");
+            assert_eq!(record, expected);
+        }
+        #[test]
+        fn enabled_trace_preserves_successful_query_and_both_snapshots() {
+            let directory = TempDir::new().or_abort("output contract directory");
+            let trace_path = directory.path().join("trace.jsonl");
+            let mut replies = snapshot("before-head", "before-tree", directory.path());
+            replies.push(Ok(successful(b" value\n", b"successful diagnostic")));
+            replies.extend(snapshot("after-head", "after-tree", directory.path()));
+            let runner = RecordingRunner::new(replies);
+            let environment = TestEnv {
+                cwd: directory.path().to_path_buf(),
+                trace_log: Some(trace_path.as_os_str().to_os_string()),
+            };
+            let io = BufferIo::default();
+            let ctx = Ctx {
+                runner: &runner,
+                cwd: environment.cwd.clone(),
+                env: &environment,
+                io: &io,
+                fs: &REAL_FS,
+            };
+
+            let result = super::super::git_output(&ctx, &["contract-query"]);
+
+            assert_eq!(result.or_abort("requested query succeeds"), "value");
+            let stdout_json = "\" value\\n\"";
+            let stderr_json = "\"successful diagnostic\"";
+            assert_eq!(
+                runner.requests(),
+                [
+                    vec!["rev-parse", "--verify", "HEAD"],
+                    vec!["rev-parse", "--verify", "HEAD^{tree}"],
+                    vec!["rev-parse", "--git-dir"],
+                    vec!["rev-parse", "--show-toplevel"],
+                    vec![
+                        "--no-optional-locks",
+                        "status",
+                        "--porcelain=v1",
+                        "--untracked-files=all"
+                    ],
+                    vec!["contract-query"],
+                    vec!["rev-parse", "--verify", "HEAD"],
+                    vec!["rev-parse", "--verify", "HEAD^{tree}"],
+                    vec!["rev-parse", "--git-dir"],
+                    vec!["rev-parse", "--show-toplevel"],
+                    vec![
+                        "--no-optional-locks",
+                        "status",
+                        "--porcelain=v1",
+                        "--untracked-files=all"
+                    ],
+                ]
+                .into_iter()
+                .map(|args| (
+                    "git".to_owned(),
+                    args.into_iter().map(str::to_owned).collect(),
+                    directory.path().to_path_buf()
+                ))
+                .collect::<Vec<_>>()
+            );
+            assert_eq!(io.stdout(), "");
+            assert_eq!(io.stderr(), "");
+            let trace = fs::read_to_string(&trace_path).or_abort("read output trace");
+            assert_eq!(trace.lines().count(), 1);
+            assert!(trace.ends_with('\n'));
+            let mut record: serde_json::Value =
+                serde_json::from_str(trace.trim_end_matches('\n')).or_abort("parse output trace");
+            let object = record.as_object_mut().or_abort("trace is an object");
+            assert!(
+                object
+                    .remove("ts_unix_ms")
+                    .and_then(|value| value.as_u64())
+                    .is_some()
+            );
+            assert!(
+                object
+                    .remove("duration_ms")
+                    .and_then(|value| value.as_u64())
+                    .is_some()
+            );
+            let cwd_json = serde_json::to_string(&directory.path().to_string_lossy())
+                .or_abort("serialize exact contract cwd");
+            let git_dir_json =
+                serde_json::to_string(&directory.path().join(".git").to_string_lossy())
+                    .or_abort("serialize exact Git directory");
+            let expected: serde_json::Value = serde_json::from_str(&format!(r#"{{
+                "event":"process","mode":"output","bin":"git","args":["contract-query"],"env":[],"quiet":false,
+                "spawned":true,"exit_code":0,"stdout":{stdout_json},"stderr":{stderr_json},
+                "before_head":"before-head","before_head_tree":"before-tree","before_git_dir":{git_dir_json},"before_toplevel":{cwd_json},
+                "before_staged_paths":[],"before_unstaged_paths":[],"before_untracked_paths":[],
+                "before_factor_current_index":null,"before_factor_split_count":null,"before_factor_requires_rebase":null,"before_factor_expected_tree":null,"before_factor_current_commit":null,
+                "before_rebase_state":null,"before_rebase_msgnum":null,"before_rebase_end":null,"before_rebase_todo_head":null,"before_rebase_done_tail":null,
+                "after_head":"after-head","after_head_tree":"after-tree","after_git_dir":{git_dir_json},"after_toplevel":{cwd_json},
+                "after_staged_paths":[],"after_unstaged_paths":[],"after_untracked_paths":[],
+                "after_factor_current_index":null,"after_factor_split_count":null,"after_factor_requires_rebase":null,"after_factor_expected_tree":null,"after_factor_current_commit":null,
+                "after_rebase_state":null,"after_rebase_msgnum":null,"after_rebase_end":null,"after_rebase_todo_head":null,"after_rebase_done_tail":null
+            }}"#)).or_abort("parse literal trace oracle");
+            assert_eq!(record, expected);
+        }
         #[test]
         fn silent_exit_reports_native_status() {
             let exit_code: i32 = 42;
@@ -633,14 +934,16 @@ mod tests {
     }
 
     impl BufferIo {
-        fn stderr(&self) -> String {
+        /// Returns the exact stderr observed by sibling direct providers.
+        pub(in crate::git_factor::git) fn stderr(&self) -> String {
             self.stderr
                 .lock()
                 .or_abort("stderr lock should not be poisoned")
                 .clone()
         }
 
-        fn stdout(&self) -> String {
+        /// Returns the exact stdout observed by sibling direct providers.
+        pub(in crate::git_factor::git) fn stdout(&self) -> String {
             self.stdout
                 .lock()
                 .or_abort("stdout lock should not be poisoned")
@@ -2122,7 +2425,260 @@ mod proptests {
         use super::*;
         use std::os::unix::process::ExitStatusExt as _;
 
+        use super::super::output_contracts::{RecordingRunner, snapshot, successful};
+        use std::ffi::OsString;
+        use tempfile::TempDir;
+
         proptest! {
+            #[test]
+            fn disabled_trace_spawn_failure_makes_only_the_requested_query(
+                trace_log in prop_oneof![Just(None), Just(Some(OsString::new()))],
+                args in vec("[a-z]{1,12}", 0..4),
+                diagnostic in "[a-z ]{1,32}",
+            ) {
+                let directory = TempDir::new().or_abort("output contract directory");
+                let runner = RecordingRunner::new(vec![Err(io::Error::other(diagnostic.clone()))]);
+                let environment = TestEnv {
+                    cwd: directory.path().to_path_buf(),
+                    trace_log,
+                };
+                let io = BufferIo::default();
+                let ctx = Ctx {
+                    runner: &runner,
+                    cwd: environment.cwd.clone(),
+                    env: &environment,
+                    io: &io,
+                    fs: &REAL_FS,
+                };
+                let arguments = args.iter().map(String::as_str).collect::<Vec<_>>();
+                let expected_error = format!(
+                    "git {}: {diagnostic}",
+                    args.first().map_or("", String::as_str)
+                );
+
+                let result = super::super::git_output(&ctx, &arguments);
+
+                let error = result.err_or_abort("requested query cannot spawn");
+                let FactorError::GitCommand(message) = error else {
+                    return Err(TestCaseError::fail("spawn failure must be a GitCommand"));
+                };
+                prop_assert_eq!(message.as_str(), expected_error.as_str());
+                prop_assert_eq!(
+                    runner.requests(),
+                    vec![("git".to_owned(), args, directory.path().to_path_buf())]
+                );
+                prop_assert_eq!(io.stdout(), "");
+                prop_assert_eq!(io.stderr(), "");
+                prop_assert_eq!(
+                    fs::read_dir(directory.path())
+                        .or_abort("read contract directory")
+                        .count(),
+                    0
+                );
+            }
+            #[test]
+            fn enabled_trace_preserves_generated_launch_errors_and_snapshots(payload in "[a-z]{1,32}") {
+                let directory = TempDir::new().or_abort("output contract directory");
+                let trace_path = directory.path().join("trace.jsonl");
+                let mut replies = snapshot("before-head", "before-tree", directory.path());
+                replies.push(Err(io::Error::other(payload.clone())));
+                replies.extend(snapshot("after-head", "after-tree", directory.path()));
+                let runner = RecordingRunner::new(replies);
+                let environment = TestEnv {
+                    cwd: directory.path().to_path_buf(),
+                    trace_log: Some(trace_path.as_os_str().to_os_string()),
+                };
+                let io = BufferIo::default();
+                let ctx = Ctx {
+                    runner: &runner,
+                    cwd: environment.cwd.clone(),
+                    env: &environment,
+                    io: &io,
+                    fs: &REAL_FS,
+                };
+
+                let result = super::super::git_output(&ctx, &["contract-query"]);
+
+                let error = result.err_or_abort("requested query cannot spawn");
+                let FactorError::GitCommand(message) = error else {
+                    return Err(TestCaseError::fail("spawn failure must be a GitCommand"));
+                };
+                prop_assert_eq!(message.as_str(), format!("git contract-query: {payload}"));
+                let stdout_json = "null".to_owned();
+                let stderr_json = serde_json::to_string(&payload).or_abort("serialize exact error");
+                prop_assert_eq!(
+                    runner.requests(),
+                    [
+                        vec!["rev-parse", "--verify", "HEAD"],
+                        vec!["rev-parse", "--verify", "HEAD^{tree}"],
+                        vec!["rev-parse", "--git-dir"],
+                        vec!["rev-parse", "--show-toplevel"],
+                        vec![
+                            "--no-optional-locks",
+                            "status",
+                            "--porcelain=v1",
+                            "--untracked-files=all"
+                        ],
+                        vec!["contract-query"],
+                        vec!["rev-parse", "--verify", "HEAD"],
+                        vec!["rev-parse", "--verify", "HEAD^{tree}"],
+                        vec!["rev-parse", "--git-dir"],
+                        vec!["rev-parse", "--show-toplevel"],
+                        vec![
+                            "--no-optional-locks",
+                            "status",
+                            "--porcelain=v1",
+                            "--untracked-files=all"
+                        ],
+                    ]
+                    .into_iter()
+                    .map(|args| (
+                        "git".to_owned(),
+                        args.into_iter().map(str::to_owned).collect(),
+                        directory.path().to_path_buf()
+                    ))
+                    .collect::<Vec<_>>()
+                );
+                prop_assert_eq!(io.stdout(), "");
+                prop_assert_eq!(io.stderr(), "");
+                let trace = fs::read_to_string(&trace_path).or_abort("read output trace");
+                prop_assert_eq!(trace.lines().count(), 1);
+                prop_assert!(trace.ends_with('\n'));
+                let mut record: serde_json::Value =
+                    serde_json::from_str(trace.trim_end_matches('\n')).or_abort("parse output trace");
+                let object = record.as_object_mut().or_abort("trace is an object");
+                prop_assert!(
+                    object
+                        .remove("ts_unix_ms")
+                        .and_then(|value| value.as_u64())
+                        .is_some()
+                );
+                prop_assert!(
+                    object
+                        .remove("duration_ms")
+                        .and_then(|value| value.as_u64())
+                        .is_some()
+                );
+                let cwd_json = serde_json::to_string(&directory.path().to_string_lossy())
+                    .or_abort("serialize exact contract cwd");
+                let git_dir_json = serde_json::to_string(&directory.path().join(".git").to_string_lossy())
+                    .or_abort("serialize exact Git directory");
+                let expected: serde_json::Value = serde_json::from_str(&format!(r#"{{
+                            "event":"process","mode":"output","bin":"git","args":["contract-query"],"env":[],"quiet":false,
+                            "spawned":false,"exit_code":null,"stdout":{stdout_json},"stderr":{stderr_json},
+                            "before_head":"before-head","before_head_tree":"before-tree","before_git_dir":{git_dir_json},"before_toplevel":{cwd_json},
+                            "before_staged_paths":[],"before_unstaged_paths":[],"before_untracked_paths":[],
+                            "before_factor_current_index":null,"before_factor_split_count":null,"before_factor_requires_rebase":null,"before_factor_expected_tree":null,"before_factor_current_commit":null,
+                            "before_rebase_state":null,"before_rebase_msgnum":null,"before_rebase_end":null,"before_rebase_todo_head":null,"before_rebase_done_tail":null,
+                            "after_head":"after-head","after_head_tree":"after-tree","after_git_dir":{git_dir_json},"after_toplevel":{cwd_json},
+                            "after_staged_paths":[],"after_unstaged_paths":[],"after_untracked_paths":[],
+                            "after_factor_current_index":null,"after_factor_split_count":null,"after_factor_requires_rebase":null,"after_factor_expected_tree":null,"after_factor_current_commit":null,
+                            "after_rebase_state":null,"after_rebase_msgnum":null,"after_rebase_end":null,"after_rebase_todo_head":null,"after_rebase_done_tail":null
+                        }}"#)).or_abort("parse literal trace oracle");
+                prop_assert_eq!(record, expected);
+            }
+            #[test]
+            fn enabled_trace_preserves_generated_success_bytes_and_snapshots(payload in "[a-z]{1,32}") {
+                let directory = TempDir::new().or_abort("output contract directory");
+                let trace_path = directory.path().join("trace.jsonl");
+                let mut replies = snapshot("before-head", "before-tree", directory.path());
+                replies.push(Ok(successful(
+                    format!(" \t{payload}\n").as_bytes(),
+                    b"successful diagnostic",
+                )));
+                replies.extend(snapshot("after-head", "after-tree", directory.path()));
+                let runner = RecordingRunner::new(replies);
+                let environment = TestEnv {
+                    cwd: directory.path().to_path_buf(),
+                    trace_log: Some(trace_path.as_os_str().to_os_string()),
+                };
+                let io = BufferIo::default();
+                let ctx = Ctx {
+                    runner: &runner,
+                    cwd: environment.cwd.clone(),
+                    env: &environment,
+                    io: &io,
+                    fs: &REAL_FS,
+                };
+
+                let result = super::super::git_output(&ctx, &["contract-query"]);
+
+                let actual = result.or_abort("requested query succeeds");
+                prop_assert_eq!(actual.as_str(), payload.as_str());
+                let stdout_json =
+                    serde_json::to_string(&format!(" \t{payload}\n")).or_abort("serialize exact stdout");
+                let stderr_json = "\"successful diagnostic\"".to_owned();
+                prop_assert_eq!(
+                    runner.requests(),
+                    [
+                        vec!["rev-parse", "--verify", "HEAD"],
+                        vec!["rev-parse", "--verify", "HEAD^{tree}"],
+                        vec!["rev-parse", "--git-dir"],
+                        vec!["rev-parse", "--show-toplevel"],
+                        vec![
+                            "--no-optional-locks",
+                            "status",
+                            "--porcelain=v1",
+                            "--untracked-files=all"
+                        ],
+                        vec!["contract-query"],
+                        vec!["rev-parse", "--verify", "HEAD"],
+                        vec!["rev-parse", "--verify", "HEAD^{tree}"],
+                        vec!["rev-parse", "--git-dir"],
+                        vec!["rev-parse", "--show-toplevel"],
+                        vec![
+                            "--no-optional-locks",
+                            "status",
+                            "--porcelain=v1",
+                            "--untracked-files=all"
+                        ],
+                    ]
+                    .into_iter()
+                    .map(|args| (
+                        "git".to_owned(),
+                        args.into_iter().map(str::to_owned).collect(),
+                        directory.path().to_path_buf()
+                    ))
+                    .collect::<Vec<_>>()
+                );
+                prop_assert_eq!(io.stdout(), "");
+                prop_assert_eq!(io.stderr(), "");
+                let trace = fs::read_to_string(&trace_path).or_abort("read output trace");
+                prop_assert_eq!(trace.lines().count(), 1);
+                prop_assert!(trace.ends_with('\n'));
+                let mut record: serde_json::Value =
+                    serde_json::from_str(trace.trim_end_matches('\n')).or_abort("parse output trace");
+                let object = record.as_object_mut().or_abort("trace is an object");
+                prop_assert!(
+                    object
+                        .remove("ts_unix_ms")
+                        .and_then(|value| value.as_u64())
+                        .is_some()
+                );
+                prop_assert!(
+                    object
+                        .remove("duration_ms")
+                        .and_then(|value| value.as_u64())
+                        .is_some()
+                );
+                let cwd_json = serde_json::to_string(&directory.path().to_string_lossy())
+                    .or_abort("serialize exact contract cwd");
+                let git_dir_json = serde_json::to_string(&directory.path().join(".git").to_string_lossy())
+                    .or_abort("serialize exact Git directory");
+                let expected: serde_json::Value = serde_json::from_str(&format!(r#"{{
+                            "event":"process","mode":"output","bin":"git","args":["contract-query"],"env":[],"quiet":false,
+                            "spawned":true,"exit_code":0,"stdout":{stdout_json},"stderr":{stderr_json},
+                            "before_head":"before-head","before_head_tree":"before-tree","before_git_dir":{git_dir_json},"before_toplevel":{cwd_json},
+                            "before_staged_paths":[],"before_unstaged_paths":[],"before_untracked_paths":[],
+                            "before_factor_current_index":null,"before_factor_split_count":null,"before_factor_requires_rebase":null,"before_factor_expected_tree":null,"before_factor_current_commit":null,
+                            "before_rebase_state":null,"before_rebase_msgnum":null,"before_rebase_end":null,"before_rebase_todo_head":null,"before_rebase_done_tail":null,
+                            "after_head":"after-head","after_head_tree":"after-tree","after_git_dir":{git_dir_json},"after_toplevel":{cwd_json},
+                            "after_staged_paths":[],"after_unstaged_paths":[],"after_untracked_paths":[],
+                            "after_factor_current_index":null,"after_factor_split_count":null,"after_factor_requires_rebase":null,"after_factor_expected_tree":null,"after_factor_current_commit":null,
+                            "after_rebase_state":null,"after_rebase_msgnum":null,"after_rebase_end":null,"after_rebase_todo_head":null,"after_rebase_done_tail":null
+                        }}"#)).or_abort("parse literal trace oracle");
+                prop_assert_eq!(record, expected);
+            }
             #[test]
             fn whitespace_stderr_reports_each_nonzero_exit_status(
                 exit_code in 1..=u8::MAX,

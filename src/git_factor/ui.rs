@@ -545,7 +545,7 @@ mod tests {
         }
 
         #[test]
-        fn query_spawn_observes_trigger_then_snapshot_queries() {
+        fn query_spawn_observes_only_trigger_when_tracing_is_disabled() {
             let world = spawn_failed("pending".to_owned(), &with_reference(), &with_guidance());
             let repo = world.directory.path();
             let ctx = Ctx {

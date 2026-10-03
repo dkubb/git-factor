@@ -375,36 +375,12 @@ pub(in crate::git_factor::ui) fn spawn_failed(
 ) -> World {
     let mut world = arrange(reference, guidance, remaining);
     world.expected_result = Err("git command failed: git rev-parse: hint query denied".to_owned());
-    world.expected_calls = vec![
-        query(world.directory.path(), &["rev-parse", "--show-toplevel"]),
-        query(world.directory.path(), &["rev-parse", "--verify", "HEAD"]),
-        query(
-            world.directory.path(),
-            &["rev-parse", "--verify", "HEAD^{tree}"],
-        ),
-        query(world.directory.path(), &["rev-parse", "--git-dir"]),
-        query(world.directory.path(), &["rev-parse", "--show-toplevel"]),
-        query(
-            world.directory.path(),
-            &[
-                "--no-optional-locks",
-                "status",
-                "--porcelain=v1",
-                "--untracked-files=all",
-            ],
-        ),
-    ];
-    *world.runner.responses.borrow_mut() = VecDeque::from([
-        Err(io::Error::other("hint query denied")),
-        Err(io::Error::other("snapshot head unavailable")),
-        Err(io::Error::other("snapshot head unavailable")),
-        Ok(successful_output(".git\n".to_owned())),
-        Ok(successful_output(format!(
-            "{}\n",
-            world.directory.path().display()
-        ))),
-        Ok(successful_output(String::new())),
-    ]);
+    world.expected_calls = vec![query(
+        world.directory.path(),
+        &["rev-parse", "--show-toplevel"],
+    )];
+    *world.runner.responses.borrow_mut() =
+        VecDeque::from([Err(io::Error::other("hint query denied"))]);
     world
 }
 

@@ -264,43 +264,10 @@ impl LaunchFault {
             )),
         ]);
         let runner = match *self {
-            Self::ShortIo => {
-                for args in [
-                    vec!["rev-parse", "--verify", "HEAD"],
-                    vec!["rev-parse", "--verify", "HEAD^{tree}"],
-                    vec!["rev-parse", "--git-dir"],
-                    vec!["rev-parse", "--show-toplevel"],
-                ] {
-                    calls.push(LaunchCall::Runner(RecordedCall::output("git", &args, cwd)));
-                }
-                for path in [
-                    "/contract/launcher/.git/factor/current_index",
-                    "/contract/launcher/.git/factor/split_count",
-                    "/contract/launcher/.git/factor/requires_rebase",
-                    "/contract/launcher/.git/factor/expected_tree",
-                    "/contract/launcher/.git/factor/commits",
-                ] {
-                    calls.push(LaunchCall::Read(PathBuf::from(path)));
-                }
-                calls.extend([
-                    LaunchCall::IsDirectory(PathBuf::from("/contract/launcher/.git/rebase-merge")),
-                    LaunchCall::IsDirectory(PathBuf::from("/contract/launcher/.git/rebase-apply")),
-                    LaunchCall::Runner(RecordedCall::output(
-                        "git",
-                        &[
-                            "--no-optional-locks",
-                            "status",
-                            "--porcelain=v1",
-                            "--untracked-files=all",
-                        ],
-                        cwd,
-                    )),
-                ]);
-                ObservedRunner {
-                    io_fault_at: NonZeroUsize::new(1),
-                    ..ObservedRunner::default()
-                }
-            }
+            Self::ShortIo => ObservedRunner {
+                io_fault_at: NonZeroUsize::new(1),
+                ..ObservedRunner::default()
+            },
             Self::ShortRejected(code) => ObservedRunner::default().with_output_status(
                 "git",
                 &["rev-parse", "--short", selected.last().as_str()],

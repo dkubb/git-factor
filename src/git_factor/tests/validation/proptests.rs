@@ -519,37 +519,14 @@ mod resolve_commit {
             ],
             padding in prop::sample::select(vec!["", " ", "\t", "\n"]),
         ) {
-            let (reply, expected, snapshot) = match case {
-                Case::LaunchFailure => (
-                    Reply::IoFailure,
-                    Err(reference.clone()),
-                    vec![
-                        concat!(
-                            r#"output git ["rev-parse", "--verify", "HEAD"]"#,
-                            r#" cwd="/contract/repository""#,
-                        ).to_owned(),
-                        concat!(
-                            r#"output git ["rev-parse", "--verify", "HEAD^{tree}"]"#,
-                            r#" cwd="/contract/repository""#,
-                        ).to_owned(),
-                        concat!(
-                            r#"output git ["rev-parse", "--git-dir"]"#,
-                            r#" cwd="/contract/repository""#,
-                        ).to_owned(),
-                        concat!(
-                            r#"output git ["--no-optional-locks", "status", "--porcelain=v1", "#,
-                            r#""--untracked-files=all"]"#,
-                            r#" cwd="/contract/repository""#,
-                        ).to_owned(),
-                    ],
-                ),
+            let (reply, expected) = match case {
+                Case::LaunchFailure => (Reply::IoFailure, Err(reference.clone())),
                 Case::Success(sha) => (
                     Reply::Output {
                         exit_code: 0,
                         stdout: format!("{padding}{sha}{padding}\n").into_bytes(),
                     },
                     Ok(sha),
-                    Vec::new(),
                 ),
                 Case::Malformed(stdout) => (
                     Reply::Output {
@@ -557,7 +534,6 @@ mod resolve_commit {
                         stdout: format!("{padding}{stdout}{padding}\n").into_bytes(),
                     },
                     Err(stdout),
-                    Vec::new(),
                 ),
                 Case::Nonzero(exit_code, stdout) => (
                     Reply::Output {
@@ -565,7 +541,6 @@ mod resolve_commit {
                         stdout: format!("{padding}{stdout}{padding}\n").into_bytes(),
                     },
                     Err(reference.clone()),
-                    Vec::new(),
                 ),
             };
             let calls = RefCell::new(Vec::new());
@@ -577,14 +552,13 @@ mod resolve_commit {
                 io: &observation,
                 runner: &observation,
             };
-            let mut expected_calls = vec![format!(
+            let expected_calls = vec![format!(
                 concat!(
                     "output git [\"rev-parse\", \"--verify\", {:?}]",
                     " cwd=\"/contract/repository\"",
                 ),
                 reference,
             )];
-            expected_calls.extend(snapshot);
 
             let actual = super::super::resolve_commit(&ctx, &reference);
 
