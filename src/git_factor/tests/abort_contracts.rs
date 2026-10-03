@@ -163,7 +163,7 @@ fn successful_requests(
         }
     }
     expected.extend([reset(repo, target), clean(repo), directory_query(repo)]);
-    if fail_at > 2 {
+    if fail_at != 0 {
         expected.push(directory_query(repo));
     }
     expected
@@ -286,18 +286,12 @@ pub(in crate::git_factor) fn successful(
             repo,
             0,
         );
-    let lines = if rebase {
-        vec![
-            "FACTOR: Session aborted for current commit step.",
-            "FACTOR: Rebase still active. To abort full rebase, run: git rebase --abort",
-        ]
+    let json = if rebase {
+        "{\"operation\":\"abort\",\"rebase\":{\"in_progress\":true},\"actions\":{\"abort_rebase\":[\"git\",\"rebase\",\"--abort\"]}}"
     } else {
-        vec!["FACTOR: Session aborted for current commit step."]
+        "{\"operation\":\"abort\",\"rebase\":{\"in_progress\":false},\"actions\":{}}"
     };
-    let writes = lines
-        .iter()
-        .flat_map(|line| [*line, "\n"])
-        .collect::<Vec<_>>();
+    let writes = [json, "\n"];
     let expected = if fail_at == 0 {
         writes.concat()
     } else {

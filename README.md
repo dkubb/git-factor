@@ -232,5 +232,12 @@ session is `{"operation":"status","session":null}`. An active session exposes
 
 `target.index` is the zero-based position in the saved selected commit sequence;
 `target.commit` is that position's current commit. The root flag describes the
-selected span's original root boundary. Status observes the current session;
-other command outputs retain their existing format.
+selected span's original root boundary. Status observes the current session.
+
+## Abort Output
+
+`git factor --abort` reports the existing cleanup result as one JSON object,
+followed by a newline. `rebase.in_progress` is observed after factor state is
+removed. When true, `actions.abort_rebase` contains `["git", "rebase", "--abort"]`;
+otherwise `actions` is empty. Existing reset, cleanup and external-rebase
+behavior is unchanged.

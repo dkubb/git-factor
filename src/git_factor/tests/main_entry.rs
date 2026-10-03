@@ -3057,10 +3057,7 @@ fn cmd_abort_reports_rebase_hint_when_rebase_still_active() {
     assert_eq!(code, EXIT_OK);
     assert_eq!(
         io.stdout(),
-        concat!(
-            "FACTOR: Session aborted for current commit step.\n",
-            "FACTOR: Rebase still active. To abort full rebase, run: git rebase --abort\n"
-        )
+        "{\"operation\":\"abort\",\"rebase\":{\"in_progress\":true},\"actions\":{\"abort_rebase\":[\"git\",\"rebase\",\"--abort\"]}}\n"
     );
     assert!(io.stderr().is_empty(), "stderr should be empty");
     assert!(
@@ -3129,7 +3126,7 @@ fn cmd_abort_io_failures_cover_output_paths() {
         cwd: repo.to_path_buf(),
     };
 
-    for fail_at in 1..=4 {
+    for fail_at in 1..=2 {
         fs::create_dir_all(&state_dir).or_abort("recreate factor dir");
         fs::write(state_dir.join("commits"), format!("{sha}\n")).or_abort("rewrite commits");
         fs::write(state_dir.join("current_index"), "0\n").or_abort("rewrite current index");
@@ -3383,7 +3380,7 @@ fn cmd_abort_omits_rebase_hint_when_rebase_is_not_active() {
     assert_eq!(code, EXIT_OK);
     assert_eq!(
         io.stdout(),
-        "FACTOR: Session aborted for current commit step.\n"
+        "{\"operation\":\"abort\",\"rebase\":{\"in_progress\":false},\"actions\":{}}\n"
     );
     assert!(io.stderr().is_empty(), "stderr should be empty");
 }
@@ -3444,10 +3441,7 @@ fn cmd_abort_runs_rebase_abort_when_started_rebase_is_true() {
     assert_eq!(code, EXIT_OK);
     assert_eq!(
         io.stdout(),
-        concat!(
-            "FACTOR: Session aborted for current commit step.\n",
-            "FACTOR: Rebase still active. To abort full rebase, run: git rebase --abort\n"
-        )
+        "{\"operation\":\"abort\",\"rebase\":{\"in_progress\":true},\"actions\":{\"abort_rebase\":[\"git\",\"rebase\",\"--abort\"]}}\n"
     );
     assert!(io.stderr().is_empty(), "stderr should be empty");
 }
@@ -3607,7 +3601,7 @@ fn cmd_abort_uses_start_head_and_skips_rebase_abort_when_rebase_is_not_active() 
     assert_eq!(code, EXIT_OK);
     assert_eq!(
         io.stdout(),
-        "FACTOR: Session aborted for current commit step.\n"
+        "{\"operation\":\"abort\",\"rebase\":{\"in_progress\":false},\"actions\":{}}\n"
     );
     assert!(io.stderr().is_empty(), "stderr should be empty");
 }
@@ -5879,4 +5873,10 @@ fn public_status_preserves_pending_start_and_splitting_observations() {
             }
         }
     }
+}
+
+#[test]
+fn public_abort_reports_cleanup_and_external_rebase_action() {
+    verify_public_abort(false, &"a".repeat(SHA_LEN));
+    verify_public_abort(true, &"f".repeat(SHA_LEN));
 }

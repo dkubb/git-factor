@@ -709,7 +709,9 @@ fi
             .arg("--abort")
             .assert()
             .code(EXIT_OK)
-            .stdout(predicate::str::contains("FACTOR: Session aborted"))
+            .stdout(predicate::eq(
+                "{\"operation\":\"abort\",\"rebase\":{\"in_progress\":false},\"actions\":{}}\n",
+            ))
             .stderr(predicate::str::is_empty());
     }
 

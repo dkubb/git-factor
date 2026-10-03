@@ -1,3 +1,15 @@
+mod aborted {
+    use super::super::*;
+    use proptest::prelude::*;
+
+    proptest! {
+        #[test]
+        fn reports_generated_native_rebase_observation(in_progress in any::<bool>()) {
+            tests::verify_aborted(in_progress);
+        }
+    }
+}
+
 mod session_status {
     mod new {
         use super::super::super::*;

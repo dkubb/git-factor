@@ -9237,3 +9237,63 @@ pub(in crate::git_factor) fn verify_public_inactive_status(body: &str) {
         body.as_bytes()
     );
 }
+
+/// Exercises actual public abort dispatch while retaining a separately owned native rebase.
+pub(in crate::git_factor) fn verify_public_abort(in_progress: bool, sha: &str) {
+    let directory = TempDir::new().or_abort("public abort fixture");
+    let repo = directory.path();
+    let state = repo.join(".git/factor");
+    fs::create_dir_all(&state).or_abort("owned factor state");
+    fs::write(state.join("commits"), format!("{sha}\n")).or_abort("saved selected commit");
+    fs::write(state.join("start_head"), sha).or_abort("saved reset target");
+    fs::write(state.join("requires_rebase"), "false").or_abort("saved rebase policy");
+    fs::write(state.join("started_rebase"), "false").or_abort("separately owned rebase");
+    let native = repo.join(".git/rebase-merge");
+    if in_progress {
+        fs::create_dir_all(&native).or_abort("external rebase");
+        fs::write(native.join("done"), b"external native bytes\n").or_abort("external transcript");
+    }
+    let runner = ScriptedRunner::default()
+        .with_status(
+            "git",
+            &["reset", "--hard", "--quiet", sha],
+            &[],
+            false,
+            repo,
+            0,
+        )
+        .with_status(
+            "git",
+            &["clean", "--force", "--quiet", "-d"],
+            &[],
+            false,
+            repo,
+            0,
+        );
+    let io = TestIo::default();
+    let environment = TestEnv {
+        cwd: repo.to_path_buf(),
+    };
+    let code = main_entry_with_vec(
+        &io,
+        ctx_from_parts(&environment, &runner, &io, &REAL_FS),
+        &[OsString::from("git-factor"), OsString::from("--abort")],
+    );
+    assert_eq!(code, EXIT_OK);
+    assert_eq!(io.stderr(), "");
+    let expected = if in_progress {
+        "{\"operation\":\"abort\",\"rebase\":{\"in_progress\":true},\"actions\":{\"abort_rebase\":[\"git\",\"rebase\",\"--abort\"]}}\n"
+    } else {
+        "{\"operation\":\"abort\",\"rebase\":{\"in_progress\":false},\"actions\":{}}\n"
+    };
+    assert_eq!(io.stdout(), expected);
+    assert!(!state.exists());
+    assert_eq!(native.exists(), in_progress);
+    if in_progress {
+        assert_eq!(
+            fs::read(native.join("done")).or_abort("preserved external transcript"),
+            b"external native bytes\n"
+        );
+    }
+    assert!(runner.statuses.borrow().values().all(VecDeque::is_empty));
+}
