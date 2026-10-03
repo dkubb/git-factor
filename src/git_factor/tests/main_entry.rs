@@ -1,3 +1,8 @@
+use crate::exit_codes::{EXIT_OK, EXIT_SOFTWARE, EXIT_USAGE};
+use crate::git_factor::tests::dispatch_contracts::{
+    HeadResolutionFault, ReopenFault, default_head_failure, default_head_success, dirty_route,
+    parser, parser_write_failure, refusal, reopen_failure,
+};
 use core::num::NonZeroUsize;
 
 use crate::git_factor::tests::start_contracts::DirectStart;
@@ -5449,5 +5454,449 @@ fn public_continue_reports_the_largest_native_gate_rejection_code() {
     assert_eq!(
         fixture.full_effect_requests(),
         fixture.expected_effect_requests()
+    );
+}
+
+#[test]
+fn public_continue_without_message_refuses_an_active_split() {
+    use super::continue_contracts::{Continuation, ContinueCase};
+    let fixture = Continuation::new(&"a".repeat(SHA_LEN), 0, ContinueCase::Remainder);
+    let journal = fixture.journal();
+    let bytes = fixture.protected_bytes();
+    let args = ["git-factor", "--continue"].map(OsString::from);
+
+    let code = main_entry_with_vec(fixture.ctx().io, Ok(fixture.ctx()), &args);
+
+    assert_eq!(code, EXIT_USAGE);
+    assert_eq!(fixture.stdout(), "");
+    assert_eq!(fixture.stderr(), "--continue requires --message <MSG>\n");
+    assert_eq!(fixture.journal(), journal);
+    assert_eq!(fixture.protected_bytes(), bytes);
+    assert_eq!(fixture.effect_requests(), Vec::<Vec<String>>::new());
+}
+
+#[test]
+fn public_continue_without_message_admits_pending_start_before_cleanliness_refusal() {
+    use super::continue_contracts::{Continuation, ContinueState};
+    let fixture = Continuation::with_state(&"a".repeat(SHA_LEN), ContinueState::Pending);
+    let journal = fixture.journal();
+    let bytes = fixture.protected_bytes();
+    let args = ["git-factor", "--continue"].map(OsString::from);
+
+    let code = main_entry_with_vec(fixture.ctx().io, Ok(fixture.ctx()), &args);
+
+    assert_eq!(code, EXIT_SOFTWARE);
+    assert_eq!(fixture.stdout(), "");
+    assert_eq!(
+        fixture.stderr(),
+        concat!(
+            "git command failed: baseline commit must be fully clean before opening the split session\n",
+            "STATUS:\nM  file.txt\n",
+        )
+    );
+    assert_eq!(fixture.journal(), journal);
+    assert_eq!(fixture.protected_bytes(), bytes);
+    assert_eq!(fixture.effect_requests(), Vec::<Vec<String>>::new());
+}
+
+#[test]
+fn abort_status() {
+    refusal(
+        &["--abort", "--status"],
+        "--abort cannot be combined with other options",
+    );
+}
+
+#[test]
+fn abort_continue() {
+    refusal(
+        &["--abort", "--continue"],
+        "--abort cannot be combined with other options",
+    );
+}
+
+#[test]
+fn abort_retry() {
+    refusal(
+        &["--abort", "--retry"],
+        "--abort cannot be combined with other options",
+    );
+}
+
+#[test]
+fn abort_finish() {
+    refusal(
+        &["--abort", "--finish"],
+        "--abort cannot be combined with other options",
+    );
+}
+
+#[test]
+fn abort_exec() {
+    refusal(
+        &["--abort", "--exec", "true"],
+        "--abort cannot be combined with other options",
+    );
+}
+
+#[test]
+fn abort_head() {
+    refusal(
+        &["--abort", "HEAD"],
+        "--abort cannot be combined with other options",
+    );
+}
+
+#[test]
+fn status_continue() {
+    refusal(
+        &["--status", "--continue"],
+        "--status cannot be combined with other options",
+    );
+}
+
+#[test]
+fn status_retry() {
+    refusal(
+        &["--status", "--retry"],
+        "--status cannot be combined with other options",
+    );
+}
+
+#[test]
+fn status_finish() {
+    refusal(
+        &["--status", "--finish"],
+        "--status cannot be combined with other options",
+    );
+}
+
+#[test]
+fn status_exec() {
+    refusal(
+        &["--status", "--exec", "true"],
+        "--status cannot be combined with other options",
+    );
+}
+
+#[test]
+fn status_head() {
+    refusal(
+        &["--status", "HEAD"],
+        "--status cannot be combined with other options",
+    );
+}
+
+#[test]
+fn status_message() {
+    refusal(
+        &["--status", "--message", "true"],
+        "--status cannot be combined with other options",
+    );
+}
+
+#[test]
+fn retry_continue() {
+    refusal(
+        &["--retry", "--continue"],
+        "--retry cannot be combined with other options",
+    );
+}
+
+#[test]
+fn retry_finish() {
+    refusal(
+        &["--retry", "--finish"],
+        "--retry cannot be combined with other options",
+    );
+}
+
+#[test]
+fn retry_exec() {
+    refusal(
+        &["--retry", "--exec", "true"],
+        "--retry cannot be combined with other options",
+    );
+}
+
+#[test]
+fn retry_head() {
+    refusal(
+        &["--retry", "HEAD"],
+        "--retry cannot be combined with other options",
+    );
+}
+
+#[test]
+fn retry_message() {
+    refusal(
+        &["--retry", "--message", "true"],
+        "--retry cannot be combined with other options",
+    );
+}
+
+#[test]
+fn finish_continue() {
+    refusal(
+        &["--finish", "--continue"],
+        "--finish cannot be combined with --continue, --exec, or COMMIT",
+    );
+}
+
+#[test]
+fn finish_exec() {
+    refusal(
+        &["--finish", "--exec", "true"],
+        "--finish cannot be combined with --continue, --exec, or COMMIT",
+    );
+}
+
+#[test]
+fn finish_head() {
+    refusal(
+        &["--finish", "HEAD"],
+        "--finish cannot be combined with --continue, --exec, or COMMIT",
+    );
+}
+
+#[test]
+fn continue_exec() {
+    refusal(
+        &["--continue", "--exec", "true"],
+        "--continue cannot be combined with --exec or COMMIT",
+    );
+}
+
+#[test]
+fn continue_head() {
+    refusal(
+        &["--continue", "HEAD"],
+        "--continue cannot be combined with --exec or COMMIT",
+    );
+}
+
+#[test]
+fn missing_exec() {
+    refusal(
+        &["HEAD"],
+        "--exec <COMMAND> is required when starting a factor session",
+    );
+}
+
+#[test]
+fn message_without_operation() {
+    refusal(
+        &["--exec", "true", "--message", "Selected atom"],
+        "--message can only be used with --continue or --finish",
+    );
+}
+
+#[test]
+fn message_without_exec() {
+    refusal(
+        &["--message", "Selected atom"],
+        "--exec <COMMAND> is required when starting a factor session",
+    );
+}
+
+#[test]
+fn preflight_arity() {
+    refusal(
+        &["rebase-exec-preflight"],
+        "rebase-exec-preflight requires exactly two arguments: current-index and exec-command",
+    );
+}
+
+#[test]
+fn begin_arity() {
+    refusal(
+        &["rebase-exec-begin"],
+        "rebase-exec-begin requires exactly five arguments: current-index, start-head, is-root, exec-command, and commits",
+    );
+}
+
+#[test]
+fn version_stream_is_exact() {
+    parser(&["--version"], EXIT_OK, "git-factor 0.1.0\n", "");
+}
+
+#[test]
+fn invalid_flag_stream_is_exact() {
+    parser(
+        &["--not-real"],
+        EXIT_USAGE,
+        "",
+        "error: unexpected argument '--not-real' found\n\n  tip: to pass '--not-real' as a value, use '-- --not-real'\n\nUsage: git-factor [OPTIONS] [COMMIT]...\n\nFor more information, try '--help'.\n",
+    );
+}
+
+#[test]
+fn help_stream_is_exact() {
+    parser(
+        &["--help"],
+        EXIT_OK,
+        include_str!("main_entry/help.txt"),
+        "",
+    );
+}
+
+#[test]
+fn no_arguments_prints_the_full_help_stream() {
+    parser(&[], EXIT_OK, include_str!("main_entry/help.txt"), "");
+}
+
+#[test]
+fn hidden_preflight_dispatch_checks_cleanliness() {
+    dirty_route(
+        &["rebase-exec-preflight", "0", "true"],
+        EXIT_SOFTWARE,
+        "git command failed: cannot run the start gate because the repository is not clean\nSTATUS:\n M unrelated",
+        &[
+            "git rev-parse --git-dir",
+            "git status --porcelain=v1",
+            "git rev-parse --git-dir",
+        ],
+    );
+}
+
+#[test]
+fn hidden_begin_dispatch_checks_cleanliness() {
+    dirty_route(
+        &[
+            "rebase-exec-begin",
+            "0",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "false",
+            "true",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        ],
+        EXIT_SOFTWARE,
+        "git command failed: cannot begin the factor session because the repository is not clean\nSTATUS:\n M unrelated",
+        &["git status --porcelain=v1", "git rev-parse --git-dir"],
+    );
+}
+
+#[test]
+fn retry_dispatch_requires_a_session() {
+    dirty_route(
+        &["--retry"],
+        EXIT_USAGE,
+        "no active factor session",
+        &["git rev-parse --git-dir"],
+    );
+}
+
+#[test]
+fn continue_without_message_requires_a_session() {
+    dirty_route(
+        &["--continue"],
+        EXIT_USAGE,
+        "--continue requires --message <MSG>",
+        &["git rev-parse --git-dir"],
+    );
+}
+
+#[test]
+fn default_head_start_checks_cleanliness_before_resolution() {
+    dirty_route(
+        &["--exec", "true"],
+        EXIT_SOFTWARE,
+        "git command failed: working tree must be clean before starting; stash, commit, or remove local changes\nSTATUS:\n M unrelated",
+        &[
+            "git rev-parse --git-dir",
+            "git rev-parse --git-dir",
+            "git status --porcelain=v1",
+            "git rev-parse --git-dir",
+        ],
+    );
+}
+
+#[test]
+fn parser_stderr_failure_is_reported_without_mutation() {
+    parser_write_failure(&["--not-real"]);
+}
+
+#[test]
+fn parser_stdout_failure_is_reported_without_mutation() {
+    parser_write_failure(&["--help"]);
+}
+
+#[test]
+fn implicit_help_failure_is_reported_without_mutation() {
+    parser_write_failure(&[]);
+}
+
+#[test]
+fn default_head_success_opens_the_selected_pool() {
+    default_head_success("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+}
+
+#[test]
+fn default_head_resolution_nonzero_exit_is_a_data_error() {
+    default_head_failure(HeadResolutionFault::NonzeroExit);
+}
+
+#[test]
+fn default_head_resolution_launch_failure_is_a_data_error() {
+    default_head_failure(HeadResolutionFault::LaunchFailure);
+}
+
+#[test]
+fn parser_suggestion_is_forwarded_without_route_effects() {
+    parser(
+        &["--not-iu"],
+        EXIT_USAGE,
+        "",
+        "error: unexpected argument '--not-iu' found\n\n  tip: a similar argument exists: '--continue'\n\nUsage: git-factor --continue [COMMIT]...\n\nFor more information, try '--help'.\n",
+    );
+}
+
+#[test]
+fn finish_dispatch_requires_a_session() {
+    dirty_route(
+        &["--finish"],
+        EXIT_USAGE,
+        "no active factor session",
+        &["git rev-parse --git-dir"],
+    );
+}
+
+#[test]
+fn finish_with_message_dispatch_requires_a_session() {
+    dirty_route(
+        &["--finish", "--message", "Selected atom"],
+        EXIT_USAGE,
+        "no active factor session",
+        &["git rev-parse --git-dir"],
+    );
+}
+
+#[test]
+fn continue_without_message_reports_session_reopen_query_failure() {
+    reopen_failure(
+        ReopenFault::GitDirectory,
+        &"a".repeat(SHA_LEN),
+        "unsupported",
+        b"saved\0bytes",
+    );
+}
+
+#[test]
+fn continue_without_message_reports_unreadable_phase() {
+    reopen_failure(
+        ReopenFault::PhaseEncoding,
+        &"a".repeat(SHA_LEN),
+        "unsupported",
+        b"saved\0bytes",
+    );
+}
+
+#[test]
+fn continue_without_message_reports_invalid_phase() {
+    reopen_failure(
+        ReopenFault::PhaseValue,
+        &"a".repeat(SHA_LEN),
+        "unsupported",
+        b"saved\0bytes",
     );
 }
