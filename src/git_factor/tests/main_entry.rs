@@ -5642,19 +5642,33 @@ fn missing_exec() {
 }
 
 #[test]
-fn message_without_operation() {
+fn message_with_start_gate() {
     refusal(
         &["--exec", "true", "--message", "Selected atom"],
-        "--message can only be used with --continue or --finish",
+        "--message cannot be combined with --exec or COMMIT",
     );
 }
 
 #[test]
-fn message_without_exec() {
-    refusal(
-        &["--message", "Selected atom"],
-        "--exec <COMMAND> is required when starting a factor session",
-    );
+fn message_only_refuses_without_an_active_session() {
+    let paragraphs = vec!["Selected atom".to_owned()];
+    let fixture = arrange_message(MessageCase::NoSession);
+    let mut arguments = vec![OsString::from("git-factor")];
+    for paragraph in &paragraphs {
+        arguments.extend([
+            OsString::from("--message"),
+            OsString::from(paragraph.as_str()),
+        ]);
+    }
+
+    let code = main_entry_with_vec(fixture.ctx().io, Ok(fixture.ctx()), &arguments);
+
+    assert_eq!(code, EXIT_USAGE);
+    assert_eq!(fixture.stdout(), "");
+    assert_eq!(fixture.stderr(), "no active factor session\n");
+    assert_eq!(fixture.observed_requests(), fixture.expected_requests());
+    assert_eq!(fixture.protected_bytes(), b"user bytes\0\n");
+    assert!(!fixture.session_active());
 }
 
 #[test]
@@ -6630,4 +6644,133 @@ fn public_completion_reports_terminal_commands_and_count_boundaries() {
     verify_public_completion(false, u8::MAX - 1);
     verify_public_completion(true, 0);
     verify_public_completion(true, u8::MAX - 1);
+}
+
+#[test]
+fn message_only_submits_staged_changes() {
+    let paragraphs = vec!["Selected atom".to_owned()];
+    let fixture = arrange_message_completion(&paragraphs);
+    let mut arguments = vec![OsString::from("git-factor")];
+    for paragraph in &paragraphs {
+        arguments.extend([
+            OsString::from("--message"),
+            OsString::from(paragraph.as_str()),
+        ]);
+    }
+
+    let code = main_entry_with_vec(fixture.ctx().io, Ok(fixture.ctx()), &arguments);
+
+    assert_eq!(code, EXIT_OK);
+    assert_eq!(
+        fixture.stdout(),
+        "{\"operation\":\"continue\",\"split_count\":1}\n"
+    );
+    assert_eq!(fixture.stderr(), "");
+    assert_eq!(fixture.observed_requests(), fixture.expected_requests());
+    assert_eq!(fixture.protected_bytes(), b"user bytes\0\n");
+    assert!(!fixture.session_active());
+}
+
+#[test]
+fn explicit_continue_still_submits_staged_changes() {
+    let paragraphs = vec!["Selected atom".to_owned()];
+    let fixture = arrange_message_completion(&paragraphs);
+    let mut arguments = vec![OsString::from("git-factor")];
+    arguments.push(OsString::from("--continue"));
+    for paragraph in &paragraphs {
+        arguments.extend([
+            OsString::from("--message"),
+            OsString::from(paragraph.as_str()),
+        ]);
+    }
+
+    let code = main_entry_with_vec(fixture.ctx().io, Ok(fixture.ctx()), &arguments);
+
+    assert_eq!(code, EXIT_OK);
+    assert_eq!(
+        fixture.stdout(),
+        "{\"operation\":\"continue\",\"split_count\":1}\n"
+    );
+    assert_eq!(fixture.stderr(), "");
+    assert_eq!(fixture.observed_requests(), fixture.expected_requests());
+    assert_eq!(fixture.protected_bytes(), b"user bytes\0\n");
+    assert!(!fixture.session_active());
+}
+
+#[test]
+fn message_only_preserves_multiple_paragraphs() {
+    let paragraphs = vec!["Selected atom".to_owned(), "Its rationale".to_owned()];
+    let fixture = arrange_message_completion(&paragraphs);
+    let mut arguments = vec![OsString::from("git-factor")];
+    for paragraph in &paragraphs {
+        arguments.extend([
+            OsString::from("--message"),
+            OsString::from(paragraph.as_str()),
+        ]);
+    }
+
+    let code = main_entry_with_vec(fixture.ctx().io, Ok(fixture.ctx()), &arguments);
+
+    assert_eq!(code, EXIT_OK);
+    assert_eq!(
+        fixture.stdout(),
+        "{\"operation\":\"continue\",\"split_count\":1}\n"
+    );
+    assert_eq!(fixture.stderr(), "");
+    assert_eq!(fixture.observed_requests(), fixture.expected_requests());
+    assert_eq!(fixture.protected_bytes(), b"user bytes\0\n");
+    assert!(!fixture.session_active());
+}
+
+#[test]
+fn message_only_refuses_without_staged_changes() {
+    let paragraphs = vec!["Selected atom".to_owned()];
+    let fixture = arrange_message(MessageCase::NoStaged);
+    let mut arguments = vec![OsString::from("git-factor")];
+    for paragraph in &paragraphs {
+        arguments.extend([
+            OsString::from("--message"),
+            OsString::from(paragraph.as_str()),
+        ]);
+    }
+
+    let code = main_entry_with_vec(fixture.ctx().io, Ok(fixture.ctx()), &arguments);
+
+    assert_eq!(code, EXIT_USAGE);
+    assert_eq!(fixture.stdout(), "");
+    assert_eq!(
+        fixture.stderr(),
+        "no staged changes to commit\nNEXT: stage exactly one atomic change, then rerun:\n  git factor --continue --message \"type: description\"\n"
+    );
+    assert_eq!(fixture.observed_requests(), fixture.expected_requests());
+    assert_eq!(fixture.protected_bytes(), b"user bytes\0\n");
+    for (path, bytes) in fixture.saved_facts() {
+        assert_eq!(fs::read(path).or_abort("saved fact"), bytes);
+    }
+}
+
+#[test]
+fn message_only_refuses_start_commit_arguments() {
+    let paragraphs = vec!["Selected atom".to_owned()];
+    let fixture = arrange_message(MessageCase::NoSession);
+    let mut arguments = vec![OsString::from("git-factor")];
+    for paragraph in &paragraphs {
+        arguments.extend([
+            OsString::from("--message"),
+            OsString::from(paragraph.as_str()),
+        ]);
+    }
+    arguments.extend([OsString::from("HEAD")]);
+
+    let code = main_entry_with_vec(fixture.ctx().io, Ok(fixture.ctx()), &arguments);
+
+    assert_eq!(code, EXIT_USAGE);
+    assert_eq!(fixture.stdout(), "");
+    assert_eq!(
+        fixture.stderr(),
+        "--message cannot be combined with --exec or COMMIT\n"
+    );
+    assert_eq!(fixture.observed_requests(), Vec::new());
+    assert_eq!(fixture.protected_bytes(), b"user bytes\0\n");
+    assert!(!fixture.session_active());
 }

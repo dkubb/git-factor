@@ -87,6 +87,9 @@ git factor --continue --message 'refactor: isolate validation'
 git factor --finish --message 'feat: restore remaining workflow'
 ```
 
+`git factor --message '…'` also submits a staged slice; `--continue` remains
+accepted with a message. Both forms use the same validation and split workflow.
+
 ### Refactor a Whole Commit Span
 
 ```bash
@@ -253,3 +256,6 @@ existing completion, cleanup and replay behavior is unchanged.
 Only terminal completion results use this JSON form. Non-final `--continue`
 results, start, retry, and failure output retain their existing human-readable
 text. Gate output during terminal `--continue` is forwarded to stderr.
+
+A terminal message-only submission (`git factor --message '…'`) produces the
+same completion object with `operation` equal to `continue`.
