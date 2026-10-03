@@ -35,6 +35,9 @@ mod git;
 /// Shared utility helpers for `git-factor`.
 #[path = "git_factor/helpers.rs"]
 mod helpers;
+/// Normalized JSON result serialization.
+#[path = "git_factor/output.rs"]
+mod output;
 /// State file read/write operations for `git-factor`.
 #[path = "git_factor/state.rs"]
 mod state;
@@ -833,7 +836,7 @@ fn cmd_status_in(ctx: &Ctx<'_>) -> Result<i32, FactorError> {
     trace_note(ctx, "factor_cmd_status", &[]);
 
     if !is_factor_active_in(ctx) {
-        ctx.outln("FACTOR: No active session.")?;
+        output::status(ctx, None)?;
         return Ok(EXIT_OK);
     }
 
@@ -846,14 +849,18 @@ fn cmd_status_in(ctx: &Ctx<'_>) -> Result<i32, FactorError> {
     let phase = session.phase(SessionPhase::Splitting)?;
     let rebase_in_progress = is_mid_rebase_in(ctx);
 
-    ctx.outln("FACTOR: Active session.")?;
-    ctx.outln(&format!("CURRENT_COMMIT: {current_commit}"))?;
-    ctx.outln(&format!("CURRENT_INDEX: {}", current_index.as_usize()))?;
-    ctx.outln(&format!("SPLIT_COUNT: {}", split_count.as_u8()))?;
-    ctx.outln(&format!("PHASE: {}", phase.as_str()))?;
-    ctx.outln(&format!("REQUIRES_REBASE: {}", requires_rebase.as_bool()))?;
-    ctx.outln(&format!("REBASE_IN_PROGRESS: {rebase_in_progress}"))?;
-    ctx.outln(&format!("IS_ROOT: {}", is_root.as_bool()))?;
+    output::status(
+        ctx,
+        Some(output::SessionStatus::new(
+            &current_commit,
+            current_index,
+            split_count,
+            phase,
+            requires_rebase,
+            is_root,
+            rebase_in_progress,
+        )),
+    )?;
 
     Ok(EXIT_OK)
 }

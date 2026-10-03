@@ -69,7 +69,7 @@ fn assert_retained(state: &Path, before: &[(OsString, Vec<u8>)], expected_error:
     assert_eq!(after.as_slice(), before);
 }
 
-/// Exercises exact baseline public status frames, including every output write.
+/// Exercises exact public JSON status frames, including every output write.
 pub(in crate::git_factor) fn active(
     sha: &str,
     split: u8,
@@ -95,26 +95,21 @@ pub(in crate::git_factor) fn active(
         fs::create_dir_all(repo.join(".git/rebase-merge")).or_abort("native metadata fixture");
     }
     let before = journal(&state);
-    let lines = [
-        "FACTOR: Active session.".to_owned(),
-        format!("CURRENT_COMMIT: {sha}"),
-        "CURRENT_INDEX: 0".to_owned(),
-        format!("SPLIT_COUNT: {split}"),
-        format!("PHASE: {phase}"),
-        format!("REQUIRES_REBASE: {requires}"),
-        format!("REBASE_IN_PROGRESS: {rebase}"),
-        format!("IS_ROOT: {root}"),
-    ];
-    let writes = lines
-        .iter()
-        .flat_map(|line| [line.as_str(), "\n"])
-        .collect::<Vec<_>>();
+    let json = format!(
+        concat!(
+            "{{\"operation\":\"status\",\"session\":{{\"phase\":\"{}\",",
+            "\"rebase\":{{\"in_progress\":{},\"required\":{}}},\"split_count\":{},",
+            "\"target\":{{\"commit\":\"{}\",\"index\":0,\"span_starts_at_root\":{}}}}}}}"
+        ),
+        phase, rebase, requires, split, sha, root,
+    );
+    let writes = [json.as_str(), "\n"];
     let expected = if fail_at == 0 {
         writes.concat()
     } else {
         writes
             .get(..fail_at.checked_sub(1).or_abort("positive selected write"))
-            .or_abort("selected frame write")
+            .or_abort("selected JSON write")
             .concat()
     };
     let runner = ScriptedRunner::default();
@@ -170,9 +165,9 @@ pub(in crate::git_factor) fn inactive(path: &str, fail_at: usize) {
     fs::create_dir_all(repo.join(".git")).or_abort("Git discovery fixture");
     fs::write(repo.join(path), b"unrelated user bytes\n").or_abort("unrelated input");
     let expected = *[
-        "FACTOR: No active session.\n",
+        "{\"operation\":\"status\",\"session\":null}\n",
         "",
-        "FACTOR: No active session.",
+        "{\"operation\":\"status\",\"session\":null}",
     ]
     .get(fail_at)
     .or_abort("generator admits only success or two frame writes");

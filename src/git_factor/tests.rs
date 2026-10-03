@@ -4927,7 +4927,7 @@ fn run_with_args_status_delegates_to_status_handler() {
         &[OsString::from("git-factor"), OsString::from("--status")],
     );
     assert_eq!(code, EXIT_OK);
-    assert_eq!(io.stdout(), "FACTOR: No active session.\n");
+    assert_eq!(io.stdout(), "{\"operation\":\"status\",\"session\":null}\n");
 }
 
 #[test]
@@ -9143,5 +9143,97 @@ fn print_session_started_propagates_print_hints_failure() {
     assert!(
         matches!(&err, FactorError::GitCommand(msg) if msg.contains("forced runner failure")),
         "err was: {err:?}"
+    );
+}
+
+/// Runs the actual public status dispatch over valid saved facts and observes conservation.
+pub(in crate::git_factor) fn verify_public_status(
+    index: usize,
+    count: u8,
+    phase: SessionPhase,
+    required: bool,
+    root: bool,
+    progress: bool,
+) {
+    let directory = TempDir::new().or_abort("public status fixture");
+    let repo = directory.path();
+    let state = repo.join(".git/factor");
+    fs::create_dir_all(&state).or_abort("owned status state");
+    let commits = [
+        "a".repeat(SHA_LEN),
+        "b".repeat(SHA_LEN),
+        "c".repeat(SHA_LEN),
+    ];
+    let selected = commits.get(index).or_abort("valid current target index");
+    let phase_text = match phase {
+        SessionPhase::PendingStart => "pending_start",
+        SessionPhase::Splitting => "splitting",
+    };
+    let pairs = [
+        ("commits", format!("{}\n", commits.join("\n"))),
+        ("current_index", index.to_string()),
+        ("split_count", count.to_string()),
+        ("phase", phase_text.to_owned()),
+        ("requires_rebase", required.to_string()),
+        ("is_root", root.to_string()),
+    ];
+    for pair in &pairs {
+        fs::write(state.join(pair.0), pair.1.as_bytes()).or_abort("saved status fact");
+    }
+    fs::write(repo.join("unrelated"), b"user bytes\n").or_abort("unrelated status input");
+    if progress {
+        fs::create_dir_all(repo.join(".git/rebase-merge")).or_abort("observed native directory");
+    }
+    let runner = ScriptedRunner::default();
+    let io = TestIo::default();
+    let environment = TestEnv {
+        cwd: repo.to_path_buf(),
+    };
+    let code = main_entry_with_vec(
+        &io,
+        ctx_from_parts(&environment, &runner, &io, &REAL_FS),
+        &[OsString::from("git-factor"), OsString::from("--status")],
+    );
+    assert_eq!(code, EXIT_OK);
+    assert_eq!(io.stderr(), "");
+    let expected = format!(
+        "{{\"operation\":\"status\",\"session\":{{\"phase\":\"{phase_text}\",\"rebase\":{{\"in_progress\":{progress},\"required\":{required}}},\"split_count\":{count},\"target\":{{\"commit\":\"{selected}\",\"index\":{index},\"span_starts_at_root\":{root}}}}}}}\n",
+    );
+    assert_eq!(io.stdout(), expected);
+    for pair in &pairs {
+        assert_eq!(
+            fs::read_to_string(state.join(pair.0)).or_abort("preserved status fact"),
+            pair.1
+        );
+    }
+    assert_eq!(
+        fs::read(repo.join("unrelated")).or_abort("preserved unrelated input"),
+        b"user bytes\n"
+    );
+}
+
+/// An absent session remains absent through the public JSON observer.
+pub(in crate::git_factor) fn verify_public_inactive_status(body: &str) {
+    let directory = TempDir::new().or_abort("inactive status fixture");
+    let repo = directory.path();
+    fs::create_dir_all(repo.join(".git")).or_abort("Git directory");
+    fs::write(repo.join("unrelated"), body).or_abort("inactive user work");
+    let runner = ScriptedRunner::default();
+    let io = TestIo::default();
+    let environment = TestEnv {
+        cwd: repo.to_path_buf(),
+    };
+    let code = main_entry_with_vec(
+        &io,
+        ctx_from_parts(&environment, &runner, &io, &REAL_FS),
+        &[OsString::from("git-factor"), OsString::from("--status")],
+    );
+    assert_eq!(code, EXIT_OK);
+    assert_eq!(io.stdout(), "{\"operation\":\"status\",\"session\":null}\n");
+    assert_eq!(io.stderr(), "");
+    assert!(!repo.join(".git/factor").exists());
+    assert_eq!(
+        fs::read(repo.join("unrelated")).or_abort("preserved inactive user work"),
+        body.as_bytes()
     );
 }
