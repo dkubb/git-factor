@@ -95,6 +95,33 @@ pub(in crate::git_factor) fn status_code(status: ExitStatus) -> i32 {
 
 #[cfg(test)]
 mod tests {
+    mod status_code {
+        use crate::test_support::OrAbort as _;
+        use std::os::unix::process::ExitStatusExt as _;
+        use std::process::ExitStatus;
+
+        #[test]
+        fn maps_a_signal_to_the_operational_fallback() {
+            let signal: i32 = 15;
+
+            let actual = super::super::status_code(ExitStatus::from_raw(signal));
+
+            assert_eq!(actual, super::super::EXIT_SOFTWARE);
+        }
+
+        #[test]
+        fn preserves_a_native_nonzero_exit() {
+            let code: u8 = 42;
+            let raw = i32::from(code)
+                .checked_shl(8)
+                .or_abort("native wait-status shift count is below i32 width");
+
+            let actual = super::super::status_code(ExitStatus::from_raw(raw));
+
+            assert_eq!(actual, i32::from(code));
+        }
+    }
+
     use super::*;
 
     #[test]
@@ -141,6 +168,34 @@ mod tests {
 
 #[cfg(test)]
 mod proptests {
+    mod status_code {
+        use crate::test_support::OrAbort as _;
+        use proptest::prelude::*;
+        use std::os::unix::process::ExitStatusExt as _;
+        use std::process::ExitStatus;
+        const SIGNAL_FIRST: i32 = 1;
+        const SIGNAL_LAST: i32 = 31;
+
+        proptest! {
+            #[test]
+            fn preserves_generated_native_exits(code in any::<u8>()) {
+                let raw = i32::from(code).checked_shl(8).or_abort("native wait-status shift count is below i32 width");
+
+                let actual = super::super::status_code(ExitStatus::from_raw(raw));
+
+                prop_assert_eq!(actual, i32::from(code));
+            }
+
+            #[test]
+            fn maps_generated_native_signals_to_operational_fallback(signal in SIGNAL_FIRST..=SIGNAL_LAST) {
+
+                let actual = super::super::status_code(ExitStatus::from_raw(signal));
+
+                prop_assert_eq!(actual, super::super::EXIT_SOFTWARE);
+            }
+        }
+    }
+
     use proptest::prelude::*;
 
     use super::*;
