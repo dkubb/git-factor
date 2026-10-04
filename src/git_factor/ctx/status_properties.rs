@@ -1,10 +1,49 @@
+#[path = "../ctx_remove_atomic_file_proptests.rs"]
+mod real_fs;
+
 mod real_runner {
     mod runner {
+        mod output {
+            use super::super::super::*;
+            use proptest::prelude::*;
+
+            proptest! {
+                #[test]
+                fn preserves_generated_literals_after_removal(value in "[A-Za-z0-9 $;]{0,24}") {
+                    let (directory, home) = arrange_environment();
+                    let environment = [("HOME", None), ("FACTOR_VALUE", Some(value.as_str())),
+                        ("FACTOR_EMPTY", Some(""))];
+                    let observed = REAL_RUNNER.output("/bin/sh", &["-c",
+                        "test \"${HOME+x}\" != x && test \"${FACTOR_EMPTY+x}\" = x && printf '%s' \"$FACTOR_VALUE\""],
+                        &environment, directory.path()).or_abort("captured environment");
+                    assert!(observed.status.success());
+                    assert_eq!(observed.stdout, value.as_bytes());
+                    assert!(observed.stderr.is_empty());
+                    assert_eq!(env::var_os("HOME"), home);
+                }
+            }
+        }
         mod status {
+            use super::super::super::*;
+            use proptest::prelude::*;
+
+            proptest! {
+                #[test]
+                fn preserves_generated_last_assignment(value in "[A-Za-z0-9 $;]{0,24}", quiet in any::<bool>()) {
+                    let (directory, home) = arrange_environment();
+                    let environment = [("HOME", None), ("FACTOR_VALUE", Some("discard")),
+                        ("FACTOR_VALUE", None), ("FACTOR_VALUE", Some(value.as_str()))];
+                    let observed = REAL_RUNNER.status("/bin/sh", &["-c",
+                        "test \"${HOME+x}\" != x && printf '%s' \"$FACTOR_VALUE\" > observed"],
+                        &environment, quiet, directory.path()).or_abort("status environment");
+                    assert!(observed.success());
+                    assert_eq!(fs::read(directory.path().join("observed")).or_abort("written literal"),
+                        value.as_bytes());
+                    assert_eq!(env::var_os("HOME"), home);
+                }
+            }
             use std::fs;
             use std::io;
-
-            use proptest::prelude::*;
 
             use crate::test_support::OrAbort as _;
 
@@ -86,4 +125,18 @@ mod real_runner {
             }
         }
     }
+}
+
+use super::*;
+use crate::test_support::OrAbort as _;
+use tempfile::TempDir;
+
+fn arrange_environment() -> (TempDir, Option<OsString>) {
+    let directory = TempDir::new().or_abort("environment fixture");
+    let home = env::var_os("HOME");
+    assert!(
+        home.is_some(),
+        "inherited-variable removal requires HOME to be present"
+    );
+    (directory, home)
 }

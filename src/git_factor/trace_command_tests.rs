@@ -11,7 +11,13 @@ pub(in crate::git_factor::trace) enum CommandObservation {
 }
 
 impl Runner for CommandObservation {
-    fn output(&self, bin: &str, args: &[&str], _cwd: &Path) -> io::Result<Output> {
+    fn output(
+        &self,
+        bin: &str,
+        args: &[&str],
+        _envs: &[(&str, Option<&str>)],
+        _cwd: &Path,
+    ) -> io::Result<Output> {
         if bin != "git"
             || args
                 != [
@@ -33,7 +39,7 @@ impl Runner for CommandObservation {
         &self,
         _bin: &str,
         _args: &[&str],
-        _envs: &[(&str, &str)],
+        _envs: &[(&str, Option<&str>)],
         _quiet: bool,
         _cwd: &Path,
     ) -> io::Result<ExitStatus> {

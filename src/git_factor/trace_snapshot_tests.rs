@@ -1,4 +1,5 @@
 //! Real-file arrangements and strict query observations for repository snapshots.
+use crate::git_factor::{COMMIT_SHA_HEX_LEN, REAL_ENV, REAL_FS, REAL_IO, Runner};
 
 use super::*;
 use crate::test_support::OrAbort as _;
@@ -33,32 +34,28 @@ pub(in crate::git_factor::trace) enum Directory {
     Unavailable,
 }
 
-/// Constructive factor-file worlds, including malformed optional diagnostics.
+/// Constructive current-journal observations, independent of session admission.
 #[derive(Clone, Copy, Debug)]
 pub(in crate::git_factor::trace) enum Factor {
-    /// No factor journal exists.
+    /// No journal exists.
     Absent,
-    /// The index exists but the commits file contains only whitespace.
-    BlankCommits,
-    /// A padded three-commit journal has the selected position.
-    Indexed(Selection),
-    /// Optional index and count fields cannot be parsed.
+    /// A complete current journal records the selected phase.
+    Current(JournalPhase),
+    /// The journal cannot be parsed as the current schema.
     Malformed,
-    /// The index exists but the commits file does not.
-    MissingCommits,
+    /// The journal pathname is a directory and cannot be read as text.
+    Unreadable,
 }
 
-/// Selected positions in an independently known three-record journal.
+/// The six current phases have independently expected diagnostic source semantics.
 #[derive(Clone, Copy, Debug)]
-pub(in crate::git_factor::trace) enum Selection {
-    /// The first record is alpha.
-    First,
-    /// The third record is gamma.
-    Last,
-    /// The second record is beta.
-    Middle,
-    /// No fourth record exists.
-    PastEnd,
+pub(in crate::git_factor::trace) enum JournalPhase {
+    Closing,
+    Opening,
+    Preparing,
+    Replaying,
+    Selecting,
+    Verified,
 }
 
 /// Constructive native rebase-file worlds.
@@ -95,7 +92,7 @@ impl World {
     pub(in crate::git_factor::trace) const fn complete() -> Self {
         Self {
             directory: Directory::Available(Reply::Present),
-            factor: Factor::Indexed(Selection::Middle),
+            factor: Factor::Current(JournalPhase::Selecting),
             head: Reply::Present,
             rebase: Rebase::Absent,
             tree: Reply::Present,
@@ -120,7 +117,13 @@ impl Runner for Queries {
         clippy::panic_in_result_fn,
         reason = "query identity violations must fail instead of becoming optional missing metadata"
     )]
-    fn output(&self, bin: &str, args: &[&str], cwd: &Path) -> io::Result<Output> {
+    fn output(
+        &self,
+        bin: &str,
+        args: &[&str],
+        _envs: &[(&str, Option<&str>)],
+        cwd: &Path,
+    ) -> io::Result<Output> {
         assert_eq!(bin, "git");
         assert_eq!(cwd, self.cwd);
         let query = self
@@ -141,7 +144,7 @@ impl Runner for Queries {
         &self,
         _bin: &str,
         _args: &[&str],
-        _envs: &[(&str, &str)],
+        _envs: &[(&str, Option<&str>)],
         _quiet: bool,
         _cwd: &Path,
     ) -> io::Result<ExitStatus> {
@@ -158,41 +161,73 @@ pub(in crate::git_factor::trace) struct Arrangement {
 }
 
 impl Arrangement {
-    fn arrange_factor(&mut self, factor: Factor, token: &str, count: u32) {
+    fn arrange_factor(&mut self, factor: Factor) {
         match factor {
             Factor::Absent => {}
-            Factor::Malformed => {
-                self.write(".git/factor/current_index", "not-an-index");
-                self.write(".git/factor/split_count", "not-a-count");
-                self.write(".git/factor/requires_rebase", "not-a-bool");
-                self.write(".git/factor/expected_tree", " \n\t ");
-                self.write(".git/factor/commits", "alpha\n");
-                self.expected.factor_expected_tree = Some(String::new());
+            Factor::Malformed => self.write(".git/factor-journal.json", "{not a journal}"),
+            Factor::Unreadable => {
+                fs::create_dir_all(self.root.path().join(".git/factor-journal.json"))
+                    .or_abort("unreadable journal directory");
             }
-            Factor::MissingCommits | Factor::BlankCommits => {
-                self.write(".git/factor/current_index", "0");
-                self.expected.factor_current_index = Some(0);
-                if matches!(factor, Factor::BlankCommits) {
-                    self.write(".git/factor/commits", " \n\t\n");
-                }
-            }
-            Factor::Indexed(selection) => {
-                let (index, commit, requires_rebase, flag_text) = match selection {
-                    Selection::First => (0, Some("alpha"), StateBool::False, "false"),
-                    Selection::Middle => (1, Some("beta"), StateBool::True, "true"),
-                    Selection::Last => (2, Some("gamma"), StateBool::False, "false"),
-                    Selection::PastEnd => (3, None, StateBool::True, "true"),
+            Factor::Current(phase) => {
+                let checkpoint = "a".repeat(COMMIT_SHA_HEX_LEN);
+                let final_tree = "b".repeat(COMMIT_SHA_HEX_LEN);
+                let source = "c".repeat(COMMIT_SHA_HEX_LEN);
+                let anchor = "d".repeat(COMMIT_SHA_HEX_LEN);
+                let base = "e".repeat(COMMIT_SHA_HEX_LEN);
+                let lease = "f".repeat(COMMIT_SHA_HEX_LEN);
+                let (phase_name, has_source, state) = match phase {
+                    JournalPhase::Closing => (
+                        "closing",
+                        false,
+                        format!(
+                            r#"{{"phase":"closing","lease":"{lease}","outcome":{{"result":"complete","atom":"{source}"}}}}"#
+                        ),
+                    ),
+                    JournalPhase::Opening => (
+                        "opening",
+                        true,
+                        format!(
+                            r#"{{"phase":"opening","lease":"{lease}","source":"{source}","anchor":"{anchor}","base":"{base}","head":"{base}"}}"#
+                        ),
+                    ),
+                    JournalPhase::Preparing => (
+                        "preparing",
+                        false,
+                        format!(
+                            r#"{{"phase":"preparing","tip":"{anchor}","base":"{base}","previous_lease":null}}"#
+                        ),
+                    ),
+                    JournalPhase::Replaying => (
+                        "replaying",
+                        true,
+                        format!(
+                            r#"{{"phase":"replaying","lease":"{lease}","source":"{source}","anchor":"{anchor}","base":"{base}","head":"{base}","atom":"{source}","remainder":{{"state":"absent"}},"accepted":[]}}"#
+                        ),
+                    ),
+                    JournalPhase::Selecting => (
+                        "selecting",
+                        true,
+                        format!(
+                            r#"{{"phase":"selecting","lease":"{lease}","source":"{source}","anchor":"{anchor}","base":"{base}","head":"{base}"}}"#
+                        ),
+                    ),
+                    JournalPhase::Verified => (
+                        "verified",
+                        false,
+                        format!(
+                            r#"{{"phase":"verified","lease":"{lease}","atom":"{source}","anchor":"{anchor}","base":"{base}","tip":"{checkpoint}","remainder":{{"state":"absent"}}}}"#
+                        ),
+                    ),
                 };
-                self.write(".git/factor/current_index", &format!(" {index}\n"));
-                self.write(".git/factor/split_count", &format!(" {count}\n"));
-                self.write(".git/factor/requires_rebase", flag_text);
-                self.write(".git/factor/expected_tree", &format!(" expected-{token}\n"));
-                self.write(".git/factor/commits", " \n alpha \n\n beta\n \n gamma \n");
-                self.expected.factor_current_index = Some(index);
-                self.expected.factor_current_commit = commit.map(str::to_owned);
-                self.expected.factor_requires_rebase = Some(requires_rebase);
-                self.expected.factor_split_count = Some(count);
-                self.expected.factor_expected_tree = Some(format!("expected-{token}"));
+                let journal = format!(
+                    r#"{{"branch":"refs/heads/main","checkpoint":"{checkpoint}","final_tree":"{final_tree}","format":"checkpoint_v2","gates":[],"original_base":"{base}","original_tip":"{anchor}","session":"{lease}","state":{state}}}"#
+                );
+                self.write(".git/factor-journal.json", &journal);
+                self.expected.factor_checkpoint = Some(checkpoint);
+                self.expected.factor_final_tree = Some(final_tree);
+                self.expected.factor_phase = Some(phase_name.to_owned());
+                self.expected.factor_source = has_source.then_some(source);
             }
         }
     }
@@ -288,23 +323,10 @@ impl Arrangement {
 
     /// Checks every snapshot field, complete query consumption, and arranged file bytes.
     pub(in crate::git_factor::trace) fn assert_observation(&self, result: &RepoSnapshot) {
-        assert_eq!(
-            result.factor_current_commit,
-            self.expected.factor_current_commit
-        );
-        assert_eq!(
-            result.factor_current_index,
-            self.expected.factor_current_index
-        );
-        assert_eq!(
-            result.factor_expected_tree,
-            self.expected.factor_expected_tree
-        );
-        assert_eq!(
-            result.factor_requires_rebase,
-            self.expected.factor_requires_rebase
-        );
-        assert_eq!(result.factor_split_count, self.expected.factor_split_count);
+        assert_eq!(result.factor_checkpoint, self.expected.factor_checkpoint);
+        assert_eq!(result.factor_final_tree, self.expected.factor_final_tree);
+        assert_eq!(result.factor_phase, self.expected.factor_phase);
+        assert_eq!(result.factor_source, self.expected.factor_source);
         assert_eq!(result.git_dir, self.expected.git_dir);
         assert_eq!(result.head, self.expected.head);
         assert_eq!(result.head_tree, self.expected.head_tree);
@@ -357,7 +379,7 @@ impl Arrangement {
         arrangement.write("unrelated", "preserved bytes");
         arrangement.arrange_queries(world, token);
         if matches!(world.directory, Directory::Available(_)) {
-            arrangement.arrange_factor(world.factor, token, count);
+            arrangement.arrange_factor(world.factor);
             arrangement.arrange_rebase(world.rebase, token, count);
         }
         arrangement

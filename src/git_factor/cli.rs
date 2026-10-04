@@ -18,27 +18,23 @@ struct SessionQueryFlags {
 /// Session-control flags that advance an active split flow.
 #[derive(Args)]
 struct SessionProgressFlags {
-    /// Continue by committing the currently staged changes.
+    /// Resume replay and recovery, or submit staged changes with --message.
     ///
-    /// Staged changes must contain the next atomic split and the exec gate
-    /// must pass. After committing, remaining changes are restored as
-    /// unstaged changes from the green baseline state.
+    /// Without a message, resumes the current replay, captures its completed
+    /// checkpoint, and opens the remaining change for selection. With a
+    /// message, validates the staged atom and captures a new checkpoint.
     #[arg(long = "continue", help_heading = "Session Control")]
     r#continue: bool,
 
-    /// Commit all remaining changes and finish the current factor session.
+    /// Validate and capture all remaining changes, then finish the session.
     ///
-    /// Restores all remaining changes, verifies the tree hash matches the
-    /// recorded green baseline, and commits the final split. When no
-    /// --message is given, reuses the original tip commit message.
+    /// Uses the original selected tip's message when --message is omitted.
     #[arg(long = "finish", help_heading = "Session Control")]
     finish: bool,
 
-    /// Discard the current split attempt and restore the remaining pool.
+    /// Unstage the current candidate in an open selection.
     ///
-    /// Restores the green baseline commit into the index and working tree,
-    /// then unstages everything so the session returns to the normal
-    /// "remaining changes are unstaged" state.
+    /// Preserves every previously completed checkpoint.
     #[arg(long = "retry", help_heading = "Session Control")]
     retry: bool,
 }
@@ -56,26 +52,28 @@ struct SessionProgressFlags {
     disable_help_subcommand = true,
     after_long_help = "\
 WORKFLOW:
-  1. Start a session:    git factor --exec 'make test' HEAD
-  2. If start gate fails: fix, stage, amend, then run git rebase --continue
-  3. When paused at the factor break: git factor --continue
-  4. Stage changes:      git add --patch -- <path>
-  5. Commit a slice:     git factor --continue --message 'type: description'
-  6. Discard bad staging: git factor --retry
-  7. Repeat steps 4-6 for each atomic commit.
-  8. Finish remaining:   git factor --finish
+  1. Start a session:     git factor --gate test 'cargo test' HEAD
+  2. Select an atom:     git add --patch -- <path>
+  3. Capture the atom:   git factor --message 'Add login'
+  4. Repeat steps 2-3 on the automatically exposed remainder.
+  5. Finish remaining:  git factor --finish
 
-  The start gate must pass on a clean repository state.
-  Each split commit must pass the exec gate independently.
-  Ranges refactor one contiguous, merge-free ancestry span into a new series.
-  Use --finish without --message to reuse the original commit message.
+  Each successful split finishes its rebase before opening the next one.
+  Gates validate each tree independently of the unstaged remainder.
+  Passing command/tree proofs are reused; commit hooks still validate messages.
+  Gates must be deterministic tree checks and must not depend on commit metadata, history, or messages.
+  Resolve replay conflicts or gate failures, then run git factor --continue.
+  Use --retry only in an open selection to unstage its current candidate.
+  During replay, use --continue or --abort to return to the latest checkpoint.
+  Earlier successful splits remain captured.
+  Legacy sessions must be completed with their originating version.
 
 EXAMPLES:
-  Split the latest commit, first proving the full commit is green:
-    git factor --exec 'cargo test' HEAD
+  Split a commit using ordered named and legacy gates:
+    git factor --gate test 'cargo test' --exec 'cargo fmt --check' HEAD
 
-  Refactor an inclusive span into a new commit series:
-    git factor --exec 'make check' HEAD~2 HEAD
+  Split an inclusive contiguous span:
+    git factor --gate check 'make check' HEAD~2 HEAD
 
   Use git-native exclusive-start range syntax:
     git factor --exec 'npm test' HEAD~3..HEAD
@@ -83,19 +81,16 @@ EXAMPLES:
   Use git-native inclusive-start range syntax:
     git factor --exec 'npm test' HEAD~3^..HEAD
 
-  Continue with a multi-paragraph commit message:
-    git factor --continue --message 'feat: add login' --message 'Implements OAuth2 flow.'
+  Submit a multi-paragraph message (also accepts --continue):
+    git factor --message 'Add login' --message 'Support OAuth2 sessions.'
 
-  Discard the current split attempt and restore the remaining pool:
-    git factor --retry
+  Resume replay after a conflict or gate failure:
+    git factor --continue
 
-  Finish with the original commit message:
+  Finish with the original selected tip's message:
     git factor --finish
 
-  Abort and restore the repository:
-    git factor --abort
-
-  Show active-session status or whether a start is pending:
+  Show active-session status:
     git factor --status"
 )]
 pub(in crate::git_factor) struct Cli {
@@ -119,18 +114,26 @@ pub(in crate::git_factor) struct Cli {
 
     /// Shell command(s) to run as the deterministic validation gate.
     ///
-    /// Multiple --exec flags are joined with &&. Git-factor runs the combined
-    /// gate before the session starts and before each split commit. The
-    /// command must have valid bash syntax and must leave the repository
-    /// clean.
+    /// Multiple --exec and --gate flags run individually in supplied order.
+    /// Passing command/tree proofs are reused. Commands must have valid bash
+    /// syntax, inspect only the tree, and preserve its bytes and commit metadata.
     #[arg(long = "exec", value_name = "COMMAND", help_heading = "Start Options")]
     exec: Vec<NonEmptyString>,
 
+    /// Ordered named tree checks, recorded in Gate-<name> trailers.
+    ///
+    /// Names start with an ASCII letter and contain ASCII letters, digits, or
+    /// hyphens. Names are unique without regard to case. Commands obey the
+    /// same tree-only contract as --exec.
+    #[arg(long = "gate", num_args = 2, value_names = ["NAME", "COMMAND"], action = ArgAction::Append, help_heading = "Start Options")]
+    gate: Vec<NonEmptyString>,
+
     /// Commit message for the split commit.
     ///
-    /// Submits staged changes with or without --continue. Optional with --finish
-    /// (defaults to the original commit message). Multiple --message flags produce
-    /// separate paragraphs, matching git commit behavior.
+    /// Submitting a message validates and captures the staged atom. Without a
+    /// message, --continue resumes replay. Optional with --finish (defaults to
+    /// the original selected tip message). Multiple --message flags produce separate
+    /// paragraphs, matching git commit behavior.
     #[arg(
         long = "message",
         short = 'm',
@@ -174,6 +177,11 @@ impl Cli {
         self.session_progress.finish
     }
 
+    /// Returns paired named gate values in CLI occurrence order.
+    pub(in crate::git_factor) fn gate(&self) -> &[NonEmptyString] {
+        &self.gate
+    }
+
     /// Returns requested commit messages.
     pub(in crate::git_factor) fn message(&self) -> &[NonEmptyString] {
         &self.message
@@ -192,6 +200,29 @@ impl Cli {
 
 #[cfg(test)]
 mod proptests {
+    mod cli {
+        mod gate {
+            use crate::non_empty_string::NonEmptyString;
+            use proptest::collection::vec;
+            use proptest::prelude::*;
+            proptest! {
+                #[test]
+                fn preserves_generated_named_pair_order(pairs in vec(("[a-z]{1,12}", "[A-Za-z0-9 $;]{1,24}"), 0..5)) {
+                    use clap::Parser as _;
+                    use crate::test_support::OrAbort as _;
+                    let mut args = vec!["git-factor".to_owned()];
+                    let mut expected = Vec::new();
+                    for (name, command) in pairs {
+                        args.extend(["--gate".to_owned(), name.clone(), command.clone()]);
+                        expected.extend([name, command]);
+                    }
+                    let parsed = super::super::super::Cli::try_parse_from(args).or_abort("CLI");
+                    let actual = parsed.gate();
+                    prop_assert_eq!(actual.iter().map(NonEmptyString::as_str).collect::<Vec<_>>(), expected.iter().map(String::as_str).collect::<Vec<_>>());
+                }
+            }
+        }
+    }
     use clap::Parser as _;
     use proptest::collection::vec;
     use proptest::prelude::*;
@@ -275,6 +306,40 @@ mod proptests {
                     .collect::<Vec<_>>(),
                 messages.iter().map(String::as_str).collect::<Vec<_>>()
             );
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    mod cli {
+        mod gate {
+            #[test]
+            fn preserves_named_pairs_in_occurrence_order() {
+                use crate::non_empty_string::NonEmptyString;
+                use crate::test_support::OrAbort as _;
+                use clap::Parser as _;
+                let parsed = super::super::super::Cli::try_parse_from([
+                    "git-factor",
+                    "--gate",
+                    "test",
+                    "printf one",
+                    "--exec",
+                    "printf middle",
+                    "--gate",
+                    "lint",
+                    "printf two",
+                ])
+                .or_abort("CLI");
+                let actual = parsed.gate();
+                assert_eq!(
+                    actual
+                        .iter()
+                        .map(NonEmptyString::as_str)
+                        .collect::<Vec<_>>(),
+                    ["test", "printf one", "lint", "printf two"]
+                );
+            }
         }
     }
 }

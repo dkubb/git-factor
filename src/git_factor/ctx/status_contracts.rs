@@ -77,7 +77,7 @@ pub(in crate::git_factor::ctx) fn run_child_if_requested() {
     let actual = RealRunner.status(
         bin,
         &["-c", SCRIPT, "status-contract", &payload, &exit],
-        &[("GIT_FACTOR_STATUS_VALUE", &value)],
+        &[("GIT_FACTOR_STATUS_VALUE", Some(value.as_str()))],
         quiet,
         cwd,
     );

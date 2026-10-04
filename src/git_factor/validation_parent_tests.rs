@@ -1,6 +1,7 @@
 use super::*;
 use core::cell::{Cell, RefCell};
 use proptest::prelude::*;
+use std::fs;
 use std::os::unix::process::ExitStatusExt as _;
 
 const ENV: ParentEnv = ParentEnv;
@@ -76,10 +77,16 @@ impl Fs for RefusingFs {
     fn read_to_string(&self, _path: &Path) -> io::Result<String> {
         Err(io::ErrorKind::NotFound.into())
     }
+    fn remove_atomic_file(&self, _path: &Path) -> io::Result<()> {
+        Err(io::ErrorKind::PermissionDenied.into())
+    }
     fn remove_dir_all(&self, _path: &Path) -> io::Result<()> {
         Err(io::ErrorKind::PermissionDenied.into())
     }
-    fn remove_file(&self, _path: &Path) -> io::Result<()> {
+    fn symlink_metadata(&self, _path: &Path) -> io::Result<fs::Metadata> {
+        Err(io::ErrorKind::NotFound.into())
+    }
+    fn write_atomic_string(&self, _path: &Path, _content: &str) -> io::Result<()> {
         Err(io::ErrorKind::PermissionDenied.into())
     }
     fn write_string(&self, _path: &Path, _content: &str) -> io::Result<()> {
@@ -139,7 +146,18 @@ impl CommitObject {
 }
 
 impl Runner for CommitObject {
-    fn output(&self, bin: &str, args: &[&str], cwd: &Path) -> io::Result<Output> {
+    fn output(
+        &self,
+        bin: &str,
+        args: &[&str],
+        envs: &[(&str, Option<&str>)],
+        cwd: &Path,
+    ) -> io::Result<Output> {
+        if !envs.is_empty() {
+            return Err(io::Error::other(
+                "parent admission must not override environment",
+            ));
+        }
         if bin != "git" || cwd != Path::new("/parent-admission") {
             return Err(io::Error::other("unexpected object query boundary"));
         }
@@ -170,7 +188,7 @@ impl Runner for CommitObject {
         &self,
         _bin: &str,
         _args: &[&str],
-        _envs: &[(&str, &str)],
+        _envs: &[(&str, Option<&str>)],
         _quiet: bool,
         _cwd: &Path,
     ) -> io::Result<ExitStatus> {

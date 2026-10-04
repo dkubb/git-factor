@@ -10,13 +10,16 @@ mod snapshot_contracts;
 
 use core::error::Error as _;
 use core::fmt::{Arguments, Write as _};
-use core::str::FromStr;
+
 use std::ffi::OsString;
 use std::fs::{self, OpenOptions};
 use std::io::Write as _;
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use super::*;
+use super::{
+    Ctx, FactorError, REBASE_APPLY_DIR, REBASE_MERGE_DIR, StateDir, engine, git_dir_in, status_code,
+};
 
 /// Parses the first actionable line from rebase todo text.
 macro_rules! first_rebase_todo_line_inline {
@@ -110,16 +113,14 @@ pub(in crate::git_factor) const TRACE_MAX_TEXT_BYTES: usize = 8192;
 )]
 /// Snapshot of repository and factor-session state for trace logging.
 pub(in crate::git_factor) struct RepoSnapshot {
-    /// Current commit being split, derived from state.
-    pub(in crate::git_factor) factor_current_commit: Option<String>,
-    /// Persisted factor current index.
-    pub(in crate::git_factor) factor_current_index: Option<usize>,
-    /// Persisted expected tree hash.
-    pub(in crate::git_factor) factor_expected_tree: Option<String>,
-    /// Persisted requires-rebase flag.
-    pub(in crate::git_factor) factor_requires_rebase: Option<StateBool>,
-    /// Persisted split-count value.
-    pub(in crate::git_factor) factor_split_count: Option<u32>,
+    /// Last recorded completed checkpoint; this is an observation, not admission.
+    pub(in crate::git_factor) factor_checkpoint: Option<String>,
+    /// Recorded final tree preserved by completed checkpoints.
+    pub(in crate::git_factor) factor_final_tree: Option<String>,
+    /// Recorded durable phase.
+    pub(in crate::git_factor) factor_phase: Option<String>,
+    /// Combined source recorded by an opening, selecting or replaying phase.
+    pub(in crate::git_factor) factor_source: Option<String>,
     /// Absolute path to `.git` when resolvable.
     pub(in crate::git_factor) git_dir: Option<String>,
     /// Current `HEAD` commit SHA when resolvable.
@@ -188,7 +189,7 @@ pub(in crate::git_factor) struct ProcessTrace<'trace> {
     /// Execution duration in milliseconds.
     pub(in crate::git_factor) duration_ms: u64,
     /// Environment variable pairs.
-    pub(in crate::git_factor) envs: &'trace [(&'trace str, &'trace str)],
+    pub(in crate::git_factor) envs: &'trace [(&'trace str, Option<&'trace str>)],
     /// Exit code when process launched successfully.
     pub(in crate::git_factor) exit_code: Option<i32>,
     /// Trace mode (`status` or `output`).
@@ -300,7 +301,7 @@ pub(in crate::git_factor) fn maybe_git_output(
     ctx: &Ctx<'_>,
     args: &[&str],
 ) -> Option<(i32, String, String)> {
-    let output = ctx.runner.output("git", args, &ctx.cwd).ok()?;
+    let output = ctx.runner.output("git", args, &[], &ctx.cwd).ok()?;
     let code = status_code(output.status);
     let observed_stdout = String::from_utf8_lossy(&output.stdout);
     let stdout = observed_stdout
@@ -317,23 +318,15 @@ pub(in crate::git_factor) fn read_trimmed_optional(ctx: &Ctx<'_>, path: &Path) -
     Some(content.trim().to_owned())
 }
 
-/// Reads a file when present, trims it, and parses to a typed value.
-pub(in crate::git_factor) fn read_trimmed_optional_parsed<T>(
-    ctx: &Ctx<'_>,
-    path: &Path,
-) -> Option<T>
-where
-    T: FromStr,
-{
-    read_trimmed_optional(ctx, path)?.parse().ok()
-}
-
 /// Reads an optional rebase counter from `path`.
 pub(in crate::git_factor) fn read_rebase_counter(
     ctx: &Ctx<'_>,
     path: &Path,
 ) -> Option<RebaseCounter> {
-    read_trimmed_optional_parsed::<u32>(ctx, path).map(RebaseCounter)
+    read_trimmed_optional(ctx, path)?
+        .parse::<u32>()
+        .ok()
+        .map(RebaseCounter)
 }
 
 /// Returns the first non-empty, non-comment line from a rebase todo file.
@@ -385,28 +378,11 @@ pub(in crate::git_factor) fn collect_repo_snapshot(ctx: &Ctx<'_>) -> RepoSnapsho
             snapshot.toplevel = Some(toplevel);
         }
 
-        let factor_dir = dir.join("factor");
-        snapshot.factor_current_index =
-            read_trimmed_optional_parsed::<usize>(ctx, &factor_dir.join("current_index"));
-        snapshot.factor_split_count =
-            read_trimmed_optional_parsed::<u32>(ctx, &factor_dir.join("split_count"));
-        snapshot.factor_requires_rebase =
-            read_trimmed_optional_parsed::<bool>(ctx, &factor_dir.join("requires_rebase"))
-                .map(StateBool::from_bool);
-        snapshot.factor_expected_tree =
-            read_trimmed_optional(ctx, &factor_dir.join("expected_tree"));
-
-        if let (Some(commits), Some(index)) = (
-            read_trimmed_optional(ctx, &factor_dir.join("commits")),
-            snapshot.factor_current_index,
-        ) {
-            let commit = commits
-                .lines()
-                .map(str::trim)
-                .filter(|line| !line.is_empty())
-                .nth(index)
-                .map(str::to_owned);
-            snapshot.factor_current_commit = commit;
+        if let Some(journal) = engine::journal_snapshot(ctx, dir) {
+            snapshot.factor_checkpoint = Some(journal.checkpoint().to_string());
+            snapshot.factor_final_tree = Some(journal.final_tree().to_string());
+            snapshot.factor_phase = Some(journal.phase().to_owned());
+            snapshot.factor_source = journal.source().map(ToString::to_string);
         }
 
         let rebase_merge = dir.join(REBASE_MERGE_DIR);
@@ -463,8 +439,6 @@ pub(in crate::git_factor) fn push_snapshot_fields(
             buf.push(',');
         }};
     }
-    let factor_current_index_text = snapshot.factor_current_index.map(|value| value.to_string());
-    let factor_split_count_text = snapshot.factor_split_count.map(|value| value.to_string());
     let rebase_msgnum_text = snapshot
         .rebase_msgnum
         .map(|value| value.as_u32().to_string());
@@ -477,22 +451,10 @@ pub(in crate::git_factor) fn push_snapshot_fields(
     push_array!("staged_paths", &snapshot.staged_paths);
     push_array!("unstaged_paths", &snapshot.unstaged_paths);
     push_array!("untracked_paths", &snapshot.untracked_paths);
-    push_opt!("factor_current_index", factor_current_index_text.as_deref());
-    push_opt!("factor_split_count", factor_split_count_text.as_deref());
-    push_opt!(
-        "factor_requires_rebase",
-        snapshot
-            .factor_requires_rebase
-            .map(|value| if value.as_bool() { "true" } else { "false" })
-    );
-    push_opt!(
-        "factor_expected_tree",
-        snapshot.factor_expected_tree.as_deref()
-    );
-    push_opt!(
-        "factor_current_commit",
-        snapshot.factor_current_commit.as_deref()
-    );
+    push_opt!("factor_checkpoint", snapshot.factor_checkpoint.as_deref());
+    push_opt!("factor_final_tree", snapshot.factor_final_tree.as_deref());
+    push_opt!("factor_phase", snapshot.factor_phase.as_deref());
+    push_opt!("factor_source", snapshot.factor_source.as_deref());
     push_opt!(
         "rebase_state",
         snapshot.rebase_state.map(|state| match state {
@@ -546,7 +508,7 @@ pub(in crate::git_factor) fn trace_process_command(ctx: &Ctx<'_>, trace: Process
     line.push(',');
     let mut env_arr = Vec::with_capacity(trace.envs.len());
     for &(key, value) in trace.envs {
-        env_arr.push(format!("{key}={value}"));
+        env_arr.push(value.map_or_else(|| key.to_owned(), |assigned| format!("{key}={assigned}")));
     }
     push_json_array(&mut line, "env", &env_arr);
     line.push(',');
@@ -582,6 +544,13 @@ pub(in crate::git_factor) fn trace_process_command(ctx: &Ctx<'_>, trace: Process
 }
 
 /// Writes a note event into the trace log, if tracing is enabled.
+#[cfg_attr(
+    not(test),
+    expect(
+        clippy::single_call_fn,
+        reason = "session dispatch owns structured command events independently of command snapshots"
+    )
+)]
 pub(in crate::git_factor) fn trace_note(ctx: &Ctx<'_>, event: &str, fields: &[(&str, &str)]) {
     if trace_log_path(ctx).is_none() {
         return;
@@ -615,17 +584,13 @@ fn push_log_line(content: &mut String, args: Arguments<'_>) {
         reason = "error-log formatting is isolated from control-flow handling"
     )
 )]
-#[expect(
-    clippy::too_many_lines,
-    reason = "error log intentionally emits a complete session snapshot in one place"
-)]
 /// Overwrites `.git/factor/error.log` with the latest unexpected session failure.
 pub(in crate::git_factor) fn write_error_log(
     ctx: &Ctx<'_>,
+    state_dir: &StateDir,
     args: &[OsString],
     error: &FactorError,
 ) -> Result<(), FactorError> {
-    let state_dir = factor_dir_in(ctx)?;
     let snapshot = collect_repo_snapshot(ctx);
     let trace_log = trace_log_path(ctx);
     let argv_words = args
@@ -663,34 +628,10 @@ pub(in crate::git_factor) fn write_error_log(
     push_opt_line!("head_tree", snapshot.head_tree.as_deref());
     push_opt_line!("git_dir", snapshot.git_dir.as_deref());
     push_opt_line!("toplevel", snapshot.toplevel.as_deref());
-    push_opt_line!(
-        "factor_current_commit",
-        snapshot.factor_current_commit.as_deref()
-    );
-    push_opt_line!(
-        "factor_current_index",
-        snapshot
-            .factor_current_index
-            .map(|value| value.to_string())
-            .as_deref()
-    );
-    push_opt_line!(
-        "factor_split_count",
-        snapshot
-            .factor_split_count
-            .map(|value| value.to_string())
-            .as_deref()
-    );
-    push_opt_line!(
-        "factor_requires_rebase",
-        snapshot
-            .factor_requires_rebase
-            .map(|value| if value.as_bool() { "true" } else { "false" })
-    );
-    push_opt_line!(
-        "factor_expected_tree",
-        snapshot.factor_expected_tree.as_deref()
-    );
+    push_opt_line!("factor_checkpoint", snapshot.factor_checkpoint.as_deref());
+    push_opt_line!("factor_final_tree", snapshot.factor_final_tree.as_deref());
+    push_opt_line!("factor_phase", snapshot.factor_phase.as_deref());
+    push_opt_line!("factor_source", snapshot.factor_source.as_deref());
     push_opt_line!(
         "rebase_state",
         snapshot.rebase_state.map(|state| match state {
@@ -733,7 +674,12 @@ pub(in crate::git_factor) fn write_error_log(
 }
 
 #[cfg(test)]
+#[path = "trace_log_contracts.rs"]
+mod log_contracts;
+
+#[cfg(test)]
 mod tests {
+    include!("trace_owner_units.rs");
     mod collect_status_paths {
         use super::super::collect_status_paths;
         use super::super::command_contracts::{arrange_context, arrange_output};
@@ -867,11 +813,11 @@ mod tests {
         use super::super::collect_repo_snapshot;
         use super::super::command_contracts::{arrange_context, arrange_output};
         use super::super::snapshot_contracts::{
-            Arrangement, Directory, Factor, Rebase, Reply, Selection, World,
+            Arrangement, Directory, Factor, JournalPhase, Rebase, Reply, World,
         };
 
         #[test]
-        fn reads_complete_factor_fields() {
+        fn reads_complete_checkpoint_journal_fields() {
             let world = World::complete();
             let arrangement = Arrangement::new(world, "literal", 7);
             let context = arrangement.context();
@@ -882,16 +828,18 @@ mod tests {
             assert_eq!(result.head.as_deref(), Some("head-literal"));
             assert_eq!(result.head_tree.as_deref(), Some("tree-literal"));
             assert_eq!(result.toplevel.as_deref(), Some("/repository/literal"));
-            assert_eq!(result.factor_current_commit.as_deref(), Some("beta"));
-            assert_eq!(result.factor_current_index, Some(1));
-            assert_eq!(result.factor_split_count, Some(7));
             assert_eq!(
-                result.factor_requires_rebase,
-                Some(super::super::StateBool::True)
+                result.factor_checkpoint.as_deref(),
+                Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
             );
             assert_eq!(
-                result.factor_expected_tree.as_deref(),
-                Some("expected-literal")
+                result.factor_final_tree.as_deref(),
+                Some("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+            );
+            assert_eq!(result.factor_phase.as_deref(), Some("selecting"));
+            assert_eq!(
+                result.factor_source.as_deref(),
+                Some("cccccccccccccccccccccccccccccccccccccccc")
             );
             assert_eq!(result.rebase_state, None);
             assert_eq!(result.rebase_msgnum, None);
@@ -908,9 +856,9 @@ mod tests {
         }
 
         #[test]
-        fn reads_first_padded_commit() {
+        fn observes_preparing_without_a_selection_source() {
             let mut world = World::complete();
-            world.factor = Factor::Indexed(Selection::First);
+            world.factor = Factor::Current(JournalPhase::Preparing);
             let arrangement = Arrangement::new(world, "literal", 7);
             let context = arrangement.context();
 
@@ -920,9 +868,9 @@ mod tests {
         }
 
         #[test]
-        fn reads_last_padded_commit() {
+        fn observes_verified_without_a_selection_source() {
             let mut world = World::complete();
-            world.factor = Factor::Indexed(Selection::Last);
+            world.factor = Factor::Current(JournalPhase::Verified);
             let arrangement = Arrangement::new(world, "literal", 7);
             let context = arrangement.context();
 
@@ -932,9 +880,21 @@ mod tests {
         }
 
         #[test]
-        fn keeps_past_end_index_without_current_commit() {
+        fn observes_closing_without_a_selection_source() {
             let mut world = World::complete();
-            world.factor = Factor::Indexed(Selection::PastEnd);
+            world.factor = Factor::Current(JournalPhase::Closing);
+            let arrangement = Arrangement::new(world, "literal", 7);
+            let context = arrangement.context();
+
+            let result = collect_repo_snapshot(&context);
+
+            arrangement.assert_observation(&result);
+        }
+
+        #[test]
+        fn observes_replaying_with_a_selection_source() {
+            let mut world = World::complete();
+            world.factor = Factor::Current(JournalPhase::Replaying);
             let arrangement = Arrangement::new(world, "literal", 7);
             let context = arrangement.context();
 
@@ -964,14 +924,14 @@ mod tests {
 
             let result = collect_repo_snapshot(&context);
 
-            assert_eq!(result.factor_expected_tree.as_deref(), Some(""));
+            assert_eq!(result.factor_final_tree, None);
             arrangement.assert_observation(&result);
         }
 
         #[test]
-        fn observes_missing_commits_file() {
+        fn observes_unreadable_journal() {
             let mut world = World::complete();
-            world.factor = Factor::MissingCommits;
+            world.factor = Factor::Unreadable;
             let arrangement = Arrangement::new(world, "literal", 7);
             let context = arrangement.context();
 
@@ -981,9 +941,9 @@ mod tests {
         }
 
         #[test]
-        fn observes_blank_commits_file() {
+        fn observes_opening_with_a_selection_source() {
             let mut world = World::complete();
-            world.factor = Factor::BlankCommits;
+            world.factor = Factor::Current(JournalPhase::Opening);
             let arrangement = Arrangement::new(world, "literal", 7);
             let context = arrangement.context();
 
@@ -1337,6 +1297,7 @@ mod tests {
 
 #[cfg(test)]
 mod proptests {
+    include!("trace_owner_properties.rs");
     mod collect_status_paths {
         use super::super::collect_status_paths;
         use super::super::command_contracts::{arrange_context, arrange_output};
@@ -1427,7 +1388,7 @@ mod proptests {
         use super::super::collect_repo_snapshot;
         use super::super::command_contracts::{arrange_context, arrange_output};
         use super::super::snapshot_contracts::{
-            Arrangement, Directory, Factor, Rebase, Reply, Selection, World,
+            Arrangement, Directory, Factor, JournalPhase, Rebase, Reply, World,
         };
 
         use proptest::prelude::*;
@@ -1450,13 +1411,14 @@ mod proptests {
                         ]),
                         prop::sample::select(vec![
                             Factor::Absent,
-                            Factor::Indexed(Selection::First),
-                            Factor::Indexed(Selection::Middle),
-                            Factor::Indexed(Selection::Last),
-                            Factor::Indexed(Selection::PastEnd),
+                            Factor::Current(JournalPhase::Preparing),
+                            Factor::Current(JournalPhase::Selecting),
+                            Factor::Current(JournalPhase::Verified),
+                            Factor::Current(JournalPhase::Closing),
+                            Factor::Current(JournalPhase::Replaying),
                             Factor::Malformed,
-                            Factor::MissingCommits,
-                            Factor::BlankCommits,
+                            Factor::Unreadable,
+                            Factor::Current(JournalPhase::Opening),
                         ]),
                         prop::sample::select(vec![
                             Rebase::Absent, Rebase::Merge, Rebase::MergeEmpty,

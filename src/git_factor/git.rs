@@ -27,7 +27,12 @@ pub(in crate::git_factor) const REBASE_APPLY_DIR: &str = "rebase-apply";
 pub(in crate::git_factor) const REBASE_MERGE_DIR: &str = "rebase-merge";
 
 /// Spawns a command and returns its captured output.
-fn command_output(ctx: &Ctx<'_>, bin: &str, args: &[&str]) -> Result<Output, FactorError> {
+fn command_output(
+    ctx: &Ctx<'_>,
+    bin: &str,
+    args: &[&str],
+    envs: &[(&str, Option<&str>)],
+) -> Result<Output, FactorError> {
     let trace_enabled = trace_log_path(ctx).is_some();
     let before = if trace_enabled {
         collect_repo_snapshot(ctx)
@@ -35,7 +40,7 @@ fn command_output(ctx: &Ctx<'_>, bin: &str, args: &[&str]) -> Result<Output, Fac
         RepoSnapshot::default()
     };
     let started = Instant::now();
-    let output = match ctx.runner.output(bin, args, &ctx.cwd) {
+    let output = match ctx.runner.output(bin, args, envs, &ctx.cwd) {
         Ok(output) => output,
         Err(err) => {
             let duration_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
@@ -51,7 +56,7 @@ fn command_output(ctx: &Ctx<'_>, bin: &str, args: &[&str]) -> Result<Output, Fac
                     mode: "output",
                     bin,
                     args,
-                    envs: &[],
+                    envs,
                     quiet: false,
                     duration_ms,
                     exit_code: None,
@@ -82,7 +87,7 @@ fn command_output(ctx: &Ctx<'_>, bin: &str, args: &[&str]) -> Result<Output, Fac
             mode: "output",
             bin,
             args,
-            envs: &[],
+            envs,
             quiet: false,
             duration_ms,
             exit_code: Some(output.status.code().unwrap_or(EXIT_SOFTWARE)),
@@ -105,7 +110,7 @@ pub(in crate::git_factor) fn command_status_with(
     ctx: &Ctx<'_>,
     bin: &str,
     args: &[&str],
-    envs: &[(&str, &str)],
+    envs: &[(&str, Option<&str>)],
     quiet: bool,
 ) -> Result<ExitStatus, FactorError> {
     let first_arg = args.first().copied().unwrap_or("");
@@ -167,18 +172,11 @@ pub(in crate::git_factor) fn command_status_with(
     }
 }
 
-/// Runs `git <args...>` and returns its exit status.
-pub(in crate::git_factor) fn git_status(
-    ctx: &Ctx<'_>,
-    args: &[&str],
-) -> Result<ExitStatus, FactorError> {
-    command_status_with(ctx, "git", args, &[], false)
-}
 /// Returns the absolute path to the `.git` directory.
 pub(in crate::git_factor) fn git_dir_in(ctx: &Ctx<'_>) -> Result<PathBuf, FactorError> {
     let output = ctx
         .runner
-        .output("git", &["rev-parse", "--git-dir"], &ctx.cwd)
+        .output("git", &["rev-parse", "--git-dir"], &[], &ctx.cwd)
         .map_err(|error| FactorError::GitDir(non_empty_msg(error.to_string())))?;
 
     if !output.status.success() {
@@ -202,7 +200,7 @@ pub(in crate::git_factor) fn git_output(
     ctx: &Ctx<'_>,
     args: &[&str],
 ) -> Result<String, FactorError> {
-    let output = command_output(ctx, "git", args)?;
+    let output = command_output(ctx, "git", args, &[])?;
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
 
@@ -226,7 +224,7 @@ pub(in crate::git_factor) fn git_output_with(
     bin: &str,
     args: &[&str],
 ) -> Result<String, FactorError> {
-    let output = command_output(ctx, bin, args)?;
+    let output = command_output(ctx, bin, args, &[])?;
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
 
@@ -248,52 +246,22 @@ pub(in crate::git_factor) fn command_output_with(
     ctx: &Ctx<'_>,
     bin: &str,
     args: &[&str],
+    envs: &[(&str, Option<&str>)],
 ) -> Result<Output, FactorError> {
-    command_output(ctx, bin, args)
+    command_output(ctx, bin, args, envs)
 }
 
 /// Runs `git <args...>` and returns captured output, regardless of exit status.
-#[expect(
-    clippy::single_call_fn,
-    reason = "raw git output is intentionally centralized for status-command diagnostics"
-)]
 pub(in crate::git_factor) fn git_raw_output(
     ctx: &Ctx<'_>,
     args: &[&str],
 ) -> Result<Output, FactorError> {
-    command_output(ctx, "git", args)
+    command_output(ctx, "git", args, &[])
 }
 
 /// Runs a git command and returns success/failure.
 pub(in crate::git_factor) fn run_git(ctx: &Ctx<'_>, args: &[&str]) -> Result<(), FactorError> {
     let status = command_status_with(ctx, "git", args, &[], false)?;
-
-    if status.success() {
-        Ok(())
-    } else {
-        Err(FactorError::GitCommand(non_empty_msg(format!(
-            "git {} failed (exit {})",
-            args.first().unwrap_or(&""),
-            status_code(status)
-        ))))
-    }
-}
-
-/// Runs a git command with editor invocations disabled.
-///
-/// Use this for flows where opening an editor is unexpected and should fail
-/// fast (for example `git rebase --continue` in automated factor sessions).
-pub(in crate::git_factor) fn run_git_non_interactive(
-    ctx: &Ctx<'_>,
-    args: &[&str],
-) -> Result<(), FactorError> {
-    let status = command_status_with(
-        ctx,
-        "git",
-        args,
-        &[("GIT_EDITOR", "false"), ("GIT_SEQUENCE_EDITOR", "false")],
-        false,
-    )?;
 
     if status.success() {
         Ok(())
@@ -328,6 +296,233 @@ pub(in crate::git_factor) fn run_git_with(
 
 #[cfg(test)]
 mod tests {
+
+    mod command_output_with {
+        use super::*;
+        #[test]
+        fn preserves_nonzero_native_output_and_literal_environment() {
+            let root = TempDir::new().or_abort("captured command");
+            let ctx = ctx_for(root.path());
+            let code: i32 = 7;
+            let actual = super::super::command_output_with(
+                &ctx,
+                "/bin/sh",
+                &["-c", "printf '%s' \"$VALUE\"; printf warning >&2; exit 7"],
+                &[("VALUE", Some("literal $;"))],
+            )
+            .or_abort("captured child");
+            assert_eq!(actual.status.code(), Some(code));
+            assert_eq!(actual.stdout, b"literal $;");
+            assert_eq!(actual.stderr, b"warning");
+            assert_eq!(
+                fs::read_dir(root.path()).or_abort("conservation").count(),
+                0
+            );
+        }
+    }
+    mod git_raw_output {
+        use super::super::directory_contracts::Query;
+        use super::*;
+        #[test]
+        fn preserves_failed_child_bytes_without_decoding_or_success_filtering() {
+            let signal: i32 = 9;
+            let fixture = Query::new(Ok(Output {
+                status: ExitStatus::from_raw(signal),
+                stdout: vec![0, 255, b' '],
+                stderr: b"native stderr\n".to_vec(),
+            }));
+            let actual =
+                super::super::git_raw_output(&fixture.context(), &["fixture-query", "literal"])
+                    .or_abort("captured Git reply");
+            assert_eq!(actual.status.into_raw(), signal);
+            assert_eq!(actual.stdout, [0, 255, b' ']);
+            assert_eq!(actual.stderr, b"native stderr\n");
+            assert_eq!(
+                fixture.runner.requests(),
+                vec![(
+                    "git".to_owned(),
+                    vec!["fixture-query".to_owned(), "literal".to_owned()],
+                    fixture.directory.path().to_path_buf()
+                )]
+            );
+            assert_eq!(fixture.io.stdout(), "");
+            assert_eq!(fixture.io.stderr(), "");
+        }
+    }
+    mod command_status_with {
+        use super::*;
+        #[test]
+        fn command_status_with_can_run_in_quiet_mode() {
+            let dir = TempDir::new().or_abort("tempdir");
+            let ctx = ctx_for(dir.path());
+            let status = command_status_with(
+                &ctx,
+                "bash",
+                &["-c", "echo hi; echo err 1>&2; exit 0"],
+                &[],
+                true,
+            )
+            .or_abort("command should run");
+
+            assert!(status.success());
+        }
+
+        #[test]
+        fn command_status_with_reports_spawn_errors_as_git_command() {
+            let dir = TempDir::new().or_abort("tempdir");
+            let ctx = ctx_for(dir.path());
+            let err = command_status_with(
+                &ctx,
+                "git-factor-not-a-real-binary",
+                &["rev-parse"],
+                &[],
+                false,
+            )
+            .err_or_abort("spawn should fail");
+
+            let message = git_command_message(&err).or_abort("expected GitCommand");
+            assert!(
+                message.contains("git-factor-not-a-real-binary"),
+                "err was: {err:?}"
+            );
+        }
+
+        #[test]
+        fn command_status_with_passes_explicit_editor_environment() {
+            let dir = TempDir::new().or_abort("tempdir");
+            let env = TestEnv {
+                cwd: dir.path().to_path_buf(),
+                trace_log: None,
+            };
+            let runner = NonInteractiveRunner;
+            let ctx = Ctx {
+                runner: &runner,
+                cwd: dir.path().to_path_buf(),
+                io: &REAL_IO,
+                env: &env,
+                fs: &REAL_FS,
+            };
+            let unexpected_bin_err = runner
+                .status(
+                    "not-git",
+                    &["status"],
+                    &[
+                        ("GIT_EDITOR", Some("false")),
+                        ("GIT_SEQUENCE_EDITOR", Some("false")),
+                    ],
+                    false,
+                    dir.path(),
+                )
+                .err_or_abort("unexpected bin should fail");
+            assert_eq!(unexpected_bin_err.to_string(), "unexpected bin");
+            let unexpected_args_err = runner
+                .status(
+                    "git",
+                    &["not-status"],
+                    &[
+                        ("GIT_EDITOR", Some("false")),
+                        ("GIT_SEQUENCE_EDITOR", Some("false")),
+                    ],
+                    false,
+                    dir.path(),
+                )
+                .err_or_abort("unexpected args should fail");
+            assert_eq!(unexpected_args_err.to_string(), "unexpected args");
+            let unexpected_quiet_err = runner
+                .status(
+                    "git",
+                    &["status"],
+                    &[
+                        ("GIT_EDITOR", Some("false")),
+                        ("GIT_SEQUENCE_EDITOR", Some("false")),
+                    ],
+                    true,
+                    dir.path(),
+                )
+                .err_or_abort("quiet=true should fail");
+            assert_eq!(unexpected_quiet_err.to_string(), "unexpected quiet=true");
+            let unexpected_env_err = runner
+                .status("git", &["status"], &[], false, dir.path())
+                .err_or_abort("unexpected env should fail");
+            assert_eq!(unexpected_env_err.to_string(), "unexpected envs");
+            let status = command_status_with(
+                &ctx,
+                "git",
+                &["status"],
+                &[
+                    ("GIT_EDITOR", Some("false")),
+                    ("GIT_SEQUENCE_EDITOR", Some("false")),
+                ],
+                false,
+            )
+            .or_abort("status should succeed");
+            assert!(status.success());
+        }
+
+        #[test]
+        fn command_status_with_preserves_nonzero_exit_status() {
+            struct NonInteractiveFailRunner;
+
+            impl Runner for NonInteractiveFailRunner {
+                fn output(
+                    &self,
+                    _bin: &str,
+                    _args: &[&str],
+                    _envs: &[(&str, Option<&str>)],
+                    _cwd: &Path,
+                ) -> io::Result<Output> {
+                    Err(io::Error::other("output should not be called"))
+                }
+
+                fn status(
+                    &self,
+                    _bin: &str,
+                    args: &[&str],
+                    _envs: &[(&str, Option<&str>)],
+                    _quiet: bool,
+                    _cwd: &Path,
+                ) -> io::Result<ExitStatus> {
+                    if args != ["status"] {
+                        return Err(io::Error::other("unexpected args"));
+                    }
+                    Ok(ExitStatus::from_raw(256))
+                }
+            }
+
+            let dir = TempDir::new().or_abort("tempdir");
+            let runner = NonInteractiveFailRunner;
+            let env = TestEnv {
+                cwd: dir.path().to_path_buf(),
+                trace_log: None,
+            };
+            let ctx = Ctx {
+                runner: &runner,
+                cwd: dir.path().to_path_buf(),
+                io: &REAL_IO,
+                env: &env,
+                fs: &REAL_FS,
+            };
+            let output_err = runner
+                .output("git", &["status"], &[], dir.path())
+                .err_or_abort("output method should fail");
+            assert!(
+                output_err
+                    .to_string()
+                    .contains("output should not be called"),
+                "unexpected output error: {output_err}"
+            );
+            let status_err = runner
+                .status("git", &["not-status"], &[], false, dir.path())
+                .err_or_abort("unexpected args should fail");
+            assert_eq!(status_err.to_string(), "unexpected args");
+
+            let status = command_status_with(&ctx, "git", &["status"], &[], false)
+                .or_abort("the child status remains observable");
+            let failure_code: i32 = 1;
+            assert_eq!(status.code(), Some(failure_code));
+        }
+    }
+
     mod git_dir_in {
         use super::super::directory_contracts::{NativeStatus, Query};
         use crate::exit_codes::EXIT_OK;
@@ -504,10 +699,10 @@ mod tests {
                 fs::read(&fixture.user).or_abort("unrelated work retained"),
                 b"unrelated user bytes\0\n"
             );
-            let head = Runner::output(&REAL_RUNNER, "git", &["rev-parse", "HEAD"], root)
+            let head = Runner::output(&REAL_RUNNER, "git", &["rev-parse", "HEAD"], &[], root)
                 .or_abort("HEAD observer");
-            let refs =
-                Runner::output(&REAL_RUNNER, "git", &["show-ref"], root).or_abort("ref observer");
+            let refs = Runner::output(&REAL_RUNNER, "git", &["show-ref"], &[], root)
+                .or_abort("ref observer");
             assert!(head.status.success());
             assert!(refs.status.success());
             assert_eq!(head.stdout, fixture.head);
@@ -712,11 +907,11 @@ mod tests {
                 "spawned":false,"exit_code":null,"stdout":{stdout_json},"stderr":{stderr_json},
                 "before_head":"before-head","before_head_tree":"before-tree","before_git_dir":{git_dir_json},"before_toplevel":{cwd_json},
                 "before_staged_paths":[],"before_unstaged_paths":[],"before_untracked_paths":[],
-                "before_factor_current_index":null,"before_factor_split_count":null,"before_factor_requires_rebase":null,"before_factor_expected_tree":null,"before_factor_current_commit":null,
+                "before_factor_checkpoint":null,"before_factor_final_tree":null,"before_factor_phase":null,"before_factor_source":null,
                 "before_rebase_state":null,"before_rebase_msgnum":null,"before_rebase_end":null,"before_rebase_todo_head":null,"before_rebase_done_tail":null,
                 "after_head":"after-head","after_head_tree":"after-tree","after_git_dir":{git_dir_json},"after_toplevel":{cwd_json},
                 "after_staged_paths":[],"after_unstaged_paths":[],"after_untracked_paths":[],
-                "after_factor_current_index":null,"after_factor_split_count":null,"after_factor_requires_rebase":null,"after_factor_expected_tree":null,"after_factor_current_commit":null,
+                "after_factor_checkpoint":null,"after_factor_final_tree":null,"after_factor_phase":null,"after_factor_source":null,
                 "after_rebase_state":null,"after_rebase_msgnum":null,"after_rebase_end":null,"after_rebase_todo_head":null,"after_rebase_done_tail":null
             }}"#)).or_abort("parse literal trace oracle");
             assert_eq!(record, expected);
@@ -810,11 +1005,11 @@ mod tests {
                 "spawned":true,"exit_code":0,"stdout":{stdout_json},"stderr":{stderr_json},
                 "before_head":"before-head","before_head_tree":"before-tree","before_git_dir":{git_dir_json},"before_toplevel":{cwd_json},
                 "before_staged_paths":[],"before_unstaged_paths":[],"before_untracked_paths":[],
-                "before_factor_current_index":null,"before_factor_split_count":null,"before_factor_requires_rebase":null,"before_factor_expected_tree":null,"before_factor_current_commit":null,
+                "before_factor_checkpoint":null,"before_factor_final_tree":null,"before_factor_phase":null,"before_factor_source":null,
                 "before_rebase_state":null,"before_rebase_msgnum":null,"before_rebase_end":null,"before_rebase_todo_head":null,"before_rebase_done_tail":null,
                 "after_head":"after-head","after_head_tree":"after-tree","after_git_dir":{git_dir_json},"after_toplevel":{cwd_json},
                 "after_staged_paths":[],"after_unstaged_paths":[],"after_untracked_paths":[],
-                "after_factor_current_index":null,"after_factor_split_count":null,"after_factor_requires_rebase":null,"after_factor_expected_tree":null,"after_factor_current_commit":null,
+                "after_factor_checkpoint":null,"after_factor_final_tree":null,"after_factor_phase":null,"after_factor_source":null,
                 "after_rebase_state":null,"after_rebase_msgnum":null,"after_rebase_end":null,"after_rebase_todo_head":null,"after_rebase_done_tail":null
             }}"#)).or_abort("parse literal trace oracle");
             assert_eq!(record, expected);
@@ -1220,7 +1415,13 @@ mod tests {
     }
 
     impl Runner for OutputOnlyRunner {
-        fn output(&self, _bin: &str, _args: &[&str], _cwd: &Path) -> io::Result<Output> {
+        fn output(
+            &self,
+            _bin: &str,
+            _args: &[&str],
+            _envs: &[(&str, Option<&str>)],
+            _cwd: &Path,
+        ) -> io::Result<Output> {
             if self.fail_output {
                 return Err(io::Error::other("forced output failure"));
             }
@@ -1233,7 +1434,7 @@ mod tests {
             &self,
             _bin: &str,
             _args: &[&str],
-            _envs: &[(&str, &str)],
+            _envs: &[(&str, Option<&str>)],
             _quiet: bool,
             _cwd: &Path,
         ) -> io::Result<ExitStatus> {
@@ -1244,7 +1445,13 @@ mod tests {
     struct ShowTopLevelFailRunner;
 
     impl Runner for ShowTopLevelFailRunner {
-        fn output(&self, _bin: &str, args: &[&str], _cwd: &Path) -> io::Result<Output> {
+        fn output(
+            &self,
+            _bin: &str,
+            args: &[&str],
+            _envs: &[(&str, Option<&str>)],
+            _cwd: &Path,
+        ) -> io::Result<Output> {
             if args == ["rev-parse", "--show-toplevel"] {
                 return Err(io::Error::other("forced show-toplevel failure"));
             }
@@ -1271,7 +1478,7 @@ mod tests {
             &self,
             _bin: &str,
             _args: &[&str],
-            _envs: &[(&str, &str)],
+            _envs: &[(&str, Option<&str>)],
             _quiet: bool,
             _cwd: &Path,
         ) -> io::Result<ExitStatus> {
@@ -1282,7 +1489,13 @@ mod tests {
     struct NonInteractiveRunner;
 
     impl Runner for NonInteractiveRunner {
-        fn output(&self, _bin: &str, _args: &[&str], _cwd: &Path) -> io::Result<Output> {
+        fn output(
+            &self,
+            _bin: &str,
+            _args: &[&str],
+            _envs: &[(&str, Option<&str>)],
+            _cwd: &Path,
+        ) -> io::Result<Output> {
             Err(io::Error::other("output is not expected"))
         }
 
@@ -1290,7 +1503,7 @@ mod tests {
             &self,
             bin: &str,
             args: &[&str],
-            envs: &[(&str, &str)],
+            envs: &[(&str, Option<&str>)],
             quiet: bool,
             _cwd: &Path,
         ) -> io::Result<ExitStatus> {
@@ -1303,7 +1516,12 @@ mod tests {
             if quiet {
                 return Err(io::Error::other("unexpected quiet=true"));
             }
-            if envs != [("GIT_EDITOR", "false"), ("GIT_SEQUENCE_EDITOR", "false")] {
+            if envs
+                != [
+                    ("GIT_EDITOR", Some("false")),
+                    ("GIT_SEQUENCE_EDITOR", Some("false")),
+                ]
+            {
                 return Err(io::Error::other("unexpected envs"));
             }
             Ok(ExitStatus::from_raw(0))
@@ -1451,49 +1669,13 @@ mod tests {
     }
 
     #[test]
-    fn command_status_with_can_run_in_quiet_mode() {
-        let dir = TempDir::new().or_abort("tempdir");
-        let ctx = ctx_for(dir.path());
-        let status = command_status_with(
-            &ctx,
-            "bash",
-            &["-c", "echo hi; echo err 1>&2; exit 0"],
-            &[],
-            true,
-        )
-        .or_abort("command should run");
-
-        assert!(status.success());
-    }
-
-    #[test]
-    fn command_status_with_reports_spawn_errors_as_git_command() {
-        let dir = TempDir::new().or_abort("tempdir");
-        let ctx = ctx_for(dir.path());
-        let err = command_status_with(
-            &ctx,
-            "git-factor-not-a-real-binary",
-            &["rev-parse"],
-            &[],
-            false,
-        )
-        .err_or_abort("spawn should fail");
-
-        let message = git_command_message(&err).or_abort("expected GitCommand");
-        assert!(
-            message.contains("git-factor-not-a-real-binary"),
-            "err was: {err:?}"
-        );
-    }
-
-    #[test]
     fn output_only_runner_reports_missing_scripted_output() {
         let runner = OutputOnlyRunner {
             output: None,
             fail_output: false,
         };
         let err = runner
-            .output("git", &["status"], Path::new("."))
+            .output("git", &["status"], &[], Path::new("."))
             .err_or_abort("missing scripted output should fail");
         assert!(
             err.to_string().contains("missing scripted output"),
@@ -1698,62 +1880,10 @@ mod tests {
     }
 
     #[test]
-    fn run_git_non_interactive_sets_editor_env() {
-        let dir = TempDir::new().or_abort("tempdir");
-        let env = TestEnv {
-            cwd: dir.path().to_path_buf(),
-            trace_log: None,
-        };
-        let runner = NonInteractiveRunner;
-        let ctx = Ctx {
-            runner: &runner,
-            cwd: dir.path().to_path_buf(),
-            io: &REAL_IO,
-            env: &env,
-            fs: &REAL_FS,
-        };
-        let unexpected_bin_err = runner
-            .status(
-                "not-git",
-                &["status"],
-                &[("GIT_EDITOR", "false"), ("GIT_SEQUENCE_EDITOR", "false")],
-                false,
-                dir.path(),
-            )
-            .err_or_abort("unexpected bin should fail");
-        assert_eq!(unexpected_bin_err.to_string(), "unexpected bin");
-        let unexpected_args_err = runner
-            .status(
-                "git",
-                &["not-status"],
-                &[("GIT_EDITOR", "false"), ("GIT_SEQUENCE_EDITOR", "false")],
-                false,
-                dir.path(),
-            )
-            .err_or_abort("unexpected args should fail");
-        assert_eq!(unexpected_args_err.to_string(), "unexpected args");
-        let unexpected_quiet_err = runner
-            .status(
-                "git",
-                &["status"],
-                &[("GIT_EDITOR", "false"), ("GIT_SEQUENCE_EDITOR", "false")],
-                true,
-                dir.path(),
-            )
-            .err_or_abort("quiet=true should fail");
-        assert_eq!(unexpected_quiet_err.to_string(), "unexpected quiet=true");
-        let unexpected_env_err = runner
-            .status("git", &["status"], &[], false, dir.path())
-            .err_or_abort("unexpected env should fail");
-        assert_eq!(unexpected_env_err.to_string(), "unexpected envs");
-        run_git_non_interactive(&ctx, &["status"]).or_abort("status should succeed");
-    }
-
-    #[test]
     fn non_interactive_runner_output_is_not_expected() {
         let runner = NonInteractiveRunner;
         let err = runner
-            .output("git", &["status"], Path::new("."))
+            .output("git", &["status"], &[], Path::new("."))
             .err_or_abort("output should fail");
         assert_eq!(err.to_string(), "output is not expected");
     }
@@ -1862,19 +1992,10 @@ mod tests {
     }
 
     #[test]
-    fn run_git_wrappers_report_nonzero_exit_status() {
+    fn run_git_with_preserves_native_nonzero_exit_status() {
         let dir = TempDir::new().or_abort("tempdir");
         init_git_repo(dir.path());
         let ctx = ctx_for(dir.path());
-
-        let non_interactive = run_git_non_interactive(&ctx, &["definitely-not-a-command"])
-            .err_or_abort("expected git failure");
-        let non_interactive_message = git_command_message(&non_interactive)
-            .or_abort("non-interactive must return GitCommand");
-        assert!(
-            non_interactive_message.contains("failed (exit"),
-            "unexpected error: {non_interactive:?}"
-        );
 
         let run_with = run_git_with(&ctx, "git", &["definitely-not-a-command"])
             .err_or_abort("expected git failure");
@@ -2000,16 +2121,14 @@ mod tests {
     }
 
     #[test]
-    fn collect_repo_snapshot_handles_invalid_index_and_rebase_precedence() {
+    fn collect_repo_snapshot_handles_invalid_journal_and_rebase_precedence() {
         let dir = TempDir::new().or_abort("tempdir");
         init_git_repo(dir.path());
         let ctx = ctx_for(dir.path());
 
         let git_dir = dir.path().join(".git");
-        let factor_dir = git_dir.join("factor");
-        fs::create_dir_all(&factor_dir).or_abort("create factor dir");
-        fs::write(factor_dir.join("commits"), "a\nb\n").or_abort("write commits");
-        fs::write(factor_dir.join("current_index"), "not-a-number\n").or_abort("write index");
+        fs::write(git_dir.join("factor-journal.json"), "{invalid journal}")
+            .or_abort("invalid current journal");
 
         let rebase_merge = git_dir.join("rebase-merge");
         fs::create_dir_all(&rebase_merge).or_abort("create rebase-merge");
@@ -2028,7 +2147,7 @@ mod tests {
         fs::write(rebase_apply.join("last"), "10\n").or_abort("write last");
 
         let snapshot = collect_repo_snapshot(&ctx);
-        assert_eq!(snapshot.factor_current_commit, None);
+        assert_eq!(snapshot.factor_source, None);
         assert_eq!(snapshot.rebase_state, Some(RebaseState::Merge));
         assert_eq!(
             snapshot.rebase_todo_head.as_deref(),
@@ -2037,19 +2156,27 @@ mod tests {
     }
 
     #[test]
-    fn collect_repo_snapshot_sets_current_commit_and_handles_rebase_absence() {
+    fn collect_repo_snapshot_reads_checkpoint_and_handles_rebase_absence() {
         let dir = TempDir::new().or_abort("tempdir");
         init_git_repo(dir.path());
         let ctx = ctx_for(dir.path());
 
         let git_dir = dir.path().join(".git");
-        let factor_dir = git_dir.join("factor");
-        fs::create_dir_all(&factor_dir).or_abort("create factor dir");
-        fs::write(factor_dir.join("commits"), "one\ntwo\nthree\n").or_abort("write commits");
-        fs::write(factor_dir.join("current_index"), "1\n").or_abort("write index");
+        let checkpoint = "a".repeat(COMMIT_SHA_HEX_LEN);
+        let final_tree = "b".repeat(COMMIT_SHA_HEX_LEN);
+        let journal = format!(
+            r#"{{"branch":"refs/heads/main","checkpoint":"{checkpoint}","final_tree":"{final_tree}","format":"checkpoint_v2","gates":[],"original_base":null,"original_tip":"{checkpoint}","session":"{checkpoint}","state":{{"phase":"preparing","tip":"{checkpoint}","base":null,"previous_lease":null}}}}"#
+        );
+        fs::write(git_dir.join("factor-journal.json"), journal)
+            .or_abort("recorded checkpoint journal");
 
         let snapshot = collect_repo_snapshot(&ctx);
-        assert_eq!(snapshot.factor_current_commit.as_deref(), Some("two"));
+        assert_eq!(
+            snapshot.factor_checkpoint.as_deref(),
+            Some(checkpoint.as_str())
+        );
+        assert_eq!(snapshot.factor_phase.as_deref(), Some("preparing"));
+        assert_eq!(snapshot.factor_source, None);
         assert_eq!(snapshot.rebase_state, None);
     }
 
@@ -2350,7 +2477,7 @@ mod tests {
     }
 
     #[test]
-    fn env_methods_and_run_git_non_interactive_success_path() {
+    fn env_methods_and_command_status_success_path() {
         let dir = TempDir::new().or_abort("tempdir");
         init_git_repo(dir.path());
 
@@ -2367,7 +2494,9 @@ mod tests {
         assert!(exe.is_absolute(), "current_exe should be absolute: {exe:?}");
         assert!(env.var_os(TRACE_LOG_ENV).is_some());
 
-        run_git_non_interactive(&ctx, &["status"]).or_abort("git status should succeed");
+        let status = command_status_with(&ctx, "git", &["status"], &[], false)
+            .or_abort("git status should succeed");
+        assert!(status.success());
     }
 
     #[test]
@@ -2491,71 +2620,17 @@ mod tests {
     }
 
     #[test]
-    fn run_git_non_interactive_reports_nonzero_exit() {
-        struct NonInteractiveFailRunner;
-
-        impl Runner for NonInteractiveFailRunner {
-            fn output(&self, _bin: &str, _args: &[&str], _cwd: &Path) -> io::Result<Output> {
-                Err(io::Error::other("output should not be called"))
-            }
-
-            fn status(
-                &self,
-                _bin: &str,
-                args: &[&str],
-                _envs: &[(&str, &str)],
-                _quiet: bool,
-                _cwd: &Path,
-            ) -> io::Result<ExitStatus> {
-                if args != ["status"] {
-                    return Err(io::Error::other("unexpected args"));
-                }
-                Ok(ExitStatus::from_raw(256))
-            }
-        }
-
-        let dir = TempDir::new().or_abort("tempdir");
-        let runner = NonInteractiveFailRunner;
-        let env = TestEnv {
-            cwd: dir.path().to_path_buf(),
-            trace_log: None,
-        };
-        let ctx = Ctx {
-            runner: &runner,
-            cwd: dir.path().to_path_buf(),
-            io: &REAL_IO,
-            env: &env,
-            fs: &REAL_FS,
-        };
-        let output_err = runner
-            .output("git", &["status"], dir.path())
-            .err_or_abort("output method should fail");
-        assert!(
-            output_err
-                .to_string()
-                .contains("output should not be called"),
-            "unexpected output error: {output_err}"
-        );
-        let status_err = runner
-            .status("git", &["not-status"], &[], false, dir.path())
-            .err_or_abort("unexpected args should fail");
-        assert_eq!(status_err.to_string(), "unexpected args");
-
-        let err =
-            run_git_non_interactive(&ctx, &["status"]).err_or_abort("non-zero status should fail");
-        let message = git_command_message(&err).or_abort("expected GitCommand");
-        assert!(
-            message.contains("git status failed (exit 1)"),
-            "unexpected error: {err:?}"
-        );
-    }
-
-    #[test]
     fn run_git_with_reports_nonzero_exit() {
         struct RunGitWithFailRunner;
 
         impl Runner for RunGitWithFailRunner {
-            fn output(&self, _bin: &str, _args: &[&str], _cwd: &Path) -> io::Result<Output> {
+            fn output(
+                &self,
+                _bin: &str,
+                _args: &[&str],
+                _envs: &[(&str, Option<&str>)],
+                _cwd: &Path,
+            ) -> io::Result<Output> {
                 Err(io::Error::other("output should not be called"))
             }
 
@@ -2563,7 +2638,7 @@ mod tests {
                 &self,
                 _bin: &str,
                 args: &[&str],
-                _envs: &[(&str, &str)],
+                _envs: &[(&str, Option<&str>)],
                 _quiet: bool,
                 _cwd: &Path,
             ) -> io::Result<ExitStatus> {
@@ -2588,7 +2663,7 @@ mod tests {
             fs: &REAL_FS,
         };
         let output_err = runner
-            .output("git", &["status"], dir.path())
+            .output("git", &["status"], &[], dir.path())
             .err_or_abort("output method should fail");
         assert!(
             output_err
@@ -2621,6 +2696,81 @@ mod tests {
 
 #[cfg(test)]
 mod proptests {
+
+    mod command_output_with {
+        use super::super::{Ctx, REAL_ENV, REAL_FS, REAL_IO, REAL_RUNNER, command_output_with};
+        use crate::test_support::OrAbort as _;
+        use proptest::prelude::*;
+        use std::fs;
+        const LAST_EXIT: u8 = 7;
+        proptest! {
+            #[test]
+            fn preserves_generated_child_bytes_exit_and_literal_assignments(value in "[A-Za-z0-9 $;]{0,32}", exit in u8::MIN..=LAST_EXIT) {
+                let root = tempfile::tempdir().or_abort("captured command");
+                let ctx = Ctx { cwd: root.path().to_path_buf(), env: &REAL_ENV, fs: &REAL_FS, io: &REAL_IO, runner: &REAL_RUNNER };
+                let code = exit.to_string();
+                let environment = [("VALUE", Some(value.as_str())), ("CODE", Some(code.as_str()))];
+                let actual = command_output_with(&ctx, "/bin/sh", &["-c", "printf '%s' \"$VALUE\"; printf '%s' \"$VALUE\" >&2; exit \"$CODE\""], &environment).or_abort("captured child");
+                prop_assert_eq!(actual.status.code(), Some(i32::from(exit)));
+                prop_assert_eq!(actual.stdout, value.as_bytes());
+                prop_assert_eq!(actual.stderr, value.as_bytes());
+                prop_assert_eq!(fs::read_dir(root.path()).or_abort("conservation").count(), 0);
+            }
+        }
+    }
+    mod command_status_with {
+        use super::super::{Ctx, REAL_ENV, REAL_FS, REAL_IO, REAL_RUNNER, command_status_with};
+        use crate::test_support::OrAbort as _;
+        use proptest::prelude::*;
+        use std::fs;
+        const LAST_EXIT: u8 = 7;
+        proptest! {
+            #[test]
+            fn preserves_generated_status_and_literal_assignments(value in "[A-Za-z0-9 $;]{0,32}", exit in u8::MIN..=LAST_EXIT, quiet in any::<bool>()) {
+                let root = tempfile::tempdir().or_abort("status command");
+                let ctx = Ctx { cwd: root.path().to_path_buf(), env: &REAL_ENV, fs: &REAL_FS, io: &REAL_IO, runner: &REAL_RUNNER };
+                let code = exit.to_string();
+                let environment = [("VALUE", Some(value.as_str())), ("CODE", Some(code.as_str()))];
+                let actual = command_status_with(&ctx, "/bin/sh", &["-c", "printf '%s' \"$VALUE\" > observed; exit \"$CODE\""], &environment, quiet).or_abort("native status");
+                prop_assert_eq!(actual.code(), Some(i32::from(exit)));
+                prop_assert_eq!(fs::read(root.path().join("observed")).or_abort("child bytes"), value.as_bytes());
+            }
+        }
+    }
+    mod git_raw_output {
+        use super::super::directory_contracts::Query;
+        use super::super::{FactorError, git_raw_output};
+        use crate::test_support::{OrAbort as _, ResultOrAbort as _};
+        use proptest::prelude::*;
+        use std::io;
+        use std::os::unix::process::ExitStatusExt as _;
+        use std::process::{ExitStatus, Output};
+        proptest! {
+            #[test]
+            fn preserves_generated_captured_native_bytes_and_status(stdout in prop::collection::vec(any::<u8>(), 0..64), stderr in prop::collection::vec(any::<u8>(), 0..64), exit in any::<u8>(), argument in "[A-Za-z0-9 $;]{0,24}") {
+                let raw = i32::from(exit).checked_shl(u8::BITS).or_abort("lawful native exit");
+                let fixture = Query::new(Ok(Output { status: ExitStatus::from_raw(raw), stdout: stdout.clone(), stderr: stderr.clone() }));
+                let actual = git_raw_output(&fixture.context(), &["fixture-query", &argument]).or_abort("captured child");
+                prop_assert_eq!(actual.status.into_raw(), raw);
+                prop_assert_eq!(actual.stdout, stdout);
+                prop_assert_eq!(actual.stderr, stderr);
+                prop_assert_eq!(fixture.runner.requests(), vec![("git".to_owned(), vec!["fixture-query".to_owned(), argument], fixture.directory.path().to_path_buf())]);
+                prop_assert_eq!(fixture.io.stdout(), "");
+                prop_assert_eq!(fixture.io.stderr(), "");
+            }
+            #[test]
+            fn preserves_generated_spawn_diagnostics_without_an_output_reply(diagnostic in "[A-Za-z0-9 ]{1,32}", kind in prop::sample::select(vec![io::ErrorKind::NotFound, io::ErrorKind::PermissionDenied])) {
+                let fixture = Query::new(Err(io::Error::new(kind, diagnostic.clone())));
+                let actual = git_raw_output(&fixture.context(), &["fixture-query"]);
+                let error = actual.err_or_abort("spawn must refuse");
+                let expected = format!("git fixture-query: {diagnostic}");
+                prop_assert!(matches!(error, FactorError::GitCommand(message) if message.as_str() == expected), "spawn diagnostic must remain exact");
+                prop_assert_eq!(fixture.runner.requests(), vec![("git".to_owned(), vec!["fixture-query".to_owned()], fixture.directory.path().to_path_buf())]);
+                prop_assert_eq!(fixture.io.stdout(), "");
+                prop_assert_eq!(fixture.io.stderr(), "");
+            }
+        }
+    }
     mod git_dir_in {
         use super::super::directory_contracts::Query;
         use crate::git_factor::FactorError;
@@ -2916,11 +3066,11 @@ mod proptests {
                             "spawned":false,"exit_code":null,"stdout":{stdout_json},"stderr":{stderr_json},
                             "before_head":"before-head","before_head_tree":"before-tree","before_git_dir":{git_dir_json},"before_toplevel":{cwd_json},
                             "before_staged_paths":[],"before_unstaged_paths":[],"before_untracked_paths":[],
-                            "before_factor_current_index":null,"before_factor_split_count":null,"before_factor_requires_rebase":null,"before_factor_expected_tree":null,"before_factor_current_commit":null,
+                            "before_factor_checkpoint":null,"before_factor_final_tree":null,"before_factor_phase":null,"before_factor_source":null,
                             "before_rebase_state":null,"before_rebase_msgnum":null,"before_rebase_end":null,"before_rebase_todo_head":null,"before_rebase_done_tail":null,
                             "after_head":"after-head","after_head_tree":"after-tree","after_git_dir":{git_dir_json},"after_toplevel":{cwd_json},
                             "after_staged_paths":[],"after_unstaged_paths":[],"after_untracked_paths":[],
-                            "after_factor_current_index":null,"after_factor_split_count":null,"after_factor_requires_rebase":null,"after_factor_expected_tree":null,"after_factor_current_commit":null,
+                            "after_factor_checkpoint":null,"after_factor_final_tree":null,"after_factor_phase":null,"after_factor_source":null,
                             "after_rebase_state":null,"after_rebase_msgnum":null,"after_rebase_end":null,"after_rebase_todo_head":null,"after_rebase_done_tail":null
                         }}"#)).or_abort("parse literal trace oracle");
                 prop_assert_eq!(record, expected);
@@ -3018,11 +3168,11 @@ mod proptests {
                             "spawned":true,"exit_code":0,"stdout":{stdout_json},"stderr":{stderr_json},
                             "before_head":"before-head","before_head_tree":"before-tree","before_git_dir":{git_dir_json},"before_toplevel":{cwd_json},
                             "before_staged_paths":[],"before_unstaged_paths":[],"before_untracked_paths":[],
-                            "before_factor_current_index":null,"before_factor_split_count":null,"before_factor_requires_rebase":null,"before_factor_expected_tree":null,"before_factor_current_commit":null,
+                            "before_factor_checkpoint":null,"before_factor_final_tree":null,"before_factor_phase":null,"before_factor_source":null,
                             "before_rebase_state":null,"before_rebase_msgnum":null,"before_rebase_end":null,"before_rebase_todo_head":null,"before_rebase_done_tail":null,
                             "after_head":"after-head","after_head_tree":"after-tree","after_git_dir":{git_dir_json},"after_toplevel":{cwd_json},
                             "after_staged_paths":[],"after_unstaged_paths":[],"after_untracked_paths":[],
-                            "after_factor_current_index":null,"after_factor_split_count":null,"after_factor_requires_rebase":null,"after_factor_expected_tree":null,"after_factor_current_commit":null,
+                            "after_factor_checkpoint":null,"after_factor_final_tree":null,"after_factor_phase":null,"after_factor_source":null,
                             "after_rebase_state":null,"after_rebase_msgnum":null,"after_rebase_end":null,"after_rebase_todo_head":null,"after_rebase_done_tail":null
                         }}"#)).or_abort("parse literal trace oracle");
                 prop_assert_eq!(record, expected);

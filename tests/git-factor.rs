@@ -16,13 +16,17 @@ mod support;
     reason = "preserve the established inline test layout"
 )]
 mod tests {
+    #[cfg(unix)]
+    use core::time::Duration;
     use std::env;
     use std::ffi::{OsStr, OsString};
-    use std::fs;
+    use std::fs::{self, DirEntry};
     use std::io;
     use std::panic::resume_unwind;
     use std::path::{Path, PathBuf};
     use std::process::{self, Command};
+    #[cfg(unix)]
+    use std::thread::sleep;
 
     use git_factor::non_empty_string::NonEmptyString;
     use tempfile::TempDir;
@@ -43,6 +47,14 @@ mod tests {
         fn or_abort(self) -> T {
             self.unwrap_or_else(|| process::abort())
         }
+    }
+
+    struct NativeOriginalPool {
+        base: String,
+        deletion_tree: String,
+        directory: TempDir,
+        final_tree: String,
+        foreign_refs: String,
     }
 
     #[derive(Clone, Debug, Eq, PartialEq)]
@@ -109,6 +121,16 @@ mod tests {
         requires_rebase: Option<bool>,
         stderr: Option<StreamExpectation>,
         stdout: Option<StreamExpectation>,
+    }
+
+    #[derive(Debug, Eq, PartialEq)]
+    struct NativeSelectionSnapshot {
+        done: Vec<u8>,
+        head: String,
+        index: Vec<u8>,
+        journal: Vec<u8>,
+        refs: String,
+        todo: Vec<u8>,
     }
 
     impl Default for GitFactorExpectation {
@@ -313,7 +335,7 @@ mod tests {
         } = expected;
 
         if let Some(expected_exists_value) = factor_state_exists {
-            let actual_exists = git_dir(repo_path).join("factor").is_dir();
+            let actual_exists = git_dir(repo_path).join("factor-journal.json").is_file();
             assert_eq!(
                 actual_exists, expected_exists_value,
                 "factor state dir existence mismatch: expected {expected_exists_value}, got {actual_exists}"
@@ -389,16 +411,18 @@ mod tests {
         assert_rebase_dir_exists(repo_path, "rebase-apply", rebase_apply_exists).or_abort();
 
         if let Some(expected_requires_rebase) = requires_rebase {
-            let requires_rebase_path = git_dir(repo_path).join("factor/requires_rebase");
-            let actual = fs::read_to_string(&requires_rebase_path).or_abort();
-            let expected_content = if expected_requires_rebase {
-                "true\n"
-            } else {
-                "false\n"
-            };
+            let observed = Command::new(git_factor_bin())
+                .current_dir(repo_path)
+                .arg("--status")
+                .output()
+                .or_abort();
+            assert_eq!(observed.status.code(), Some(EXIT_OK));
+            let status: serde_json::Value = serde_json::from_slice(&observed.stdout).or_abort();
             assert_eq!(
-                actual, expected_content,
-                "requires_rebase mismatch: expected {expected_content:?}, got {actual:?}"
+                status
+                    .pointer("/session/rebase/required")
+                    .and_then(serde_json::Value::as_bool),
+                Some(expected_requires_rebase),
             );
         }
     }
@@ -419,164 +443,35 @@ mod tests {
         Ok(())
     }
 
-    fn expected_single_commit_start_stdout(short_sha: &str, message: &str) -> String {
+    fn expected_single_commit_start_stdout(commit: &str, short_sha: &str, message: &str) -> String {
+        let encoded_commit = serde_json::to_string(commit).or_abort();
+        let encoded_short_sha = serde_json::to_string(short_sha).or_abort();
+        let encoded_message = serde_json::to_string(message).or_abort();
         format!(
-            "\
-FACTOR: Split session started for {short_sha}.
-ORIGINAL MESSAGE: {message}
-UNSTAGED:
-  file.txt | 1 +
-   1 file changed, 1 insertion(+)
-
-NEXT: Stage changes for the first atomic commit, then run:
-  git factor --continue --message \"type: description\"
-
-Run git factor -h for command help or git-factor --help for the full workflow guide.
-
-HINTS:
-  - Find the ONE smallest addition nothing depends on
-  - Target 15-30 lines (50 max)
-  - Message: single concrete action, no \"and\"/\"or\"
-  - Verify: git log --oneline | wc -l
-  - NEVER use git commit. ONLY use git factor --continue.
-  REMAINING:  1 file changed, 1 insertion(+)
-  RECOVERY: git factor --abort
-"
+            "{{\"actions\":{{\"abort\":[\"git\",\"factor\",\"--abort\"],\"submit\":[\"git\",\"factor\",\"--continue\",\"--message\",\"<message>\"]}},\"changes\":{{\"unstaged\":[{{\"path\":\"file.txt\",\"kind\":\"text\",\"added\":1,\"deleted\":0}}],\"untracked\":[]}},\"guidance\":[\"Stage one independently valid atomic change.\",\"Use one concrete action in the commit message.\",\"Submit each atom through git factor so its gates run.\"],\"operation\":\"start\",\"references\":[],\"target\":{{\"commit\":{encoded_commit},\"commit_count\":1,\"message\":{encoded_message},\"short_commit\":{encoded_short_sha}}}}}\n"
         )
     }
 
     fn expected_multi_commit_start_suffix(
+        tip_sha: &str,
         tip_short_sha: &str,
-        untracked_section: Option<&str>,
+        untracked: &str,
     ) -> String {
-        let after_unstaged =
-            untracked_section.map_or_else(|| "\n".to_owned(), |section| format!("{section}\n"));
+        let encoded_tip_sha = serde_json::to_string(tip_sha).or_abort();
+        let encoded_tip_short_sha = serde_json::to_string(tip_short_sha).or_abort();
         format!(
-            "\
-FACTOR: Split session started for 2 commits (tip: {tip_short_sha}).
-ORIGINAL MESSAGE: feat: b
-UNSTAGED:
-  base.txt | 2 ++
-   1 file changed, 2 insertions(+)
-{after_unstaged}NEXT: Stage changes for the first atomic commit, then run:
-  git factor --continue --message \"type: description\"
-
-Run git factor -h for command help or git-factor --help for the full workflow guide.
-
-HINTS:
-  - Find the ONE smallest addition nothing depends on
-  - Target 15-30 lines (50 max)
-  - Message: single concrete action, no \"and\"/\"or\"
-  - Verify: git log --oneline | wc -l
-  - NEVER use git commit. ONLY use git factor --continue.
-  REMAINING:  1 file changed, 2 insertions(+)
-  RECOVERY: git factor --abort
-"
+            "{{\"actions\":{{\"abort\":[\"git\",\"factor\",\"--abort\"],\"submit\":[\"git\",\"factor\",\"--continue\",\"--message\",\"<message>\"]}},\"changes\":{{\"unstaged\":[{{\"path\":\"base.txt\",\"kind\":\"text\",\"added\":2,\"deleted\":0}}],\"untracked\":{untracked}}},\"guidance\":[\"Stage one independently valid atomic change.\",\"Use one concrete action in the commit message.\",\"Submit each atom through git factor so its gates run.\"],\"operation\":\"start\",\"references\":[],\"target\":{{\"commit\":{encoded_tip_sha},\"commit_count\":2,\"message\":\"feat: b\",\"short_commit\":{encoded_tip_short_sha}}}}}\n"
         )
     }
 
     fn expected_help_stdout() -> &'static str {
-        "\
-Split one git commit or contiguous commit span into smaller atomic commits
-
-Usage: git-factor [OPTIONS] [COMMIT]...
-
-Arguments:
-  [COMMIT]...
-          Commit or span to split (e.g. SHA, A B, A..B, A^..B).
-          
-          Accepts full or short SHAs, branch names, and git revision syntax. `<rev>` splits one commit. `<start> <end>` splits one inclusive span. `<start>..<end>` uses git's exclusive-start range semantics, and `<start>^..<end>` is the git-native inclusive form. Symmetric diff (`...`) is not supported.
-
-Options:
-  -v, --version
-          Print version information and exit
-
-  -h, --help
-          Print help (see a summary with '-h')
-
-Start Options:
-      --exec <COMMAND>
-          Shell command(s) to run as the deterministic validation gate.
-          
-          Multiple --exec flags are joined with &&. Git-factor runs the combined gate before the session starts and before each split commit. The command must have valid bash syntax and must leave the repository clean.
-
-Commit Options:
-  -m, --message <MSG>
-          Commit message for the split commit.
-          
-          Submits staged changes with or without --continue. Optional with --finish (defaults to the original commit message). Multiple --message flags produce separate paragraphs, matching git commit behavior.
-
-Session Control:
-      --continue
-          Continue by committing the currently staged changes.
-          
-          Staged changes must contain the next atomic split and the exec gate must pass. After committing, remaining changes are restored as unstaged changes from the green baseline state.
-
-      --finish
-          Commit all remaining changes and finish the current factor session.
-          
-          Restores all remaining changes, verifies the tree hash matches the recorded green baseline, and commits the final split. When no --message is given, reuses the original tip commit message.
-
-      --retry
-          Discard the current split attempt and restore the remaining pool.
-          
-          Restores the green baseline commit into the index and working tree, then unstages everything so the session returns to the normal \"remaining changes are unstaged\" state.
-
-      --abort
-          Abort the current factor session and restore the repository
-
-      --status
-          Show status for the current factor session.
-          
-          Prints session details when active, otherwise reports no active session.
-
-WORKFLOW:
-  1. Start a session:    git factor --exec 'make test' HEAD
-  2. If start gate fails: fix, stage, amend, then run git rebase --continue
-  3. When paused at the factor break: git factor --continue
-  4. Stage changes:      git add --patch -- <path>
-  5. Commit a slice:     git factor --continue --message 'type: description'
-  6. Discard bad staging: git factor --retry
-  7. Repeat steps 4-6 for each atomic commit.
-  8. Finish remaining:   git factor --finish
-
-  The start gate must pass on a clean repository state.
-  Each split commit must pass the exec gate independently.
-  Ranges refactor one contiguous, merge-free ancestry span into a new series.
-  Use --finish without --message to reuse the original commit message.
-
-EXAMPLES:
-  Split the latest commit, first proving the full commit is green:
-    git factor --exec 'cargo test' HEAD
-
-  Refactor an inclusive span into a new commit series:
-    git factor --exec 'make check' HEAD~2 HEAD
-
-  Use git-native exclusive-start range syntax:
-    git factor --exec 'npm test' HEAD~3..HEAD
-
-  Use git-native inclusive-start range syntax:
-    git factor --exec 'npm test' HEAD~3^..HEAD
-
-  Continue with a multi-paragraph commit message:
-    git factor --continue --message 'feat: add login' --message 'Implements OAuth2 flow.'
-
-  Discard the current split attempt and restore the remaining pool:
-    git factor --retry
-
-  Finish with the original commit message:
-    git factor --finish
-
-  Abort and restore the repository:
-    git factor --abort
-
-  Show active-session status or whether a start is pending:
-    git factor --status
-"
+        "Split one git commit or contiguous commit span into smaller atomic commits\n\nUsage: git-factor [OPTIONS] [COMMIT]...\n\nArguments:\n  [COMMIT]...\n          Commit or span to split (e.g. SHA, A B, A..B, A^..B).\n          \n          Accepts full or short SHAs, branch names, and git revision syntax. `<rev>` splits one commit. `<start> <end>` splits one inclusive span. `<start>..<end>` uses git's exclusive-start range semantics, and `<start>^..<end>` is the git-native inclusive form. Symmetric diff (`...`) is not supported.\n\nOptions:\n  -v, --version\n          Print version information and exit\n\n  -h, --help\n          Print help (see a summary with '-h')\n\nStart Options:\n      --exec <COMMAND>\n          Shell command(s) to run as the deterministic validation gate.\n          \n          Multiple --exec and --gate flags run individually in supplied order. Passing command/tree proofs are reused. Commands must have valid bash syntax, inspect only the tree, and preserve its bytes and commit metadata.\n\n      --gate <NAME> <COMMAND>\n          Ordered named tree checks, recorded in Gate-<name> trailers.\n          \n          Names start with an ASCII letter and contain ASCII letters, digits, or hyphens. Names are unique without regard to case. Commands obey the same tree-only contract as --exec.\n\nCommit Options:\n  -m, --message <MSG>\n          Commit message for the split commit.\n          \n          Submitting a message validates and captures the staged atom. Without a message, --continue resumes replay. Optional with --finish (defaults to the original selected tip message). Multiple --message flags produce separate paragraphs, matching git commit behavior.\n\nSession Control:\n      --continue\n          Resume replay and recovery, or submit staged changes with --message.\n          \n          Without a message, resumes the current replay, captures its completed checkpoint, and opens the remaining change for selection. With a message, validates the staged atom and captures a new checkpoint.\n\n      --finish\n          Validate and capture all remaining changes, then finish the session.\n          \n          Uses the original selected tip's message when --message is omitted.\n\n      --retry\n          Unstage the current candidate in an open selection.\n          \n          Preserves every previously completed checkpoint.\n\n      --abort\n          Abort the current factor session and restore the repository\n\n      --status\n          Show status for the current factor session.\n          \n          Prints session details when active, otherwise reports no active session.\n\nWORKFLOW:\n  1. Start a session:     git factor --gate test 'cargo test' HEAD\n  2. Select an atom:     git add --patch -- <path>\n  3. Capture the atom:   git factor --message 'Add login'\n  4. Repeat steps 2-3 on the automatically exposed remainder.\n  5. Finish remaining:  git factor --finish\n\n  Each successful split finishes its rebase before opening the next one.\n  Gates validate each tree independently of the unstaged remainder.\n  Passing command/tree proofs are reused; commit hooks still validate messages.\n  Gates must be deterministic tree checks and must not depend on commit metadata, history, or messages.\n  Resolve replay conflicts or gate failures, then run git factor --continue.\n  Use --retry only in an open selection to unstage its current candidate.\n  During replay, use --continue or --abort to return to the latest checkpoint.\n  Earlier successful splits remain captured.\n  Legacy sessions must be completed with their originating version.\n\nEXAMPLES:\n  Split a commit using ordered named and legacy gates:\n    git factor --gate test 'cargo test' --exec 'cargo fmt --check' HEAD\n\n  Split an inclusive contiguous span:\n    git factor --gate check 'make check' HEAD~2 HEAD\n\n  Use git-native exclusive-start range syntax:\n    git factor --exec 'npm test' HEAD~3..HEAD\n\n  Use git-native inclusive-start range syntax:\n    git factor --exec 'npm test' HEAD~3^..HEAD\n\n  Submit a multi-paragraph message (also accepts --continue):\n    git factor --message 'Add login' --message 'Support OAuth2 sessions.'\n\n  Resume replay after a conflict or gate failure:\n    git factor --continue\n\n  Finish with the original selected tip's message:\n    git factor --finish\n\n  Show active-session status:\n    git factor --status\n"
     }
 
     fn expected_completion_stdout_suffix(operation: &str, split_count: u32) -> String {
-        format!("{{\"operation\":\"{operation}\",\"split_count\":{split_count}}}\n")
+        format!(
+            "{{\"operation\":\"{operation}\",\"result\":\"complete\",\"split_count\":{split_count}}}\n"
+        )
     }
 
     fn execute_expectation(expectation: GitFactorExpectation) {
@@ -695,9 +590,165 @@ EXAMPLES:
         execute_expectation(expectation);
     }
 
+    fn checkpoint_journal(repo: &Path) -> PathBuf {
+        git_dir(repo).join("factor-journal.json")
+    }
+
+    fn read_journal(repo: &Path) -> serde_json::Value {
+        serde_json::from_slice(&fs::read(checkpoint_journal(repo)).or_abort()).or_abort()
+    }
+
+    fn assert_true_gate_message(repo: &Path, commit: &str, body: &str, tree: &str) {
+        let command_hash = "f32a5804e292d30bedf68f62d32fb75d87e99fd9";
+        assert_eq!(
+            git(repo, &["show", "--format=%B", "--no-patch", commit]),
+            format!("{body}\n\nGate-exec-{command_hash}:\n {command_hash}\n {tree}"),
+        );
+    }
+
+    #[expect(
+        clippy::single_call_fn,
+        reason = "This named abort observer checks exact refs and the independently validated surviving gate proof"
+    )]
+    fn assert_original_refs_and_true_proof(repo: &Path, original: &str, tree: &str) {
+        let command_hash = "f32a5804e292d30bedf68f62d32fb75d87e99fd9";
+        let proof_ref = format!("refs/factor/gates/{command_hash}/{tree}");
+        let proof = git(repo, &["rev-parse", proof_ref.as_str()]);
+        assert_eq!(
+            git(repo, &["rev-parse", &format!("{proof}^{{tree}}")]),
+            tree
+        );
+        assert!(
+            git(repo, &["show", "--format=%B", "--no-patch", &proof]).ends_with(&format!(
+                "Gate-exec-{command_hash}:\n {command_hash}\n {tree}"
+            ))
+        );
+        let mut expected = original.lines().map(str::to_owned).collect::<Vec<_>>();
+        expected.push(format!("{proof} {proof_ref}"));
+        expected.sort();
+        let mut actual = git(repo, &["show-ref"])
+            .lines()
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        actual.sort();
+        assert_eq!(actual, expected);
+    }
+
+    fn snapshot_selection(repo: &Path) -> NativeSelectionSnapshot {
+        let admin = git_dir(repo);
+        NativeSelectionSnapshot {
+            head: git(repo, &["rev-parse", "HEAD"]),
+            refs: git(repo, &["show-ref"]),
+            index: fs::read(admin.join("index")).or_abort(),
+            journal: fs::read(checkpoint_journal(repo)).or_abort(),
+            done: fs::read(admin.join("rebase-merge/done")).or_abort(),
+            todo: fs::read(admin.join("rebase-merge/git-rebase-todo")).or_abort(),
+        }
+    }
+
+    #[expect(
+        clippy::filetype_is_file,
+        reason = "The fixture inventory rejects special files before attempting a regular-file read"
+    )]
+    fn legacy_inventory(directory: &Path) -> Vec<(PathBuf, Option<Vec<u8>>)> {
+        let mut entries: Vec<_> = fs::read_dir(directory)
+            .or_abort()
+            .map(OrAbort::or_abort)
+            .collect();
+        entries.sort_by_key(DirEntry::path);
+        let mut snapshot = Vec::new();
+        for entry in entries {
+            let kind = entry.file_type().or_abort();
+            if kind.is_dir() {
+                snapshot.push((entry.path(), None));
+                snapshot.extend(legacy_inventory(&entry.path()));
+            } else {
+                assert!(
+                    kind.is_file(),
+                    "legacy fixture contains only regular files and directories"
+                );
+                snapshot.push((entry.path(), Some(fs::read(entry.path()).or_abort())));
+            }
+        }
+        snapshot
+    }
+
+    fn verify_legacy_session_refusal(repo: &Path, args: &[&str]) {
+        let admin = git_dir(repo);
+        let head = git(repo, &["rev-parse", "HEAD"]);
+        let refs = git(repo, &["show-ref"]);
+        let index = fs::read(admin.join("index")).or_abort();
+        let foreign_state = legacy_inventory(&admin.join("factor"));
+        let original_file = fs::read(repo.join("file.txt")).or_abort();
+        let rebase_paths: Vec<_> = ["rebase-merge", "rebase-apply"]
+            .into_iter()
+            .map(|name| {
+                let path = admin.join(name);
+                (
+                    path.is_dir(),
+                    if path.is_dir() {
+                        legacy_inventory(&path)
+                    } else {
+                        Vec::new()
+                    },
+                )
+            })
+            .collect();
+        fs::write(repo.join("unrelated.tmp"), b"unrelated legacy user bytes\n").or_abort();
+        assert!(!checkpoint_journal(repo).exists());
+        run_git_factor(repo, args, GitFactorExpectation::default().code(EXIT_SOFTWARE).stderr(
+            "git command failed: existing legacy session must be finished or aborted with its originating version\n"
+        ));
+        assert_eq!(git(repo, &["rev-parse", "HEAD"]), head);
+        assert_eq!(git(repo, &["show-ref"]), refs);
+        assert_eq!(fs::read(admin.join("index")).or_abort(), index);
+        assert_eq!(legacy_inventory(&admin.join("factor")), foreign_state);
+        assert_eq!(fs::read(repo.join("file.txt")).or_abort(), original_file);
+        assert_eq!(
+            fs::read(repo.join("unrelated.tmp")).or_abort(),
+            b"unrelated legacy user bytes\n"
+        );
+        for (name, before) in ["rebase-merge", "rebase-apply"]
+            .into_iter()
+            .zip(rebase_paths)
+        {
+            let path = admin.join(name);
+            assert_eq!(path.is_dir(), before.0);
+            if before.0 {
+                assert_eq!(legacy_inventory(&path), before.1);
+            }
+        }
+        assert!(!checkpoint_journal(repo).exists());
+    }
+
     fn overwrite_session_exec(repo: &Path, exec: &str) {
-        let factor_dir = git_dir(repo).join("factor");
-        fs::write(factor_dir.join("exec"), format!("{exec}\n")).or_abort();
+        let mut journal = read_journal(repo);
+        let gates = journal
+            .get_mut("gates")
+            .and_then(serde_json::Value::as_array_mut)
+            .or_abort();
+        let command = gates
+            .first_mut()
+            .and_then(|gate| gate.get_mut("command"))
+            .or_abort();
+        *command = serde_json::Value::String(exec.to_owned());
+        fs::write(
+            checkpoint_journal(repo),
+            format!("{}\n", serde_json::to_string(&journal).or_abort()),
+        )
+        .or_abort();
+    }
+
+    fn expected_recovery_stdout(operation: &str) -> String {
+        format!(
+            "{{\"actions\":{{\"amend\":[\"git\",\"commit\",\"--amend\",\"--no-edit\"],\"continue_factor\":[\"git\",\"factor\",\"--continue\"],\"stage\":[\"git\",\"add\",\"<paths>\"]}},\"operation\":\"{operation}\",\"result\":\"recovery_required\"}}\n"
+        )
+    }
+
+    fn expected_remaining_stdout(unstaged: &str, untracked: &str) -> String {
+        format!(
+            "{{\"operation\":\"continue\",\"result\":\"committed\",\"actions\":{{\"abort\":[\"git\",\"factor\",\"--abort\"],\"submit\":[\"git\",\"factor\",\"--continue\",\"--message\",\"<message>\"]}},\"changes\":{{\"unstaged\":{unstaged},\"untracked\":{untracked}}},\"guidance\":[\"Stage one independently valid atomic change.\",\"Use one concrete action in the commit message.\",\"Submit each atom through git factor so its gates run.\"],\"references\":[],\"split_count\":1}}\n"
+        )
     }
 
     #[test]
@@ -839,12 +890,17 @@ fi
         let repo = dir.path();
         commit_file(repo, "file.txt", "one\n", "chore: base");
 
+        write_file(repo, "unrelated.txt", "preserve parser user bytes\n");
+        let head = git(repo, &["rev-parse", "HEAD"]);
+        let refs = git(repo, &["show-ref"]);
+        let index = fs::read(git_dir(repo).join("index")).or_abort();
         // Intercept `git rev-parse --verify <ref>` and return a non-hex 40-char SHA to
         // ensure we exercise CommitSha::new's non-hex branch in a non-test build.
         let (wrap_dir, wrap_bin) = make_git_wrapper_named(
             "git",
             r#"if [ "${1-}" = "rev-parse" ] && [ "${2-}" = "--verify" ] && [ "${3-}" = "definitely-not-a-commit" ]; then
-  printf "%040s\n" "g" | tr ' ' 'g'
+  printf 'invalid-hash\n' >> "$(dirname "$0")/observed-hash"
+  printf '%s\n' '000000000000000000000000000000000000000g'
   exit 0
 fi
 "#,
@@ -861,14 +917,33 @@ fi
 
         // Wrapper tempdir must live through command execution.
         let _keep_alive = wrap_dir;
+        let mut expectation = GitFactorExpectation::default()
+            .code(EXIT_DATAERR)
+            .stderr("invalid commit: 000000000000000000000000000000000000000g\n");
+        expectation.stdout = Some(StreamExpectation::new_exact(String::new()));
+
         run_git_factor_with_prefixed_path(
             repo,
             &["--exec", "true", "definitely-not-a-commit"],
-            GitFactorExpectation::default()
-                .code(EXIT_DATAERR)
-                .stderr("invalid commit: 000000000000000000000000000000000000000g\n"),
+            expectation,
             prefixed_path,
         );
+        assert_eq!(
+            fs::read(wrap_bin.join("observed-hash")).or_abort(),
+            b"invalid-hash\n"
+        );
+        assert_eq!(git(repo, &["rev-parse", "HEAD"]), head);
+        assert_eq!(git(repo, &["show-ref"]), refs);
+        assert_eq!(fs::read(git_dir(repo).join("index")).or_abort(), index);
+        assert_eq!(fs::read(repo.join("file.txt")).or_abort(), b"one\n");
+        assert_eq!(
+            fs::read(repo.join("unrelated.txt")).or_abort(),
+            b"preserve parser user bytes\n"
+        );
+        assert!(!checkpoint_journal(repo).exists());
+        assert!(!git_dir(repo).join("factor").exists());
+        assert!(!git_dir(repo).join("rebase-merge").exists());
+        assert!(!git_dir(repo).join("rebase-apply").exists());
     }
 
     #[test]
@@ -929,12 +1004,17 @@ fi
         let repo = dir.path();
         commit_file(repo, "file.txt", "one\n", "chore: base");
 
+        write_file(repo, "unrelated.txt", "preserve parser user bytes\n");
+        let head = git(repo, &["rev-parse", "HEAD"]);
+        let refs = git(repo, &["show-ref"]);
+        let index = fs::read(git_dir(repo).join("index")).or_abort();
         // Intercept `git rev-parse HEAD^{tree}` and return a non-hex 40-char
         // value to exercise tree-hash validation in a non-test build.
         let (wrap_dir, wrap_bin) = make_git_wrapper_named(
             "git",
             r#"if [ "${1-}" = "rev-parse" ] && [ "${2-}" = "HEAD^{tree}" ]; then
-  printf "%040s\n" "g" | tr ' ' 'g'
+  printf 'invalid-hash\n' >> "$(dirname "$0")/observed-hash"
+  printf '%s\n' '000000000000000000000000000000000000000g'
   exit 0
 fi
 "#,
@@ -950,14 +1030,33 @@ fi
         };
 
         let _keep_alive = wrap_dir;
+        let mut expectation = GitFactorExpectation::default().code(EXIT_SOFTWARE).stderr(
+            "git command failed: invalid tree hash: '000000000000000000000000000000000000000g'\n",
+        );
+        expectation.stdout = Some(StreamExpectation::new_exact(String::new()));
+
         run_git_factor_with_prefixed_path(
             repo,
             &["--exec", "true", "HEAD"],
-            GitFactorExpectation::default().code(EXIT_SOFTWARE).stderr(
-                "git command failed: invalid tree hash: '000000000000000000000000000000000000000g'\n",
-            ),
+            expectation,
             prefixed_path,
         );
+        assert_eq!(
+            fs::read(wrap_bin.join("observed-hash")).or_abort(),
+            b"invalid-hash\n"
+        );
+        assert_eq!(git(repo, &["rev-parse", "HEAD"]), head);
+        assert_eq!(git(repo, &["show-ref"]), refs);
+        assert_eq!(fs::read(git_dir(repo).join("index")).or_abort(), index);
+        assert_eq!(fs::read(repo.join("file.txt")).or_abort(), b"one\n");
+        assert_eq!(
+            fs::read(repo.join("unrelated.txt")).or_abort(),
+            b"preserve parser user bytes\n"
+        );
+        assert!(!checkpoint_journal(repo).exists());
+        assert!(!git_dir(repo).join("factor").exists());
+        assert!(!git_dir(repo).join("rebase-merge").exists());
+        assert!(!git_dir(repo).join("rebase-apply").exists());
     }
 
     #[test]
@@ -1001,33 +1100,39 @@ fi
 
         commit_file(repo, "file.txt", "one\n", "chore: base");
 
-        run_git_factor(
-            repo,
-            &["HEAD"],
-            GitFactorExpectation::default()
-                .code(EXIT_USAGE)
-                .stderr("--exec <COMMAND> is required when starting a factor session\n"),
-        );
+        let head = git(repo, &["rev-parse", "HEAD"]);
+        let refs = git(repo, &["show-ref"]);
+        let index = fs::read(git_dir(repo).join("index")).or_abort();
+
+        let mut expectation = GitFactorExpectation::default()
+            .code(EXIT_USAGE)
+            .stderr("--exec <COMMAND> is required when starting a factor session\n")
+            .factor_state_exists(false)
+            .rebase_merge_exists(false)
+            .rebase_apply_exists(false);
+        expectation.stdout = Some(StreamExpectation::new_exact(String::new()));
+
+        run_git_factor(repo, &["HEAD"], expectation);
+        assert_eq!(git(repo, &["rev-parse", "HEAD"]), head);
+        assert_eq!(git(repo, &["show-ref"]), refs);
+        assert_eq!(fs::read(git_dir(repo).join("index")).or_abort(), index);
+        assert_eq!(fs::read(repo.join("file.txt")).or_abort(), b"one\n");
     }
 
     #[test]
-    fn message_only_without_session_preserves_native_state() {
-        let directory = init_repo();
-        let repo = directory.path();
-        commit_file(repo, "base", "base\n", "Base");
-        write_file(repo, "unrelated", "user bytes\n");
-        let head = git(repo, &["rev-parse", "HEAD"]);
-        let index = fs::read(repo.join(".git/index")).or_abort();
-        let mut expectation = GitFactorExpectation::default()
-            .code(EXIT_USAGE)
-            .stderr("no active factor session\n")
-            .factor_state_exists(false);
-        expectation.stdout = Some(StreamExpectation::new_exact(String::new()));
-        run_git_factor(repo, &["--message", "Selected atom"], expectation);
-        assert_eq!(git(repo, &["rev-parse", "HEAD"]), head);
-        assert_eq!(fs::read(repo.join(".git/index")).or_abort(), index);
-        assert_eq!(fs::read(repo.join("base")).or_abort(), b"base\n");
-        assert_eq!(fs::read(repo.join("unrelated")).or_abort(), b"user bytes\n");
+    fn start_requires_exec_command_when_only_message_is_provided() {
+        let dir = init_repo();
+        let repo = dir.path();
+
+        commit_file(repo, "file.txt", "one\n", "chore: base");
+
+        run_git_factor(
+            repo,
+            &["--message", "test: msg"],
+            GitFactorExpectation::default()
+                .code(EXIT_USAGE)
+                .stderr("no active factor session\n"),
+        );
     }
 
     #[test]
@@ -1038,16 +1143,29 @@ fi
         commit_file(repo, "file.txt", "one\n", "chore: base");
         commit_file(repo, "file.txt", "one\ntwo\n", "feat: change");
         let head_before = git(repo, &["rev-parse", "HEAD"]);
+        let branch = git(repo, &["symbolic-ref", "HEAD"]);
 
         run_git_factor(
             repo,
             &["--exec", "false", "HEAD"],
             GitFactorExpectation::default()
                 .code(EXIT_TEMPFAIL)
-                .stderr("exec gate failed: false (exit code 1)\n")
-                .head_sha(head_before)
+                .stderr_suffix("exec gate failed: false (exit code 1)\n")
+                .git_output(&["rev-parse", branch.as_str()], head_before.clone())
                 .git_status_porcelain("")
-                .factor_state_exists(false),
+                .factor_state_exists(true),
+        );
+        assert_eq!(
+            read_journal(repo)
+                .get("checkpoint")
+                .and_then(serde_json::Value::as_str),
+            Some(head_before.as_str())
+        );
+        assert_eq!(
+            read_journal(repo)
+                .pointer("/state/phase")
+                .and_then(serde_json::Value::as_str),
+            Some("opening")
         );
     }
 
@@ -1066,14 +1184,19 @@ fi
             &["--exec", "true"],
             GitFactorExpectation::default()
                 .rebase_apply_exists(false)
-                .rebase_merge_exists(false)
-                .requires_rebase(false)
-                .path_content(".git/factor/started_rebase", "false\n")
-                .path_content(".git/factor/start_head", format!("{head_sha}\n"))
+                .rebase_merge_exists(true)
+                .requires_rebase(true)
                 .stdout(expected_single_commit_start_stdout(
+                    head_sha.as_str(),
                     head_short_sha.as_str(),
                     "feat: change",
                 )),
+        );
+        assert_eq!(
+            read_journal(repo)
+                .get("checkpoint")
+                .and_then(serde_json::Value::as_str),
+            Some(head_sha.as_str())
         );
 
         git(repo, &["add", "--all"]);
@@ -1099,8 +1222,9 @@ fi
             repo,
             &["--exec", "true", head_sha.as_str()],
             GitFactorExpectation::default()
-                .requires_rebase(false)
+                .requires_rebase(true)
                 .stdout(expected_single_commit_start_stdout(
+                    head_sha.as_str(),
                     head_short_sha.as_str(),
                     "feat: change",
                 )),
@@ -1368,13 +1492,42 @@ fi
             GitFactorExpectation::default(),
         );
 
-        run_git_factor(
-            repo,
-            &["--continue"],
-            GitFactorExpectation::default()
-                .code(EXIT_USAGE)
-                .stderr("--continue requires --message <MSG>\n"),
+        let original_head = git(repo, &["rev-parse", "HEAD"]);
+        let original_index = fs::read(git_dir(repo).join("index")).or_abort();
+        let original_journal = fs::read(checkpoint_journal(repo)).or_abort();
+        let original_refs = git(repo, &["show-ref"]);
+        let resumed = Command::new(git_factor_bin())
+            .current_dir(repo)
+            .arg("--continue")
+            .output()
+            .or_abort();
+        assert!(
+            resumed.status.success(),
+            "{}",
+            String::from_utf8_lossy(&resumed.stderr)
         );
+        let selection: serde_json::Value = serde_json::from_slice(&resumed.stdout).or_abort();
+        assert_eq!(
+            selection
+                .get("operation")
+                .and_then(serde_json::Value::as_str),
+            Some("continue")
+        );
+        assert_eq!(
+            selection.pointer("/changes/untracked"),
+            Some(&serde_json::from_str::<serde_json::Value>("[\"file.txt\"]").or_abort())
+        );
+        assert_eq!(git(repo, &["rev-parse", "HEAD"]), original_head);
+        assert_eq!(git(repo, &["show-ref"]), original_refs);
+        assert_eq!(
+            fs::read(git_dir(repo).join("index")).or_abort(),
+            original_index
+        );
+        assert_eq!(
+            fs::read(checkpoint_journal(repo)).or_abort(),
+            original_journal
+        );
+        assert_eq!(fs::read(repo.join("file.txt")).or_abort(), b"one\n");
     }
 
     #[test]
@@ -1418,17 +1571,14 @@ fi
         commit_file(repo, "file.txt", "one\n", "chore: base");
         commit_file(repo, "file.txt", "one\ntwo\n", "feat: change");
 
+        let current_commit = git(repo, &["rev-parse", "HEAD"]);
         start_session(repo);
-        let current_commit = fs::read_to_string(git_dir(repo).join("factor/commits"))
-            .or_abort()
-            .trim()
-            .to_owned();
 
         run_git_factor(
             repo,
             &["--status"],
             GitFactorExpectation::default().stdout(format!(
-                "{{\"operation\":\"status\",\"session\":{{\"phase\":\"splitting\",\"rebase\":{{\"in_progress\":false,\"required\":false}},\"split_count\":0,\"target\":{{\"commit\":\"{current_commit}\",\"index\":0,\"span_starts_at_root\":false}}}}}}\n"
+                "{{\"operation\":\"status\",\"session\":{{\"checkpoint\":\"{current_commit}\",\"phase\":\"selecting\",\"rebase\":{{\"in_progress\":true,\"required\":true}},\"split_count\":0,\"target\":{{\"commit\":\"{current_commit}\",\"commit_count\":1,\"span_starts_at_root\":false}}}}}}\n"
             )),
         );
     }
@@ -1712,28 +1862,47 @@ fi
             GitFactorExpectation::default()
                 .factor_state_exists(true)
                 .requires_rebase(true)
-                .path_content(".git/factor/started_rebase", "true\n")
-                .path_content(".git/factor/start_head", format!("{start_head}\n"))
                 .rebase_merge_exists(true),
         );
+        assert_eq!(
+            read_journal(repo)
+                .get("checkpoint")
+                .and_then(serde_json::Value::as_str),
+            Some(start_head.as_str())
+        );
+        assert_eq!(
+            read_journal(repo)
+                .get("original_tip")
+                .and_then(serde_json::Value::as_str),
+            Some(root_sha.as_str())
+        );
+        assert!(read_journal(repo).get("original_base").or_abort().is_null());
     }
 
     #[test]
-    fn start_cleans_state_when_git_rebase_fails() {
+    fn start_preserves_opening_journal_when_git_rebase_fails() {
         let dir = init_repo();
         let repo = dir.path();
 
         commit_file(repo, "file.txt", "one\n", "chore: base");
         commit_file(repo, "file.txt", "one\ntwo\n", "feat: change");
 
+        write_file(repo, "unrelated.txt", "preserve opening user bytes\n");
+        let before_head = git(repo, &["rev-parse", "HEAD"]);
+        let before_index = fs::read(git_dir(repo).join("index")).or_abort();
+        let before_refs = git(repo, &["show-ref", "--heads", "--tags"]);
+        let before_file = fs::read(repo.join("file.txt")).or_abort();
         let (wrap_dir, wrap_bin) = make_git_wrapper_named(
             "git",
-            r#"if [ "${1-}" = "rebase" ]; then
+            r#"if [ "$#" -eq 13 ] && [ "${1-}" = "-c" ] && [ "${2-}" = "rebase.missingCommitsCheck=ignore" ] && [ "${3-}" = "rebase" ] && [ "${4-}" = "--interactive" ]; then
+  printf '%s\n' "$@" >> "$(dirname "$0")/observed-opening"
   exit 1
 fi
 "#,
         );
+        let expected_base = "--root".to_owned();
         let _keep_alive = wrap_dir;
+        let observation = wrap_bin.join("observed-opening");
 
         let original_path = env::var_os("PATH").or_abort();
         let prefixed_path = {
@@ -1748,11 +1917,36 @@ fi
             repo,
             &["--exec", "true", "HEAD~1"],
             GitFactorExpectation::default()
-                .code(EXIT_SOFTWARE)
-                .stderr("git command failed: git rebase failed (exit 1)\n")
-                .factor_state_exists(false),
+                .code(EXIT_TEMPFAIL)
+                .stdout(expected_recovery_stdout("start"))
+                .factor_state_exists(true),
             prefixed_path,
         );
+        assert_eq!(
+            fs::read_to_string(observation).or_abort(),
+            format!(
+                "-c\nrebase.missingCommitsCheck=ignore\nrebase\n--interactive\n--no-ff\n--reschedule-failed-exec\n--no-update-refs\n--no-autostash\n--no-autosquash\n--no-rebase-merges\n--empty=keep\n--keep-empty\n{expected_base}\n"
+            )
+        );
+        assert_eq!(git(repo, &["rev-parse", "HEAD"]), before_head);
+        assert_eq!(
+            fs::read(git_dir(repo).join("index")).or_abort(),
+            before_index
+        );
+        assert_eq!(git(repo, &["show-ref", "--heads", "--tags"]), before_refs);
+        assert_eq!(fs::read(repo.join("file.txt")).or_abort(), before_file);
+        assert_eq!(
+            fs::read(repo.join("unrelated.txt")).or_abort(),
+            b"preserve opening user bytes\n"
+        );
+        assert_eq!(
+            read_journal(repo)
+                .pointer("/state/phase")
+                .and_then(serde_json::Value::as_str),
+            Some("opening")
+        );
+        assert!(!git_dir(repo).join("rebase-merge").exists());
+        assert!(!git_dir(repo).join("rebase-apply").exists());
     }
 
     #[test]
@@ -1828,7 +2022,7 @@ fi
             &["--exec", "true", "HEAD~1..HEAD"],
             GitFactorExpectation::default()
                 .code(EXIT_SOFTWARE)
-                .stderr("git command failed: mock short failure\n"),
+                .stderr_suffix("git command failed: mock short failure\n"),
             prefixed_path,
         );
     }
@@ -1843,7 +2037,7 @@ fi
 
         let (wrap_dir, wrap_bin) = make_git_wrapper_named(
             "git",
-            r#"if [ "${1-}" = "diff" ] && [ "${2-}" = "--stat" ]; then
+            r#"if [ "${1-}" = "diff" ] && [ "${2-}" = "--numstat" ]; then
   echo "mock diff stat failure" >&2
   exit 1
 fi
@@ -1865,7 +2059,9 @@ fi
             &["--exec", "true", "HEAD"],
             GitFactorExpectation::default()
                 .code(EXIT_SOFTWARE)
-                .stderr("git command failed: mock diff stat failure\n"),
+                .stderr_suffix(
+                    "git command failed: Git change query failed: mock diff stat failure\n",
+                ),
             prefixed_path,
         );
     }
@@ -1902,7 +2098,7 @@ fi
             &["--exec", "true", "HEAD"],
             GitFactorExpectation::default()
                 .code(EXIT_SOFTWARE)
-                .stderr("git command failed: mock show-toplevel failure\n"),
+                .stderr("git command failed: cannot observe protected worktree root\n"),
             prefixed_path,
         );
     }
@@ -1939,7 +2135,7 @@ fi
             &["--exec", "true", "HEAD"],
             GitFactorExpectation::default()
                 .code(EXIT_SOFTWARE)
-                .stderr("failed to write state: Not a directory (os error 20)\n"),
+                .stderr("failed to read state: Not a directory (os error 20)\n"),
             prefixed_path,
         );
     }
@@ -1957,8 +2153,8 @@ fi
             repo,
             &["--exec", "true", "HEAD"],
             GitFactorExpectation::default()
-                .code(EXIT_USAGE)
-                .stderr("a factor session is already active (use --abort to cancel)\n"),
+                .code(EXIT_SOFTWARE)
+                .stderr("git command failed: existing legacy or active session must be finished or aborted with its originating version\n"),
         );
     }
 
@@ -2017,11 +2213,7 @@ fi
 
         let expected_tree = git(repo, &["rev-parse", "HEAD^{tree}"]);
 
-        run_git_factor(
-            repo,
-            &["--exec", "printf 'completion gate stdout\\n'", "HEAD"],
-            GitFactorExpectation::default(),
-        );
+        start_session(repo);
 
         // Stage all remaining changes and commit the slice.
         git(repo, &["add", "--all"]);
@@ -2029,10 +2221,9 @@ fi
             repo,
             &["--continue", "--message", "test: split"],
             GitFactorExpectation::default()
-                .stdout(expected_completion_stdout_suffix("continue", 1))
-                .stderr("completion gate stdout\n")
                 .git_output(&["rev-parse", "HEAD^{tree}"], expected_tree)
                 .git_status_porcelain("")
+                .path_content("file.txt", "one\ntwo\n")
                 .factor_state_exists(false)
                 .path_exists(".git/factor", false),
         );
@@ -2078,14 +2269,47 @@ fi
         fs::remove_file(repo.join("file.txt")).or_abort();
         fs::write(repo.join("scratch.tmp"), "temporary\n").or_abort();
 
+        let original_head = git(repo, &["rev-parse", "HEAD"]);
+        let original_index = fs::read(git_dir(repo).join("index")).or_abort();
+        let original_journal = fs::read(checkpoint_journal(repo)).or_abort();
+        let original_refs = git(repo, &["show-ref"]);
+        let expected_tree = read_journal(repo)
+            .get("final_tree")
+            .and_then(serde_json::Value::as_str)
+            .or_abort()
+            .to_owned();
+        run_git_factor(repo, &["--retry"], GitFactorExpectation::default().code(EXIT_TEMPFAIL).stderr(format!(
+            "tree hash mismatch: expected {expected_tree}, got 4b825dc642cb6eb9a060e54bf8d69288fbee4904\n"
+        )));
+        assert_eq!(git(repo, &["rev-parse", "HEAD"]), original_head);
+        assert_eq!(git(repo, &["show-ref"]), original_refs);
+        assert_eq!(
+            fs::read(git_dir(repo).join("index")).or_abort(),
+            original_index
+        );
+        assert_eq!(
+            fs::read(checkpoint_journal(repo)).or_abort(),
+            original_journal
+        );
+        assert!(!repo.join("file.txt").exists());
+        assert_eq!(
+            fs::read(repo.join("scratch.tmp")).or_abort(),
+            b"temporary\n"
+        );
+        write_file(repo, "file.txt", "one\ntwo\nthree\n");
+        git(repo, &["add", "file.txt"]);
         run_git_factor(
             repo,
             &["--retry"],
             GitFactorExpectation::default()
-                .git_output(&["status", "--porcelain=v1"], status_before)
                 .git_output(&["diff", "--stat"], diff_before)
-                .path_exists("scratch.tmp", false)
+                .git_status_porcelain(format!("{status_before}\n?? scratch.tmp"))
+                .path_exists("scratch.tmp", true)
                 .factor_state_exists(true),
+        );
+        assert_eq!(
+            fs::read(repo.join("scratch.tmp")).or_abort(),
+            b"temporary\n"
         );
     }
 
@@ -2093,42 +2317,96 @@ fi
     fn start_persists_factor_state_files_in_git_dir() {
         let dir = init_repo();
         let repo = dir.path();
-
         commit_file(repo, "file.txt", "base\n", "chore: base");
         commit_file(repo, "file.txt", "base\nchange\n", "feat: change");
-
         let original_commit = git(repo, &["rev-parse", "HEAD"]);
         let expected_tree = git(repo, &["rev-parse", "HEAD^{tree}"]);
-
+        let original_base = git(repo, &["rev-parse", "HEAD~1"]);
         run_git_factor(
             repo,
             &["--exec", "true", "HEAD"],
             GitFactorExpectation::default()
                 .factor_state_exists(true)
-                .path_content(".git/factor/commits", format!("{original_commit}\n"))
-                .path_content(".git/factor/current_index", "0\n")
-                .path_content(".git/factor/exec", "true\n")
-                .path_content(".git/factor/split_count", "0\n")
-                .path_content(".git/factor/requires_rebase", "false\n")
-                .path_content(".git/factor/is_root", "false\n")
-                .path_content(".git/factor/expected_tree", format!("{expected_tree}\n")),
+                .rebase_merge_exists(true),
         );
+        let journal = read_journal(repo);
+        assert_eq!(
+            journal.get("format").and_then(serde_json::Value::as_str),
+            Some("checkpoint_v2")
+        );
+        assert_eq!(
+            journal
+                .get("original_tip")
+                .and_then(serde_json::Value::as_str),
+            Some(original_commit.as_str())
+        );
+        assert_eq!(
+            journal
+                .get("checkpoint")
+                .and_then(serde_json::Value::as_str),
+            Some(original_commit.as_str())
+        );
+        assert_eq!(
+            journal
+                .get("original_base")
+                .and_then(serde_json::Value::as_str),
+            Some(original_base.as_str())
+        );
+        assert_eq!(
+            journal
+                .get("final_tree")
+                .and_then(serde_json::Value::as_str),
+            Some(expected_tree.as_str())
+        );
+        assert_eq!(
+            journal
+                .pointer("/state/phase")
+                .and_then(serde_json::Value::as_str),
+            Some("selecting")
+        );
+        assert_eq!(
+            journal
+                .pointer("/gates/0/command")
+                .and_then(serde_json::Value::as_str),
+            Some("true")
+        );
+        assert!(!git_dir(repo).join("factor/commits").exists());
     }
 
     #[test]
     fn proptest_start_with_multiple_exec_flags_persists_joined_exec_command() {
         let dir = init_repo();
         let repo = dir.path();
-
         commit_file(repo, "file.txt", "base\n", "chore: base");
         commit_file(repo, "file.txt", "base\nchange\n", "feat: change");
-
         run_git_factor(
             repo,
-            &["--exec", "true", "--exec", "true", "HEAD"],
-            GitFactorExpectation::default()
-                .factor_state_exists(true)
-                .path_content(".git/factor/exec", "true && true\n"),
+            &["--exec", "true", "--exec", ":", "HEAD"],
+            GitFactorExpectation::default().factor_state_exists(true),
+        );
+        let journal = read_journal(repo);
+        let gates = journal
+            .get("gates")
+            .and_then(serde_json::Value::as_array)
+            .or_abort();
+        assert_eq!(gates.len(), 2);
+        assert_eq!(
+            gates
+                .first()
+                .and_then(|gate| gate.get("command"))
+                .and_then(serde_json::Value::as_str),
+            Some("true")
+        );
+        assert_eq!(
+            gates
+                .get(1)
+                .and_then(|gate| gate.get("command"))
+                .and_then(serde_json::Value::as_str),
+            Some(":")
+        );
+        assert_ne!(
+            gates.first().and_then(|gate| gate.get("name")),
+            gates.get(1).and_then(|gate| gate.get("name"))
         );
     }
 
@@ -2182,16 +2460,35 @@ fi
             "trace log should include process events\n{trace_content}"
         );
         assert!(
-            trace_content.contains("\"after_factor_split_count\":\"0\""),
-            "trace log should snapshot factor split count side effect\n{trace_content}"
+            trace_content.contains("\"after_factor_phase\":\"selecting\""),
+            "trace log should observe the current selecting phase\n{trace_content}"
         );
         assert!(
-            trace_content.contains("\"after_factor_current_index\":\"0\""),
-            "trace log should snapshot factor current index side effect\n{trace_content}"
+            trace_content.contains("\"after_factor_checkpoint\":"),
+            "trace log should observe the completed checkpoint\n{trace_content}"
         );
         assert!(
-            trace_content.contains("\"after_factor_expected_tree\":\""),
-            "trace log should snapshot expected tree side effect\n{trace_content}"
+            trace_content.contains("\"after_factor_final_tree\":"),
+            "trace log should observe the fixed final tree\n{trace_content}"
+        );
+        let status = Command::new(git_factor_bin())
+            .arg("--status")
+            .current_dir(repo)
+            .output()
+            .or_abort();
+        assert!(status.status.success());
+        let observed: serde_json::Value = serde_json::from_slice(&status.stdout).or_abort();
+        assert_eq!(
+            observed
+                .pointer("/session/phase")
+                .and_then(serde_json::Value::as_str),
+            Some("selecting")
+        );
+        assert_eq!(
+            observed
+                .pointer("/session/split_count")
+                .and_then(serde_json::Value::as_u64),
+            Some(0)
         );
     }
 
@@ -2355,9 +2652,7 @@ fi
         reason = "Git's tree revision syntax is literal input"
     )]
     fn status_trace_preserves_raw_index_after_ignored_hardlink_creation() {
-        use core::time::Duration;
         use std::os::unix::fs::MetadataExt as _;
-        use std::thread::sleep;
 
         let dir = init_repo();
         let repo = dir.path();
@@ -2446,9 +2741,9 @@ fi
                 "\"state_head\":\"{head}\",\"state_head_tree\":\"{tree}\",",
                 "\"state_git_dir\":\"{git_dir}\",\"state_toplevel\":\"{toplevel}\",",
                 "\"state_staged_paths\":[],\"state_unstaged_paths\":[],\"state_untracked_paths\":[],",
-                "\"state_factor_current_index\":null,\"state_factor_split_count\":null,",
-                "\"state_factor_requires_rebase\":null,\"state_factor_expected_tree\":null,",
-                "\"state_factor_current_commit\":null,\"state_rebase_state\":null,",
+                "\"state_factor_checkpoint\":null,\"state_factor_final_tree\":null,",
+                "\"state_factor_phase\":null,\"state_factor_source\":null,",
+                "\"state_rebase_state\":null,",
                 "\"state_rebase_msgnum\":null,\"state_rebase_end\":null,",
                 "\"state_rebase_todo_head\":null,\"state_rebase_done_tail\":null}}",
             ),
@@ -2567,7 +2862,13 @@ fi
         let wrapper_bin = wrapper_root.path().join("bin");
         fs::create_dir_all(&wrapper_bin).or_abort();
         let git_wrapper = wrapper_bin.join("git");
-        write_executable(&git_wrapper, "#!/bin/sh\nexec /usr/bin/git \"$@\"\n");
+        write_executable(
+            &git_wrapper,
+            &format!(
+                "#!/bin/sh\nexec {} \"$@\"\n",
+                shell_quote(native_git_bin().to_str().or_abort())
+            ),
+        );
 
         let trace_root = TempDir::new().or_abort();
         let trace_path = trace_root.path().join("missing-bash.jsonl");
@@ -2606,7 +2907,13 @@ fi
         let wrapper_bin = wrapper_root.path().join("bin");
         fs::create_dir_all(&wrapper_bin).or_abort();
         let git_wrapper = wrapper_bin.join("git");
-        write_executable(&git_wrapper, "#!/bin/sh\nexec /usr/bin/git \"$@\"\n");
+        write_executable(
+            &git_wrapper,
+            &format!(
+                "#!/bin/sh\nexec {} \"$@\"\n",
+                shell_quote(native_git_bin().to_str().or_abort())
+            ),
+        );
 
         run_git_factor_with_prefixed_path(
             repo,
@@ -2642,22 +2949,32 @@ fi
             &git_wrapper,
             r#"#!/bin/sh
 if [ "${1-}" = "write-tree" ]; then
+  : > .git/unexpected-write-tree
   echo "forced write-tree failure" 1>&2
   exit 1
 fi
 exec /usr/bin/git "$@"
-"#,
+"#
+            .replace(
+                "/usr/bin/git",
+                &shell_quote(native_git_bin().to_str().or_abort()),
+            )
+            .as_str(),
         );
         let _keep_alive = wrapper_root;
 
+        let before = snapshot_selection(repo);
         run_git_factor_with_prefixed_path(
             repo,
             &["--continue", "--message", "test: split"],
             GitFactorExpectation::default()
                 .code(EXIT_SOFTWARE)
-                .stderr("git command failed: forced write-tree failure\n"),
+                .stderr("git command failed: bash -c: No such file or directory (os error 2)\n"),
             wrapper_bin.as_os_str().to_os_string(),
         );
+        assert_eq!(snapshot_selection(repo), before);
+        assert_eq!(fs::read(repo.join("file.txt")).or_abort(), b"one\ntwo\n");
+        assert!(!git_dir(repo).join("unexpected-write-tree").exists());
     }
 
     #[test]
@@ -2672,7 +2989,26 @@ exec /usr/bin/git "$@"
         run_git_factor(
             repo,
             &["--exec", "true", "HEAD"],
-            GitFactorExpectation::default().path_content(".git/factor/is_root", "false\n"),
+            GitFactorExpectation::default().requires_rebase(true),
+        );
+        assert!(
+            read_journal(repo)
+                .get("original_base")
+                .and_then(serde_json::Value::as_str)
+                .is_some()
+        );
+        let observed = Command::new(git_factor_bin())
+            .current_dir(repo)
+            .arg("--status")
+            .output()
+            .or_abort();
+        assert!(observed.status.success());
+        let status: serde_json::Value = serde_json::from_slice(&observed.stdout).or_abort();
+        assert_eq!(
+            status
+                .pointer("/session/target/span_starts_at_root")
+                .and_then(serde_json::Value::as_bool),
+            Some(false)
         );
     }
 
@@ -2689,44 +3025,76 @@ exec /usr/bin/git "$@"
 
         write_file(repo, "file.txt", "base\na\n");
         git(repo, &["add", "file.txt"]);
+        write_file(repo, "file.txt", "base\na\nb\n");
 
         run_git_factor(
             repo,
             &["--continue", "--message", "test: split slice"],
             GitFactorExpectation::default()
                 .factor_state_exists(true)
-                .path_content(".git/factor/current_index", "0\n")
-                .path_content(".git/factor/split_count", "1\n")
-                .path_content(".git/factor/expected_tree", format!("{expected_tree}\n"))
+                .rebase_merge_exists(true)
                 .git_status_porcelain_non_empty(),
+        );
+        let journal = read_journal(repo);
+        assert_eq!(
+            journal
+                .get("final_tree")
+                .and_then(serde_json::Value::as_str),
+            Some(expected_tree.as_str())
+        );
+        let checkpoint = journal
+            .get("checkpoint")
+            .and_then(serde_json::Value::as_str)
+            .or_abort();
+        let atom = journal
+            .pointer("/state/base")
+            .and_then(serde_json::Value::as_str)
+            .or_abort();
+        assert_eq!(
+            git(repo, &["rev-parse", &format!("{checkpoint}^{{tree}}")]),
+            expected_tree
+        );
+        assert_eq!(
+            git(repo, &["log", "-1", "--format=%s", atom]),
+            "test: split slice"
+        );
+        let status = Command::new(git_factor_bin())
+            .current_dir(repo)
+            .arg("--status")
+            .output()
+            .or_abort();
+        assert!(status.status.success());
+        let observed_status: serde_json::Value = serde_json::from_slice(&status.stdout).or_abort();
+        assert_eq!(
+            observed_status
+                .pointer("/session/split_count")
+                .and_then(serde_json::Value::as_u64),
+            Some(1)
         );
     }
 
     #[test]
+    #[expect(
+        clippy::create_dir,
+        reason = "Owned legacy fixture paths must be fresh; an existing path is a setup error"
+    )]
     fn continue_reports_split_count_overflow() {
-        let dir = init_repo();
-        let repo = dir.path();
-
-        commit_file(repo, "file.txt", "base\n", "chore: base");
-        commit_file(repo, "file.txt", "base\na\nb\n", "feat: change");
-
-        start_session(repo);
+        let directory = init_repo();
+        let repo = directory.path();
+        commit_file(repo, "file.txt", "one\n", "chore: base");
+        let state = git_dir(repo).join("factor");
+        fs::create_dir(&state).or_abort();
         fs::write(
-            git_dir(repo).join("factor/split_count"),
-            format!("{}\n", u8::MAX),
+            state.join("commits"),
+            format!("{}\n", git(repo, &["rev-parse", "HEAD"])),
         )
         .or_abort();
-
-        write_file(repo, "file.txt", "base\na\n");
-        git(repo, &["add", "file.txt"]);
-
-        run_git_factor(
-            repo,
-            &["--continue", "--message", "test: split slice"],
-            GitFactorExpectation::default()
-                .code(EXIT_SOFTWARE)
-                .stderr("git command failed: split_count overflow\n"),
-        );
+        fs::write(state.join("current_index"), b"0\n").or_abort();
+        fs::write(state.join("exec"), b"true\n").or_abort();
+        fs::write(state.join("split_count"), b"0\n").or_abort();
+        fs::write(state.join("requires_rebase"), b"false\n").or_abort();
+        fs::write(state.join("split_count"), format!("{}\n", u8::MAX)).or_abort();
+        verify_legacy_session_refusal(repo, &["--continue", "--message", "test: legacy split"]);
     }
 
     #[test]
@@ -2741,8 +3109,9 @@ exec /usr/bin/git "$@"
             repo,
             &["--exec", "rm -rf .git/rebase-merge && true", "HEAD~1"],
             GitFactorExpectation::default()
-                .code(EXIT_SOFTWARE)
-                .stderr_suffix("git command failed: git rebase failed (exit 1)\n"),
+                .factor_state_exists(true)
+                .rebase_merge_exists(true)
+                .requires_rebase(true),
         );
     }
 
@@ -2799,26 +3168,7 @@ exec /usr/bin/git "$@"
             repo,
             &["--continue", "--message", "test: slice a"],
             GitFactorExpectation::default()
-                .stdout(
-                    "\
-FACTOR: Split 1 committed.
-STATE: Remaining changes are unstaged.
-UNSTAGED:
-UNTRACKED:
-  b.txt
-
-NEXT: Stage changes for the next commit, then run:
-  git factor --continue --message \"type: description\"
-
-HINTS:
-  - Find the ONE smallest addition nothing depends on
-  - Target 15-30 lines (50 max)
-  - Message: single concrete action, no \"and\"/\"or\"
-  - Verify: git log --oneline | wc -l
-  - NEVER use git commit. ONLY use git factor --continue.
-  RECOVERY: git factor --abort
-",
-                )
+                .stdout(expected_remaining_stdout("[]", "[\"b.txt\"]"))
                 .git_output(&["ls-files", "--others", "--exclude-standard"], "b.txt"),
         );
     }
@@ -2845,27 +3195,10 @@ HINTS:
             repo,
             &["--continue", "--message", "test: slice a"],
             GitFactorExpectation::default()
-                .stdout(
-                    "\
-FACTOR: Split 1 committed.
-STATE: Remaining changes are unstaged.
-UNSTAGED:
-  b.txt | 1 +
-   1 file changed, 1 insertion(+)
-
-NEXT: Stage changes for the next commit, then run:
-  git factor --continue --message \"type: description\"
-
-HINTS:
-  - Find the ONE smallest addition nothing depends on
-  - Target 15-30 lines (50 max)
-  - Message: single concrete action, no \"and\"/\"or\"
-  - Verify: git log --oneline | wc -l
-  - NEVER use git commit. ONLY use git factor --continue.
-  REMAINING:  1 file changed, 1 insertion(+)
-  RECOVERY: git factor --abort
-",
-                )
+                .stdout(expected_remaining_stdout(
+                    "[{\"path\":\"b.txt\",\"kind\":\"text\",\"added\":1,\"deleted\":0}]",
+                    "[]",
+                ))
                 .git_output(&["ls-files", "--others", "--exclude-standard"], ""),
         );
     }
@@ -2878,6 +3211,7 @@ HINTS:
         commit_file(repo, "file.txt", "one\n", "chore: base");
         commit_file(repo, "file.txt", "one\ntwo\n", "feat: original message");
 
+        let expected_tree = git(repo, &["rev-parse", "HEAD^{tree}"]);
         let original_message = git(repo, &["log", "--format=%B", "--max-count=1"]);
 
         start_session(repo);
@@ -2885,11 +3219,15 @@ HINTS:
         run_git_factor(
             repo,
             &["--finish"],
-            GitFactorExpectation::default().git_output(
-                &["log", "--format=%B", "--max-count=1"],
-                original_message.trim_end().to_owned(),
-            ),
+            GitFactorExpectation::default().stdout(expected_completion_stdout_suffix("finish", 1)),
         );
+        assert_true_gate_message(
+            repo,
+            "HEAD",
+            original_message.as_str(),
+            expected_tree.as_str(),
+        );
+        assert_eq!(git(repo, &["rev-parse", "HEAD^{tree}"]), expected_tree);
     }
 
     #[test]
@@ -2899,6 +3237,7 @@ HINTS:
 
         commit_file(repo, "file.txt", "one\n", "chore: base");
         commit_file(repo, "file.txt", "one\ntwo\n", "feat: change");
+        let head_sha = git(repo, &["rev-parse", "HEAD"]);
         let head_short_sha = git(repo, &["rev-parse", "--short", "HEAD"]);
 
         run_git_factor(
@@ -2906,9 +3245,10 @@ HINTS:
             &["--exec", "true", "HEAD"],
             GitFactorExpectation::default()
                 .rebase_apply_exists(false)
-                .rebase_merge_exists(false)
-                .requires_rebase(false)
+                .rebase_merge_exists(true)
+                .requires_rebase(true)
                 .stdout(expected_single_commit_start_stdout(
+                    head_sha.as_str(),
                     head_short_sha.as_str(),
                     "feat: change",
                 )),
@@ -2925,34 +3265,56 @@ HINTS:
 
     #[test]
     fn finish_preserves_empty_commits() {
-        let dir = init_repo();
-        let repo = dir.path();
-
+        let directory = init_repo();
+        let repo = directory.path();
         commit_file(repo, "file.txt", "one\n", "chore: base");
         git(
             repo,
             &["commit", "--allow-empty", "--message", "feat: placeholder"],
         );
-
-        let expected_tree = git(repo, &["rev-parse", "HEAD^{tree}"]);
-        let expected_subject = git(repo, &["log", "--format=%s", "--max-count=1"]);
-
-        start_session(repo);
-
+        let original_head = git(repo, &["rev-parse", "HEAD"]);
+        let original_tree = git(repo, &["rev-parse", "HEAD^{tree}"]);
+        let original_message = git(repo, &["show", "--format=%B", "--no-patch", "HEAD"]);
+        let original_refs = git(repo, &["show-ref"]);
+        let original_index = fs::read(git_dir(repo).join("index")).or_abort();
+        fs::write(
+            repo.join("unrelated.tmp"),
+            b"unrelated empty-selection bytes\n",
+        )
+        .or_abort();
+        run_git_factor(repo, &["--exec", "false", "HEAD"], GitFactorExpectation::default()
+            .code(EXIT_DATAERR)
+            .stdout("{\"operation\":\"start\",\"reason\":\"empty_change\",\"result\":\"refused\"}\n")
+            .factor_state_exists(false).rebase_merge_exists(false));
+        assert_eq!(git(repo, &["rev-parse", "HEAD"]), original_head);
+        assert_eq!(git(repo, &["rev-parse", "HEAD^{tree}"]), original_tree);
+        assert_eq!(
+            git(repo, &["show", "--format=%B", "--no-patch", "HEAD"]),
+            original_message
+        );
+        assert_eq!(git(repo, &["show-ref"]), original_refs);
+        assert_eq!(
+            fs::read(git_dir(repo).join("index")).or_abort(),
+            original_index
+        );
+        assert_eq!(fs::read(repo.join("file.txt")).or_abort(), b"one\n");
+        assert_eq!(
+            fs::read(repo.join("unrelated.tmp")).or_abort(),
+            b"unrelated empty-selection bytes\n"
+        );
         run_git_factor(
             repo,
             &["--finish"],
             GitFactorExpectation::default()
-                .git_output(&["rev-parse", "HEAD^{tree}"], expected_tree)
-                .git_output(&["log", "--format=%s", "--max-count=1"], expected_subject),
+                .code(EXIT_USAGE)
+                .stderr("no active factor session\n"),
         );
     }
 
     #[test]
     fn finish_uses_allow_empty_when_original_commit_is_empty() {
-        let dir = init_repo();
-        let repo = dir.path();
-
+        let directory = init_repo();
+        let repo = directory.path();
         commit_file(repo, "file.txt", "one\n", "chore: base");
         git(
             repo,
@@ -2963,250 +3325,47 @@ HINTS:
                 "feat: empty original",
             ],
         );
-
-        start_session(repo);
-
-        let (wrap_dir, wrap_bin) = make_git_wrapper_named(
-            "git",
-            r#"if [ "${1-}" = "commit" ]; then
-  for arg in "$@"; do
-    if [ "$arg" = "--allow-empty" ]; then
-      exit 1
-    fi
-  done
-fi
-"#,
+        let original_head = git(repo, &["rev-parse", "HEAD"]);
+        let original_tree = git(repo, &["rev-parse", "HEAD^{tree}"]);
+        let original_message = git(repo, &["show", "--format=%B", "--no-patch", "HEAD"]);
+        let original_refs = git(repo, &["show-ref"]);
+        let original_index = fs::read(git_dir(repo).join("index")).or_abort();
+        fs::write(
+            repo.join("unrelated.tmp"),
+            b"unrelated empty-selection bytes\n",
+        )
+        .or_abort();
+        run_git_factor(repo, &["--exec", "false", "HEAD"], GitFactorExpectation::default()
+            .code(EXIT_DATAERR)
+            .stdout("{\"operation\":\"start\",\"reason\":\"empty_change\",\"result\":\"refused\"}\n")
+            .factor_state_exists(false).rebase_merge_exists(false));
+        assert_eq!(git(repo, &["rev-parse", "HEAD"]), original_head);
+        assert_eq!(git(repo, &["rev-parse", "HEAD^{tree}"]), original_tree);
+        assert_eq!(
+            git(repo, &["show", "--format=%B", "--no-patch", "HEAD"]),
+            original_message
         );
-        let _keep_alive = wrap_dir;
-
-        let original_path = env::var_os("PATH").or_abort();
-        let prefixed_path = {
-            let mut joined = OsString::new();
-            joined.push(wrap_bin.as_os_str());
-            joined.push(OsStr::new(":"));
-            joined.push(original_path);
-            joined
-        };
-
-        run_git_factor_with_prefixed_path(
+        assert_eq!(git(repo, &["show-ref"]), original_refs);
+        assert_eq!(
+            fs::read(git_dir(repo).join("index")).or_abort(),
+            original_index
+        );
+        assert_eq!(fs::read(repo.join("file.txt")).or_abort(), b"one\n");
+        assert_eq!(
+            fs::read(repo.join("unrelated.tmp")).or_abort(),
+            b"unrelated empty-selection bytes\n"
+        );
+        run_git_factor(
             repo,
             &["--finish"],
             GitFactorExpectation::default()
-                .code(EXIT_SOFTWARE)
-                .stderr("git command failed: git commit failed (exit 1)\n"),
-            prefixed_path,
+                .code(EXIT_USAGE)
+                .stderr("no active factor session\n"),
         );
     }
 
     #[test]
-    fn finish_preserves_unrelated_branch_during_descendant_replay() {
-        let dir = init_repo();
-        let repo = dir.path();
-        commit_file(repo, "base.txt", "base\n", "Add base");
-        write_file(repo, "first.txt", "first\n");
-        write_file(repo, "second.txt", "second\n");
-        git(repo, &["add", "first.txt", "second.txt"]);
-        git(repo, &["commit", "--message", "Add selected changes"]);
-        let selected = git(repo, &["rev-parse", "HEAD"]);
-        git(repo, &["branch", "other", selected.as_str()]);
-        commit_file(repo, "later.txt", "later\n", "Add descendant");
-        let original_tree = git(repo, &["rev-parse", "HEAD^{tree}"]);
-        let original_branch = git(repo, &["symbolic-ref", "HEAD"]);
-        git(repo, &["config", "rebase.updateRefs", "true"]);
-
-        // Arrange a partially split session with a descendant still awaiting replay.
-        let started = Command::new(git_factor_bin())
-            .current_dir(repo)
-            .args(["--exec", "true", selected.as_str()])
-            .output()
-            .or_abort();
-        assert_eq!(started.status.code(), Some(EXIT_OK));
-        git(repo, &["add", "first.txt"]);
-        let submitted = Command::new(git_factor_bin())
-            .current_dir(repo)
-            .args(["--continue", "--message", "Add first change"])
-            .output()
-            .or_abort();
-        assert_eq!(submitted.status.code(), Some(EXIT_OK));
-        assert!(git_dir(repo).join("rebase-merge").exists());
-        assert_eq!(git(repo, &["rev-parse", "refs/heads/other"]), selected);
-
-        let finished = Command::new(git_factor_bin())
-            .current_dir(repo)
-            .args(["--finish"])
-            .output()
-            .or_abort();
-
-        assert_eq!(finished.status.code(), Some(EXIT_OK));
-        assert_eq!(
-            finished.stdout,
-            b"{\"operation\":\"finish\",\"split_count\":2}\n",
-        );
-        assert_eq!(finished.stderr, b"");
-        assert_eq!(git(repo, &["rev-parse", "refs/heads/other"]), selected);
-        assert_eq!(git(repo, &["rev-parse", "HEAD^{tree}"]), original_tree);
-        assert_eq!(git(repo, &["write-tree"]), original_tree);
-        assert_eq!(git(repo, &["symbolic-ref", "HEAD"]), original_branch);
-        assert_eq!(git(repo, &["status", "--porcelain"]), "");
-        assert_eq!(git(repo, &["rev-list", "--count", "HEAD"]), "4");
-        assert_eq!(git(repo, &["log", "-1", "--format=%s"]), "Add descendant");
-        assert!(!git_dir(repo).join("factor").exists());
-        assert!(!git_dir(repo).join("rebase-merge").exists());
-        assert!(!git_dir(repo).join("rebase-apply").exists());
-    }
-
-    #[test]
-    fn finish_preserves_branch_created_before_empty_root_cleanup() {
-        let dir = init_repo();
-        let repo = dir.path();
-        write_file(repo, "first.txt", "first\n");
-        write_file(repo, "second.txt", "second\n");
-        git(repo, &["add", "first.txt", "second.txt"]);
-        git(repo, &["commit", "--message", "Add root changes"]);
-        let original_tree = git(repo, &["rev-parse", "HEAD^{tree}"]);
-        let original_branch = git(repo, &["symbolic-ref", "HEAD"]);
-        git(repo, &["config", "rebase.updateRefs", "true"]);
-
-        // Arrange the root split before its final empty-root cleanup rebase.
-        start_session(repo);
-        git(repo, &["add", "first.txt"]);
-        let submitted = Command::new(git_factor_bin())
-            .current_dir(repo)
-            .args(["--continue", "--message", "Add first change"])
-            .output()
-            .or_abort();
-        assert_eq!(submitted.status.code(), Some(EXIT_OK));
-        let accepted = git(repo, &["rev-parse", "HEAD"]);
-        git(repo, &["branch", "other", accepted.as_str()]);
-        assert!(!git_dir(repo).join("rebase-merge").exists());
-        let empty_root = git(repo, &["rev-list", "--max-parents=0", "HEAD"]);
-        assert_eq!(git(repo, &["ls-tree", empty_root.as_str()]), "");
-
-        let finished = Command::new(git_factor_bin())
-            .current_dir(repo)
-            .args(["--finish"])
-            .output()
-            .or_abort();
-
-        assert_eq!(finished.status.code(), Some(EXIT_OK));
-        assert_eq!(
-            finished.stdout,
-            b"{\"operation\":\"finish\",\"split_count\":2}\n",
-        );
-        assert_eq!(finished.stderr, b"");
-        assert_eq!(git(repo, &["rev-parse", "refs/heads/other"]), accepted);
-        assert_eq!(git(repo, &["rev-parse", "HEAD^{tree}"]), original_tree);
-        assert_eq!(git(repo, &["write-tree"]), original_tree);
-        assert_eq!(git(repo, &["symbolic-ref", "HEAD"]), original_branch);
-        assert_eq!(git(repo, &["status", "--porcelain"]), "");
-        assert_eq!(git(repo, &["rev-list", "--count", "HEAD"]), "2");
-        assert_eq!(git(repo, &["log", "-1", "--format=%s"]), "Add root changes");
-        assert!(!git_dir(repo).join("factor").exists());
-        assert!(!git_dir(repo).join("rebase-merge").exists());
-        assert!(!git_dir(repo).join("rebase-apply").exists());
-    }
-
-    #[test]
-    fn finish_preserves_fixup_descendant_during_empty_root_cleanup() {
-        let dir = init_repo();
-        let repo = dir.path();
-        write_file(repo, "first.txt", "first\n");
-        write_file(repo, "second.txt", "second\n");
-        git(repo, &["add", "first.txt", "second.txt"]);
-        git(repo, &["commit", "--message", "Add root changes"]);
-        let selected = git(repo, &["rev-parse", "HEAD"]);
-        commit_file(repo, "later.txt", "later\n", "fixup! Add first change");
-        let original_tree = git(repo, &["rev-parse", "HEAD^{tree}"]);
-        let original_branch = git(repo, &["symbolic-ref", "HEAD"]);
-        git(repo, &["config", "rebase.autoSquash", "true"]);
-        let started = Command::new(git_factor_bin())
-            .current_dir(repo)
-            .args(["--exec", "true", selected.as_str()])
-            .output()
-            .or_abort();
-        assert_eq!(started.status.code(), Some(EXIT_OK));
-        git(repo, &["add", "first.txt"]);
-        let submitted = Command::new(git_factor_bin())
-            .current_dir(repo)
-            .args(["--continue", "--message", "Add first change"])
-            .output()
-            .or_abort();
-        assert_eq!(submitted.status.code(), Some(EXIT_OK));
-        let empty_root = git(repo, &["rev-list", "--max-parents=0", "HEAD"]);
-        assert_eq!(git(repo, &["ls-tree", empty_root.as_str()]), "");
-
-        let finished = Command::new(git_factor_bin())
-            .current_dir(repo)
-            .args(["--finish"])
-            .output()
-            .or_abort();
-
-        assert_eq!(finished.status.code(), Some(EXIT_OK));
-        assert_eq!(
-            finished.stdout,
-            b"{\"operation\":\"finish\",\"split_count\":2}\n"
-        );
-        assert_eq!(finished.stderr, b"");
-        assert_eq!(git(repo, &["rev-parse", "HEAD^{tree}"]), original_tree);
-        assert_eq!(git(repo, &["write-tree"]), original_tree);
-        assert_eq!(git(repo, &["symbolic-ref", "HEAD"]), original_branch);
-        assert_eq!(git(repo, &["status", "--porcelain"]), "");
-        assert_eq!(fs::read(repo.join("first.txt")).or_abort(), b"first\n");
-        assert_eq!(fs::read(repo.join("second.txt")).or_abort(), b"second\n");
-        assert_eq!(fs::read(repo.join("later.txt")).or_abort(), b"later\n");
-        assert!(!git_dir(repo).join("factor").exists());
-        assert!(!git_dir(repo).join("rebase-merge").exists());
-        assert!(!git_dir(repo).join("rebase-apply").exists());
-        assert_eq!(
-            git(repo, &["log", "--reverse", "--format=%s"]),
-            "Add first change\nAdd root changes\nfixup! Add first change"
-        );
-        assert_eq!(git(repo, &["rev-list", "--count", "HEAD"]), "3");
-    }
-
-    #[test]
-    fn terminal_continue_emits_only_json_with_native_gate_output_on_stderr() {
-        let directory = init_repo();
-        let repo = directory.path();
-        commit_file(repo, "file.txt", "base\n", "Base");
-        commit_file(repo, "file.txt", "base\nselected\n", "Selected source");
-        let original_tree = git(repo, &["rev-parse", "HEAD^{tree}"]);
-        git(repo, &["branch", "unrelated", "HEAD~1"]);
-        let unrelated = git(repo, &["rev-parse", "refs/heads/unrelated"]);
-        run_git_factor(
-            repo,
-            &["--exec", "printf 'completion gate output\n'", "HEAD"],
-            GitFactorExpectation::default(),
-        );
-        git(repo, &["add", "file.txt"]);
-
-        run_git_factor(
-            repo,
-            &["--continue", "--message", "Complete selected source"],
-            GitFactorExpectation::default()
-                .stdout("{\"operation\":\"continue\",\"split_count\":1}\n")
-                .stderr("completion gate output\n")
-                .factor_state_exists(false)
-                .rebase_merge_exists(false)
-                .rebase_apply_exists(false)
-                .git_status_porcelain(""),
-        );
-
-        assert_eq!(git(repo, &["rev-parse", "HEAD^{tree}"]), original_tree);
-        assert_eq!(git(repo, &["write-tree"]), original_tree);
-        assert_eq!(
-            fs::read(repo.join("file.txt")).or_abort(),
-            b"base\nselected\n"
-        );
-        assert_eq!(git(repo, &["rev-parse", "refs/heads/unrelated"]), unrelated);
-        assert_eq!(
-            git(repo, &["show", "--format=%B", "--no-patch", "HEAD"]),
-            "Complete selected source"
-        );
-    }
-
-    #[test]
-    fn finish_ignores_exec_gate_and_completes_session() {
+    fn finish_enforces_exec_gate_before_completing_session() {
         let dir = init_repo();
         let repo = dir.path();
 
@@ -3220,9 +3379,11 @@ fi
             repo,
             &["--finish"],
             GitFactorExpectation::default()
-                .stdout_suffix(expected_completion_stdout_suffix("finish", 1))
-                .factor_state_exists(false)
-                .path_exists(".git/factor", false),
+                .code(EXIT_TEMPFAIL)
+                .stderr("exec gate failed: false (exit code 1)\n")
+                .stdout("{\"actions\":{\"submit\":[\"git\",\"factor\",\"--continue\",\"--message\",\"<message>\"]},\"gate\":{\"command\":\"false\",\"exit_code\":1},\"guidance\":[\"Adjust staged changes so the gate passes, then submit the atom again.\"],\"operation\":\"finish\",\"result\":\"gate_failed\"}\n")
+                .factor_state_exists(true)
+                .path_exists(".git/factor", true),
         );
     }
 
@@ -3278,9 +3439,15 @@ fi
         commit_file(repo, "file.txt", "root\nnext\ntail\n", "feat: tail");
         let root_sha = git(repo, &["rev-list", "--max-parents=0", "HEAD"]);
 
+        write_file(repo, "unrelated.txt", "preserve opening user bytes\n");
+        let before_head = git(repo, &["rev-parse", "HEAD"]);
+        let before_index = fs::read(git_dir(repo).join("index")).or_abort();
+        let before_refs = git(repo, &["show-ref", "--heads", "--tags"]);
+        let before_file = fs::read(repo.join("file.txt")).or_abort();
         let (wrap_dir, wrap_bin) = make_git_wrapper_named(
             "git",
-            r#"if [ "${1-}" = "rebase" ]; then
+            r#"if [ "$#" -eq 13 ] && [ "${1-}" = "-c" ] && [ "${2-}" = "rebase.missingCommitsCheck=ignore" ] && [ "${3-}" = "rebase" ] && [ "${4-}" = "--interactive" ]; then
+  printf '%s\n' "$@" >> "$(dirname "$0")/observed-opening"
   saw_root=0
   for arg in "$@"; do
     if [ "$arg" = "--root" ]; then
@@ -3289,23 +3456,54 @@ fi
     fi
   done
   if [ "$saw_root" -eq 1 ]; then
+    echo 'root rebase selected (42)' >&2
     exit 42
   fi
+  echo 'nonroot rebase selected (43)' >&2
   exit 43
 fi
 "#,
         );
+        let expected_base = "--root".to_owned();
         let _keep_alive = wrap_dir;
+        let observation = wrap_bin.join("observed-opening");
 
         run_git_factor_with_env(
             repo,
             &["--exec", "true", root_sha.as_str(), "HEAD~1"],
             GitFactorExpectation::default()
-                .code(EXIT_SOFTWARE)
-                .stderr("git command failed: git rebase failed (exit 42)\n"),
+                .code(EXIT_TEMPFAIL)
+                .stderr("root rebase selected (42)\n")
+                .stdout(expected_recovery_stdout("start"))
+                .factor_state_exists(true),
             "PATH",
             format!("{}:{}", wrap_bin.display(), env::var("PATH").or_abort()),
         );
+        assert_eq!(
+            fs::read_to_string(observation).or_abort(),
+            format!(
+                "-c\nrebase.missingCommitsCheck=ignore\nrebase\n--interactive\n--no-ff\n--reschedule-failed-exec\n--no-update-refs\n--no-autostash\n--no-autosquash\n--no-rebase-merges\n--empty=keep\n--keep-empty\n{expected_base}\n"
+            )
+        );
+        assert_eq!(git(repo, &["rev-parse", "HEAD"]), before_head);
+        assert_eq!(
+            fs::read(git_dir(repo).join("index")).or_abort(),
+            before_index
+        );
+        assert_eq!(git(repo, &["show-ref", "--heads", "--tags"]), before_refs);
+        assert_eq!(fs::read(repo.join("file.txt")).or_abort(), before_file);
+        assert_eq!(
+            fs::read(repo.join("unrelated.txt")).or_abort(),
+            b"preserve opening user bytes\n"
+        );
+        assert_eq!(
+            read_journal(repo)
+                .pointer("/state/phase")
+                .and_then(serde_json::Value::as_str),
+            Some("opening")
+        );
+        assert!(!git_dir(repo).join("rebase-merge").exists());
+        assert!(!git_dir(repo).join("rebase-apply").exists());
     }
 
     #[test]
@@ -3318,9 +3516,15 @@ fi
         commit_file(repo, "file.txt", "one\ntwo\nthree\n", "feat: three");
         commit_file(repo, "file.txt", "one\ntwo\nthree\nfour\n", "feat: four");
 
+        write_file(repo, "unrelated.txt", "preserve opening user bytes\n");
+        let before_head = git(repo, &["rev-parse", "HEAD"]);
+        let before_index = fs::read(git_dir(repo).join("index")).or_abort();
+        let before_refs = git(repo, &["show-ref", "--heads", "--tags"]);
+        let before_file = fs::read(repo.join("file.txt")).or_abort();
         let (wrap_dir, wrap_bin) = make_git_wrapper_named(
             "git",
-            r#"if [ "${1-}" = "rebase" ]; then
+            r#"if [ "$#" -eq 13 ] && [ "${1-}" = "-c" ] && [ "${2-}" = "rebase.missingCommitsCheck=ignore" ] && [ "${3-}" = "rebase" ] && [ "${4-}" = "--interactive" ]; then
+  printf '%s\n' "$@" >> "$(dirname "$0")/observed-opening"
   saw_root=0
   for arg in "$@"; do
     if [ "$arg" = "--root" ]; then
@@ -3329,23 +3533,54 @@ fi
     fi
   done
   if [ "$saw_root" -eq 1 ]; then
+    echo 'root rebase selected (42)' >&2
     exit 42
   fi
+  echo 'nonroot rebase selected (43)' >&2
   exit 43
 fi
 "#,
         );
+        let expected_base = git(repo, &["rev-parse", "HEAD~3"]);
         let _keep_alive = wrap_dir;
+        let observation = wrap_bin.join("observed-opening");
 
         run_git_factor_with_env(
             repo,
             &["--exec", "true", "HEAD~2", "HEAD~1"],
             GitFactorExpectation::default()
-                .code(EXIT_SOFTWARE)
-                .stderr("git command failed: git rebase failed (exit 43)\n"),
+                .code(EXIT_TEMPFAIL)
+                .stderr("nonroot rebase selected (43)\n")
+                .stdout(expected_recovery_stdout("start"))
+                .factor_state_exists(true),
             "PATH",
             format!("{}:{}", wrap_bin.display(), env::var("PATH").or_abort()),
         );
+        assert_eq!(
+            fs::read_to_string(observation).or_abort(),
+            format!(
+                "-c\nrebase.missingCommitsCheck=ignore\nrebase\n--interactive\n--no-ff\n--reschedule-failed-exec\n--no-update-refs\n--no-autostash\n--no-autosquash\n--no-rebase-merges\n--empty=keep\n--keep-empty\n{expected_base}\n"
+            )
+        );
+        assert_eq!(git(repo, &["rev-parse", "HEAD"]), before_head);
+        assert_eq!(
+            fs::read(git_dir(repo).join("index")).or_abort(),
+            before_index
+        );
+        assert_eq!(git(repo, &["show-ref", "--heads", "--tags"]), before_refs);
+        assert_eq!(fs::read(repo.join("file.txt")).or_abort(), before_file);
+        assert_eq!(
+            fs::read(repo.join("unrelated.txt")).or_abort(),
+            b"preserve opening user bytes\n"
+        );
+        assert_eq!(
+            read_journal(repo)
+                .pointer("/state/phase")
+                .and_then(serde_json::Value::as_str),
+            Some("opening")
+        );
+        assert!(!git_dir(repo).join("rebase-merge").exists());
+        assert!(!git_dir(repo).join("rebase-apply").exists());
     }
 
     #[test]
@@ -3359,46 +3594,35 @@ fi
         git(repo, &["add", "file.txt", "references/rust.md"]);
         git(repo, &["commit", "--message", "chore: base"]);
         commit_file(repo, "file.txt", "one\ntwo\n", "feat: change");
+        let original = git(repo, &["rev-parse", "HEAD"]);
         let head_short_sha = git(repo, &["rev-parse", "--short", "HEAD"]);
         let reference_path = repo.join("references/rust.md").canonicalize().or_abort();
 
+        let expected = expected_single_commit_start_stdout(&original, &head_short_sha, "feat: change")
+            .replace("\"Submit each atom through git factor so its gates run.\"]", "\"Submit each atom through git factor so its gates run.\",\"Above 50% context, pause and ask the user to /compact.\",\"Continue splitting until the session is complete.\"]");
+        let expected_with_reference = expected.replace(
+            "\"references\":[]",
+            &format!(
+                "\"references\":[{}]",
+                serde_json::to_string(reference_path.to_str().or_abort()).or_abort()
+            ),
+        );
         run_git_factor_with_env(
             repo,
             &["--exec", "true", "HEAD"],
-            GitFactorExpectation::default().stdout(format!(
-                "\
-FACTOR: Split session started for {}.
-ORIGINAL MESSAGE: feat: change
-UNSTAGED:
-  file.txt | 1 +
-   1 file changed, 1 insertion(+)
-
-NEXT: Stage changes for the first atomic commit, then run:
-  git factor --continue --message \"type: description\"
-
-Run git factor -h for command help or git-factor --help for the full workflow guide.
-
-HINTS:
-  - Find the ONE smallest addition nothing depends on
-  - Target 15-30 lines (50 max)
-  - Message: single concrete action, no \"and\"/\"or\"
-  - Verify: git log --oneline | wc -l
-  - NEVER use git commit. ONLY use git factor --continue.
-  REMAINING:  1 file changed, 1 insertion(+)
-  REFERENCE: {}
-  RECOVERY: git factor --abort
-<claude>
-- If context is above 50%, pause and ask the user to /compact.
-- Do NOT stop early. Keep committing until \"Complete\".
-- Do NOT use git commit directly. ONLY use git-factor --continue.
-- Each commit MUST pass the exec gate. No shortcuts.
-</claude>
-",
-                head_short_sha.as_str(),
-                reference_path.display()
-            )),
+            GitFactorExpectation::default().stdout(expected_with_reference),
             "CLAUDECODE",
             "1",
+        );
+        assert_eq!(
+            read_journal(repo)
+                .get("original_tip")
+                .and_then(serde_json::Value::as_str),
+            Some(original.as_str())
+        );
+        assert_eq!(
+            fs::read(repo.join("references/rust.md")).or_abort(),
+            b"# rust\n"
         );
     }
 
@@ -3409,44 +3633,25 @@ HINTS:
 
         commit_file(repo, "file.txt", "one\n", "chore: base");
         commit_file(repo, "file.txt", "one\ntwo\n", "feat: change");
+        let original = git(repo, &["rev-parse", "HEAD"]);
         let head_short_sha = git(repo, &["rev-parse", "--short", "HEAD"]);
 
+        let expected = expected_single_commit_start_stdout(&original, &head_short_sha, "feat: change")
+            .replace("\"Submit each atom through git factor so its gates run.\"]", "\"Submit each atom through git factor so its gates run.\",\"Above 50% context, pause and ask the user to /compact.\",\"Continue splitting until the session is complete.\"]");
         run_git_factor_with_env(
             repo,
             &["--exec", "true", "HEAD"],
-            GitFactorExpectation::default().stdout(format!(
-                "\
-FACTOR: Split session started for {}.
-ORIGINAL MESSAGE: feat: change
-UNSTAGED:
-  file.txt | 1 +
-   1 file changed, 1 insertion(+)
-
-NEXT: Stage changes for the first atomic commit, then run:
-  git factor --continue --message \"type: description\"
-
-Run git factor -h for command help or git-factor --help for the full workflow guide.
-
-HINTS:
-  - Find the ONE smallest addition nothing depends on
-  - Target 15-30 lines (50 max)
-  - Message: single concrete action, no \"and\"/\"or\"
-  - Verify: git log --oneline | wc -l
-  - NEVER use git commit. ONLY use git factor --continue.
-  REMAINING:  1 file changed, 1 insertion(+)
-  RECOVERY: git factor --abort
-<claude>
-- If context is above 50%, pause and ask the user to /compact.
-- Do NOT stop early. Keep committing until \"Complete\".
-- Do NOT use git commit directly. ONLY use git-factor --continue.
-- Each commit MUST pass the exec gate. No shortcuts.
-</claude>
-",
-                head_short_sha.as_str()
-            )),
+            GitFactorExpectation::default().stdout(expected),
             "CLAUDECODE",
             "1",
         );
+        assert_eq!(
+            read_journal(repo)
+                .get("original_tip")
+                .and_then(serde_json::Value::as_str),
+            Some(original.as_str())
+        );
+        assert!(!repo.join("references/rust.md").exists());
     }
 
     #[test]
@@ -3472,8 +3677,8 @@ HINTS:
             repo,
             &["--abort"],
             GitFactorExpectation::default()
-                .path_exists("untracked.txt", false)
-                .git_status_porcelain(""),
+                .path_exists("untracked.txt", true)
+                .git_status_porcelain("?? untracked.txt"),
         );
     }
 
@@ -3481,20 +3686,55 @@ HINTS:
     fn abort_succeeds_when_rebase_apply_is_active() {
         let dir = init_repo();
         let repo = dir.path();
-
         commit_file(repo, "file.txt", "one\n", "chore: base");
-        start_session(repo);
-        fs::create_dir_all(git_dir(repo).join("rebase-apply")).or_abort();
-
+        let base = git(repo, &["rev-parse", "HEAD"]);
+        commit_file(repo, "file.txt", "two\n", "feat: patch");
+        let patch = Command::new(native_git_bin())
+            .args(["format-patch", "-1", "--stdout", "HEAD"])
+            .current_dir(repo)
+            .output()
+            .or_abort();
+        assert!(patch.status.success());
+        let patch_dir = TempDir::new().or_abort();
+        let patch_path = patch_dir.path().join("owned.patch");
+        fs::write(&patch_path, patch.stdout).or_abort();
+        git(repo, &["reset", "--hard", &base]);
+        commit_file(repo, "file.txt", "foreign\n", "Independent conflict");
+        let paused = Command::new(native_git_bin())
+            .args(["am", "--3way"])
+            .arg(&patch_path)
+            .current_dir(repo)
+            .output()
+            .or_abort();
+        assert!(!paused.status.success());
+        assert!(git_dir(repo).join("rebase-apply").is_dir());
+        let head = git(repo, &["rev-parse", "HEAD"]);
+        let refs = git(repo, &["show-ref"]);
+        let index = fs::read(git_dir(repo).join("index")).or_abort();
+        let native = legacy_inventory(&git_dir(repo).join("rebase-apply"));
+        let physical = fs::read(repo.join("file.txt")).or_abort();
+        fs::write(repo.join("unrelated.txt"), "preserve external apply\n").or_abort();
         run_git_factor(
             repo,
             &["--abort"],
             GitFactorExpectation::default()
-                .stdout(
-                    "{\"operation\":\"abort\",\"rebase\":{\"in_progress\":true},\"actions\":{\"abort_rebase\":[\"git\",\"rebase\",\"--abort\"]}}\n",
-                )
+                .code(EXIT_USAGE)
+                .stderr("no active factor session\n")
                 .rebase_apply_exists(true)
-                .rebase_merge_exists(false),
+                .rebase_merge_exists(false)
+                .factor_state_exists(false),
+        );
+        assert_eq!(git(repo, &["rev-parse", "HEAD"]), head);
+        assert_eq!(git(repo, &["show-ref"]), refs);
+        assert_eq!(fs::read(git_dir(repo).join("index")).or_abort(), index);
+        assert_eq!(
+            legacy_inventory(&git_dir(repo).join("rebase-apply")),
+            native
+        );
+        assert_eq!(fs::read(repo.join("file.txt")).or_abort(), physical);
+        assert_eq!(
+            fs::read(repo.join("unrelated.txt")).or_abort(),
+            b"preserve external apply\n"
         );
     }
 
@@ -3548,6 +3788,7 @@ fi
         write_file(repo, "new.txt", "new\n");
         git(repo, &["add", "--all"]);
         git(repo, &["commit", "--message", "feat: b"]);
+        let second_sha = git(repo, &["rev-parse", "HEAD"]);
         let second_short_sha = git(repo, &["rev-parse", "--short", "HEAD"]);
         let expected_tree = git(repo, &["rev-parse", "HEAD^{tree}"]);
 
@@ -3555,8 +3796,9 @@ fi
             repo,
             &["--exec", "true", "HEAD~2..HEAD"],
             GitFactorExpectation::default().stdout_suffix(expected_multi_commit_start_suffix(
+                second_sha.as_str(),
                 second_short_sha.as_str(),
-                Some("UNTRACKED:\n  new.txt\n"),
+                "[\"new.txt\"]",
             )),
         );
 
@@ -3565,26 +3807,8 @@ fi
         run_git_factor(
             repo,
             &["--continue", "--message", "test: split a"],
-            GitFactorExpectation::default().stdout(
-                "\
-FACTOR: Split 1 committed.
-STATE: Remaining changes are unstaged.
-UNSTAGED:
-UNTRACKED:
-  new.txt
-
-NEXT: Stage changes for the next commit, then run:
-  git factor --continue --message \"type: description\"
-
-HINTS:
-  - Find the ONE smallest addition nothing depends on
-  - Target 15-30 lines (50 max)
-  - Message: single concrete action, no \"and\"/\"or\"
-  - Verify: git log --oneline | wc -l
-  - NEVER use git commit. ONLY use git factor --continue.
-  RECOVERY: git factor --abort
-",
-            ),
+            GitFactorExpectation::default()
+                .stdout(expected_remaining_stdout("[]", "[\"new.txt\"]")),
         );
 
         // Final split: add the remaining untracked file to converge to the tip tree.
@@ -3608,14 +3832,16 @@ HINTS:
         write_file(repo, "base.txt", "base\na\nb\n");
         git(repo, &["add", "--all"]);
         git(repo, &["commit", "--message", "feat: b"]);
+        let second_sha = git(repo, &["rev-parse", "HEAD"]);
         let second_short_sha = git(repo, &["rev-parse", "--short", "HEAD"]);
 
         run_git_factor(
             repo,
             &["--exec", "true", "HEAD~1", "HEAD"],
             GitFactorExpectation::default().stdout_suffix(expected_multi_commit_start_suffix(
+                second_sha.as_str(),
                 second_short_sha.as_str(),
-                None,
+                "[]",
             )),
         );
 
@@ -3638,14 +3864,16 @@ HINTS:
         write_file(repo, "base.txt", "base\na\nb\n");
         git(repo, &["add", "--all"]);
         git(repo, &["commit", "--message", "feat: b"]);
+        let second_sha = git(repo, &["rev-parse", "HEAD"]);
         let second_short_sha = git(repo, &["rev-parse", "--short", "HEAD"]);
 
         run_git_factor(
             repo,
             &["--exec", "true", "HEAD~1^..HEAD"],
             GitFactorExpectation::default().stdout_suffix(expected_multi_commit_start_suffix(
+                second_sha.as_str(),
                 second_short_sha.as_str(),
-                None,
+                "[]",
             )),
         );
     }
@@ -3703,27 +3931,8 @@ HINTS:
         run_git_factor(
             repo,
             &["--continue", "--message", "test: first"],
-            GitFactorExpectation::default().stdout_suffix(
-                "\
-FACTOR: Split 1 committed.
-STATE: Remaining changes are unstaged.
-UNSTAGED:
-UNTRACKED:
-  new.txt
-
-NEXT: Stage changes for the next commit, then run:
-  git factor --continue --message \"type: description\"
-
-HINTS:
-  - Find the ONE smallest addition nothing depends on
-  - Target 15-30 lines (50 max)
-  - Message: single concrete action, no \"and\"/\"or\"
-  - Verify: git log --oneline | wc -l
-  - NEVER use git commit. ONLY use git factor --continue.
-  RECOVERY: git factor --abort
-"
-                .to_owned(),
-            ),
+            GitFactorExpectation::default()
+                .stdout(expected_remaining_stdout("[]", "[\"new.txt\"]")),
         );
     }
 
@@ -3734,35 +3943,31 @@ HINTS:
 
         commit_file(repo, "base.txt", "one\n", "chore: base");
         commit_file(repo, "new.txt", "new\n", "feat: add file");
+        let original = git(repo, &["rev-parse", "HEAD"]);
         let head_short_sha = git(repo, &["rev-parse", "--short", "HEAD"]);
 
+        let expected = expected_single_commit_start_stdout(
+            &original,
+            &head_short_sha,
+            "feat: add file",
+        )
+        .replace(
+            "\"unstaged\":[{\"path\":\"file.txt\",\"kind\":\"text\",\"added\":1,\"deleted\":0}]",
+            "\"unstaged\":[]",
+        )
+        .replace("\"untracked\":[]", "\"untracked\":[\"new.txt\"]");
         run_git_factor(
             repo,
             &["--exec", "true", "HEAD"],
-            GitFactorExpectation::default().stdout(format!(
-                "\
-FACTOR: Split session started for {}.
-ORIGINAL MESSAGE: feat: add file
-UNSTAGED:
-UNTRACKED:
-  new.txt
-
-NEXT: Stage changes for the first atomic commit, then run:
-  git factor --continue --message \"type: description\"
-
-Run git factor -h for command help or git-factor --help for the full workflow guide.
-
-HINTS:
-  - Find the ONE smallest addition nothing depends on
-  - Target 15-30 lines (50 max)
-  - Message: single concrete action, no \"and\"/\"or\"
-  - Verify: git log --oneline | wc -l
-  - NEVER use git commit. ONLY use git factor --continue.
-  RECOVERY: git factor --abort
-",
-                head_short_sha.as_str()
-            )),
+            GitFactorExpectation::default().stdout(expected),
         );
+        assert_eq!(
+            read_journal(repo)
+                .get("original_tip")
+                .and_then(serde_json::Value::as_str),
+            Some(original.as_str())
+        );
+        assert_eq!(fs::read(repo.join("new.txt")).or_abort(), b"new\n");
     }
 
     #[test]
@@ -3795,11 +4000,16 @@ HINTS:
 
         commit_file(repo, "file.txt", "one\n", "feat: root");
 
-        start_session(repo);
-        git(repo, &["add", "--all"]);
-
         let trace_root = TempDir::new().or_abort();
         let trace_path = trace_root.path().join("rebase-env.jsonl");
+        run_git_factor_with_env(
+            repo,
+            &["--exec", "true", "HEAD"],
+            GitFactorExpectation::default(),
+            "GIT_FACTOR_TRACE_LOG",
+            trace_path.as_os_str(),
+        );
+        git(repo, &["add", "--all"]);
         run_git_factor_with_env(
             repo,
             &["--continue", "--message", "test: root split"],
@@ -3811,7 +4021,7 @@ HINTS:
 
         let trace_content = fs::read_to_string(&trace_path).or_abort();
         assert!(
-            trace_content.contains("GIT_EDITOR=false"),
+            trace_content.contains("GIT_EDITOR=true"),
             "trace should include GIT_EDITOR env entry\n{trace_content}"
         );
         assert!(
@@ -3827,12 +4037,31 @@ HINTS:
 
         commit_file(repo, "file.txt", "one\n", "feat: root");
 
+        let original_tree = git(repo, &["rev-parse", "HEAD^{tree}"]);
+        let unrelated_root = git(
+            repo,
+            &[
+                "commit-tree",
+                original_tree.as_str(),
+                "-m",
+                "Independent root",
+            ],
+        );
+        git(
+            repo,
+            &[
+                "update-ref",
+                "refs/heads/independent",
+                unrelated_root.as_str(),
+            ],
+        );
         start_session(repo);
         git(repo, &["add", "--all"]);
 
         let (wrap_dir, wrap_bin) = make_git_wrapper_named(
             "git",
             r#"if [ "${1-}" = "rev-list" ] && [ "${2-}" = "--max-parents=0" ] && [ "${3-}" = "HEAD" ]; then
+  : > .git/unexpected-root-cleanup-query
   printf '%s\n%s\n' "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
   exit 0
 fi
@@ -3853,12 +4082,25 @@ fi
             repo,
             &["--continue", "--message", "test: root split"],
             GitFactorExpectation::default()
-                .code(EXIT_SOFTWARE)
-                .stderr(
-                    "git command failed: multiple root commits found; empty-root cleanup requires a single-root history\n",
-                ),
+                .stdout(expected_completion_stdout_suffix("continue", 1))
+                .factor_state_exists(false)
+                .rebase_merge_exists(false),
             prefixed_path,
         );
+        assert_eq!(
+            git(repo, &["rev-parse", "refs/heads/independent"]),
+            unrelated_root
+        );
+        assert_eq!(git(repo, &["rev-parse", "HEAD^{tree}"]), original_tree);
+        assert_eq!(git(repo, &["rev-list", "--count", "HEAD"]), "1");
+        assert_eq!(
+            git(repo, &["cat-file", "-p", "HEAD"])
+                .lines()
+                .filter(|line| line.starts_with("parent "))
+                .count(),
+            0
+        );
+        assert!(!git_dir(repo).join("unexpected-root-cleanup-query").exists());
     }
 
     #[test]
@@ -3873,7 +4115,8 @@ fi
 
         let (wrap_dir, wrap_bin) = make_git_wrapper_named(
             "git",
-            r#"if [ "${1-}" = "rebase" ] && [ "${2-}" = "--empty" ] && [ "${3-}" = "drop" ] && [ "${4-}" = "--interactive" ] && [ "${5-}" = "--no-autosquash" ] && [ "${6-}" = "--no-update-refs" ] && [ "${7-}" = "--quiet" ] && [ "${8-}" = "--root" ]; then
+            r#"if [ "${1-}" = "rebase" ] && [ "${2-}" = "--continue" ]; then
+  echo "owned root replay refuses exit 77" >&2
   exit 77
 fi
 "#,
@@ -3893,9 +4136,19 @@ fi
             repo,
             &["--continue", "--message", "test: root split"],
             GitFactorExpectation::default()
-                .code(EXIT_SOFTWARE)
-                .stderr("git command failed: rebase to remove empty root failed (exit 77)\n"),
+                .code(EXIT_TEMPFAIL)
+                .stdout(expected_recovery_stdout("continue"))
+                .stderr_suffix("owned root replay refuses exit 77\n")
+                .factor_state_exists(true)
+                .rebase_merge_exists(true),
             prefixed_path,
+        );
+        assert_eq!(fs::read(repo.join("file.txt")).or_abort(), b"one\n");
+        assert_eq!(
+            read_journal(repo)
+                .pointer("/state/phase")
+                .and_then(serde_json::Value::as_str),
+            Some("replaying")
         );
     }
 
@@ -3915,7 +4168,7 @@ fi
   echo "100644 blob deadbeefdeadbeefdeadbeefdeadbeefdeadbeef	file.txt"
   exit 0
 fi
-if [ "${1-}" = "rebase" ]; then
+if [ "${1-}" = "rebase" ] && [ "${2-}" = "--root" ] && [ "${3-}" = "--interactive" ]; then
   echo "UNEXPECTED_ROOT_REBASE" >&2
   exit 1
 fi
@@ -3942,237 +4195,222 @@ fi
     }
 
     #[test]
+    #[expect(
+        clippy::create_dir,
+        reason = "Owned legacy fixture paths must be fresh; an existing path is a setup error"
+    )]
     fn continue_errors_when_session_exists_but_no_rebase_is_active() {
-        let dir = init_repo();
-        let repo = dir.path();
+        let directory = init_repo();
+        let repo = directory.path();
         commit_file(repo, "file.txt", "one\n", "chore: base");
-
-        let factor_dir = git_dir(repo).join("factor");
-        fs::create_dir_all(&factor_dir).or_abort();
+        let state = git_dir(repo).join("factor");
+        fs::create_dir(&state).or_abort();
         fs::write(
-            factor_dir.join("commits"),
+            state.join("commits"),
             format!("{}\n", git(repo, &["rev-parse", "HEAD"])),
         )
         .or_abort();
-        fs::write(factor_dir.join("current_index"), "0\n").or_abort();
-        fs::write(factor_dir.join("exec"), "true\n").or_abort();
-        fs::write(factor_dir.join("split_count"), "0\n").or_abort();
-
-        run_git_factor(
-            repo,
-            &["--continue", "--message", "test: msg"],
-            GitFactorExpectation::default()
-                .code(EXIT_SOFTWARE)
-                .stderr("git command failed: no rebase in progress\n"),
-        );
+        fs::write(state.join("current_index"), b"0\n").or_abort();
+        fs::write(state.join("exec"), b"true\n").or_abort();
+        fs::write(state.join("split_count"), b"0\n").or_abort();
+        fs::write(state.join("requires_rebase"), b"false\n").or_abort();
+        verify_legacy_session_refusal(repo, &["--continue", "--message", "test: legacy split"]);
     }
 
     #[test]
+    #[expect(
+        clippy::create_dir,
+        reason = "Owned legacy fixture paths must be fresh; an existing path is a setup error"
+    )]
     fn finish_errors_when_session_exists_but_no_rebase_is_active() {
-        let dir = init_repo();
-        let repo = dir.path();
+        let directory = init_repo();
+        let repo = directory.path();
         commit_file(repo, "file.txt", "one\n", "chore: base");
-
-        let factor_dir = git_dir(repo).join("factor");
-        fs::create_dir_all(&factor_dir).or_abort();
+        let state = git_dir(repo).join("factor");
+        fs::create_dir(&state).or_abort();
         fs::write(
-            factor_dir.join("commits"),
+            state.join("commits"),
             format!("{}\n", git(repo, &["rev-parse", "HEAD"])),
         )
         .or_abort();
-        fs::write(factor_dir.join("current_index"), "0\n").or_abort();
-        fs::write(factor_dir.join("exec"), "true\n").or_abort();
-        fs::write(factor_dir.join("split_count"), "0\n").or_abort();
-
-        run_git_factor(
-            repo,
-            &["--finish"],
-            GitFactorExpectation::default()
-                .code(EXIT_SOFTWARE)
-                .stderr("git command failed: no rebase in progress\n"),
-        );
+        fs::write(state.join("current_index"), b"0\n").or_abort();
+        fs::write(state.join("exec"), b"true\n").or_abort();
+        fs::write(state.join("split_count"), b"0\n").or_abort();
+        fs::write(state.join("requires_rebase"), b"false\n").or_abort();
+        verify_legacy_session_refusal(repo, &["--finish", "--message", "test: legacy finish"]);
     }
 
     #[test]
+    #[expect(
+        clippy::create_dir,
+        reason = "Owned legacy fixture paths must be fresh; an existing path is a setup error"
+    )]
     fn continue_reports_corrupted_commits_state_file() {
-        let dir = init_repo();
-        let repo = dir.path();
+        let directory = init_repo();
+        let repo = directory.path();
         commit_file(repo, "file.txt", "one\n", "chore: base");
-
-        // Fake an active session + rebase so cmd_continue attempts to read state.
-        let factor_dir = git_dir(repo).join("factor");
-        fs::create_dir_all(&factor_dir).or_abort();
-        fs::create_dir_all(git_dir(repo).join("rebase-merge")).or_abort();
-
-        // Empty commits file should be rejected.
-        fs::write(factor_dir.join("commits"), "\n").or_abort();
-        fs::write(factor_dir.join("current_index"), "0\n").or_abort();
-        fs::write(factor_dir.join("exec"), "true\n").or_abort();
-        fs::write(factor_dir.join("split_count"), "0\n").or_abort();
-
-        run_git_factor(
-            repo,
-            &["--continue", "--message", "test: msg"],
-            GitFactorExpectation::default()
-                .code(EXIT_SOFTWARE)
-                .stderr("git command failed: corrupted state file 'commits': file is empty\n"),
-        );
+        let state = git_dir(repo).join("factor");
+        fs::create_dir(&state).or_abort();
+        fs::write(
+            state.join("commits"),
+            format!("{}\n", git(repo, &["rev-parse", "HEAD"])),
+        )
+        .or_abort();
+        fs::write(state.join("current_index"), b"0\n").or_abort();
+        fs::write(state.join("exec"), b"true\n").or_abort();
+        fs::write(state.join("split_count"), b"0\n").or_abort();
+        fs::write(state.join("requires_rebase"), b"false\n").or_abort();
+        fs::write(state.join("commits"), b"\n").or_abort();
+        fs::create_dir(git_dir(repo).join("rebase-merge")).or_abort();
+        verify_legacy_session_refusal(repo, &["--continue", "--message", "test: legacy split"]);
     }
 
     #[test]
+    #[expect(
+        clippy::create_dir,
+        reason = "Owned legacy fixture paths must be fresh; an existing path is a setup error"
+    )]
     fn continue_reports_corrupted_requires_rebase_state() {
-        let dir = init_repo();
-        let repo = dir.path();
-
+        let directory = init_repo();
+        let repo = directory.path();
         commit_file(repo, "file.txt", "one\n", "chore: base");
-        commit_file(repo, "file.txt", "one\ntwo\n", "feat: change");
-
-        run_git_factor(repo, &["--exec", "true"], GitFactorExpectation::default());
-
+        let state = git_dir(repo).join("factor");
+        fs::create_dir(&state).or_abort();
         fs::write(
-            git_dir(repo).join("factor/requires_rebase"),
-            "definitely-not-a-bool\n",
+            state.join("commits"),
+            format!("{}\n", git(repo, &["rev-parse", "HEAD"])),
         )
         .or_abort();
-
-        git(repo, &["add", "--all"]);
-        run_git_factor(
-                repo,
-                &["--continue", "--message", "test: split"],
-                GitFactorExpectation::default()
-                    .code(EXIT_SOFTWARE)
-                    .stderr("git command failed: corrupted state file 'requires_rebase': invalid value 'definitely-not-a-bool'\n"),
-            );
+        fs::write(state.join("current_index"), b"0\n").or_abort();
+        fs::write(state.join("exec"), b"true\n").or_abort();
+        fs::write(state.join("split_count"), b"0\n").or_abort();
+        fs::write(state.join("requires_rebase"), b"false\n").or_abort();
+        fs::write(state.join("requires_rebase"), b"definitely-not-a-bool\n").or_abort();
+        verify_legacy_session_refusal(repo, &["--continue", "--message", "test: legacy split"]);
     }
 
     #[test]
+    #[expect(
+        clippy::create_dir,
+        reason = "Owned legacy fixture paths must be fresh; an existing path is a setup error"
+    )]
     fn finish_reports_corrupted_requires_rebase_state() {
-        let dir = init_repo();
-        let repo = dir.path();
-
+        let directory = init_repo();
+        let repo = directory.path();
         commit_file(repo, "file.txt", "one\n", "chore: base");
-        commit_file(repo, "file.txt", "one\ntwo\n", "feat: change");
-
-        run_git_factor(repo, &["--exec", "true"], GitFactorExpectation::default());
-
+        let state = git_dir(repo).join("factor");
+        fs::create_dir(&state).or_abort();
         fs::write(
-            git_dir(repo).join("factor/requires_rebase"),
-            "definitely-not-a-bool\n",
+            state.join("commits"),
+            format!("{}\n", git(repo, &["rev-parse", "HEAD"])),
         )
         .or_abort();
-
-        run_git_factor(
-                repo,
-                &["--finish", "--message", "test: final"],
-                GitFactorExpectation::default()
-                    .code(EXIT_SOFTWARE)
-                    .stderr("git command failed: corrupted state file 'requires_rebase': invalid value 'definitely-not-a-bool'\n"),
-            );
+        fs::write(state.join("current_index"), b"0\n").or_abort();
+        fs::write(state.join("exec"), b"true\n").or_abort();
+        fs::write(state.join("split_count"), b"0\n").or_abort();
+        fs::write(state.join("requires_rebase"), b"false\n").or_abort();
+        fs::write(state.join("requires_rebase"), b"definitely-not-a-bool\n").or_abort();
+        verify_legacy_session_refusal(repo, &["--finish", "--message", "test: legacy finish"]);
     }
 
     #[test]
+    #[expect(
+        clippy::create_dir,
+        reason = "Owned legacy fixture paths must be fresh; an existing path is a setup error"
+    )]
     fn continue_reports_unreadable_requires_rebase_state() {
-        let dir = init_repo();
-        let repo = dir.path();
-
+        let directory = init_repo();
+        let repo = directory.path();
         commit_file(repo, "file.txt", "one\n", "chore: base");
-        commit_file(repo, "file.txt", "one\ntwo\n", "feat: change");
-
-        run_git_factor(repo, &["--exec", "true"], GitFactorExpectation::default());
-
-        let unreadable_path = git_dir(repo).join("factor/requires_rebase");
-        fs::remove_file(&unreadable_path).or_abort();
-        fs::create_dir_all(&unreadable_path).or_abort();
-
-        git(repo, &["add", "--all"]);
-        run_git_factor(
-            repo,
-            &["--continue", "--message", "test: split"],
-            GitFactorExpectation::default()
-                .code(EXIT_SOFTWARE)
-                .stderr("failed to read state: Is a directory (os error 21)\n"),
-        );
+        let state = git_dir(repo).join("factor");
+        fs::create_dir(&state).or_abort();
+        fs::write(
+            state.join("commits"),
+            format!("{}\n", git(repo, &["rev-parse", "HEAD"])),
+        )
+        .or_abort();
+        fs::write(state.join("current_index"), b"0\n").or_abort();
+        fs::write(state.join("exec"), b"true\n").or_abort();
+        fs::write(state.join("split_count"), b"0\n").or_abort();
+        fs::write(state.join("requires_rebase"), b"false\n").or_abort();
+        fs::remove_file(state.join("requires_rebase")).or_abort();
+        fs::create_dir(state.join("requires_rebase")).or_abort();
+        verify_legacy_session_refusal(repo, &["--continue", "--message", "test: legacy split"]);
     }
 
     #[test]
+    #[expect(
+        clippy::create_dir,
+        reason = "Owned legacy fixture paths must be fresh; an existing path is a setup error"
+    )]
     fn finish_reports_unreadable_requires_rebase_state() {
-        let dir = init_repo();
-        let repo = dir.path();
-
+        let directory = init_repo();
+        let repo = directory.path();
         commit_file(repo, "file.txt", "one\n", "chore: base");
-        commit_file(repo, "file.txt", "one\ntwo\n", "feat: change");
-
-        run_git_factor(repo, &["--exec", "true"], GitFactorExpectation::default());
-
-        let unreadable_path = git_dir(repo).join("factor/requires_rebase");
-        fs::remove_file(&unreadable_path).or_abort();
-        fs::create_dir_all(&unreadable_path).or_abort();
-
-        run_git_factor(
-            repo,
-            &["--finish", "--message", "test: final"],
-            GitFactorExpectation::default()
-                .code(EXIT_SOFTWARE)
-                .stderr("failed to read state: Is a directory (os error 21)\n"),
-        );
+        let state = git_dir(repo).join("factor");
+        fs::create_dir(&state).or_abort();
+        fs::write(
+            state.join("commits"),
+            format!("{}\n", git(repo, &["rev-parse", "HEAD"])),
+        )
+        .or_abort();
+        fs::write(state.join("current_index"), b"0\n").or_abort();
+        fs::write(state.join("exec"), b"true\n").or_abort();
+        fs::write(state.join("split_count"), b"0\n").or_abort();
+        fs::write(state.join("requires_rebase"), b"false\n").or_abort();
+        fs::remove_file(state.join("requires_rebase")).or_abort();
+        fs::create_dir(state.join("requires_rebase")).or_abort();
+        verify_legacy_session_refusal(repo, &["--finish", "--message", "test: legacy finish"]);
     }
 
     #[test]
+    #[expect(
+        clippy::create_dir,
+        reason = "Owned legacy fixture paths must be fresh; an existing path is a setup error"
+    )]
     fn reports_invalid_numeric_state_files() {
-        let dir = init_repo();
-        let repo = dir.path();
+        let directory = init_repo();
+        let repo = directory.path();
         commit_file(repo, "file.txt", "one\n", "chore: base");
-
-        // Fake an active session + rebase so cmd_continue attempts to read state.
-        let factor_dir = git_dir(repo).join("factor");
-        fs::create_dir_all(&factor_dir).or_abort();
-        fs::create_dir_all(git_dir(repo).join("rebase-merge")).or_abort();
-
+        let state = git_dir(repo).join("factor");
+        fs::create_dir(&state).or_abort();
         fs::write(
-            factor_dir.join("commits"),
+            state.join("commits"),
             format!("{}\n", git(repo, &["rev-parse", "HEAD"])),
         )
         .or_abort();
-        fs::write(factor_dir.join("current_index"), "not-a-number\n").or_abort();
-        fs::write(factor_dir.join("exec"), "true\n").or_abort();
-        fs::write(factor_dir.join("split_count"), "0\n").or_abort();
-
-        run_git_factor(
-                repo,
-                &["--continue", "--message", "test: msg"],
-                GitFactorExpectation::default()
-                    .code(EXIT_SOFTWARE)
-                    .stderr("git command failed: corrupted state file 'current_index': invalid value 'not-a-number'\n"),
-            );
+        fs::write(state.join("current_index"), b"0\n").or_abort();
+        fs::write(state.join("exec"), b"true\n").or_abort();
+        fs::write(state.join("split_count"), b"0\n").or_abort();
+        fs::write(state.join("requires_rebase"), b"false\n").or_abort();
+        fs::write(state.join("current_index"), b"not-a-number\n").or_abort();
+        fs::create_dir(git_dir(repo).join("rebase-merge")).or_abort();
+        verify_legacy_session_refusal(repo, &["--continue", "--message", "test: legacy split"]);
     }
 
     #[test]
+    #[expect(
+        clippy::create_dir,
+        reason = "Owned legacy fixture paths must be fresh; an existing path is a setup error"
+    )]
     fn reports_out_of_range_commit_index() {
-        let dir = init_repo();
-        let repo = dir.path();
+        let directory = init_repo();
+        let repo = directory.path();
         commit_file(repo, "file.txt", "one\n", "chore: base");
-
-        // Fake an active session + rebase so cmd_continue attempts to read state.
-        let factor_dir = git_dir(repo).join("factor");
-        fs::create_dir_all(&factor_dir).or_abort();
-        fs::create_dir_all(git_dir(repo).join("rebase-merge")).or_abort();
-
+        let state = git_dir(repo).join("factor");
+        fs::create_dir(&state).or_abort();
         fs::write(
-            factor_dir.join("commits"),
+            state.join("commits"),
             format!("{}\n", git(repo, &["rev-parse", "HEAD"])),
         )
         .or_abort();
-        fs::write(factor_dir.join("current_index"), "1\n").or_abort();
-        fs::write(factor_dir.join("exec"), "true\n").or_abort();
-        fs::write(factor_dir.join("split_count"), "0\n").or_abort();
-
-        run_git_factor(
-            repo,
-            &["--continue", "--message", "test: msg"],
-            GitFactorExpectation::default()
-                .code(EXIT_SOFTWARE)
-                .stderr("git command failed: commit index 1 out of range (have 1 commits)\n"),
-        );
+        fs::write(state.join("current_index"), b"0\n").or_abort();
+        fs::write(state.join("exec"), b"true\n").or_abort();
+        fs::write(state.join("split_count"), b"0\n").or_abort();
+        fs::write(state.join("requires_rebase"), b"false\n").or_abort();
+        fs::write(state.join("current_index"), b"1\n").or_abort();
+        fs::create_dir(git_dir(repo).join("rebase-merge")).or_abort();
+        verify_legacy_session_refusal(repo, &["--continue", "--message", "test: legacy split"]);
     }
 
     #[test]
@@ -4194,11 +4432,30 @@ fi
         // filesystem before running the gate.
         write_file(repo, "file.txt", "good\n");
         git(repo, &["add", "file.txt"]);
+        write_file(repo, "file.txt", "bad\nstill bad\n");
 
         run_git_factor(
             repo,
             &["--continue", "--message", "test: slice"],
-            GitFactorExpectation::default(),
+            GitFactorExpectation::default()
+                .code(EXIT_TEMPFAIL)
+                .stdout(expected_recovery_stdout("continue")),
+        );
+        let atom = read_journal(repo)
+            .pointer("/state/atom")
+            .and_then(serde_json::Value::as_str)
+            .or_abort()
+            .to_owned();
+        assert_eq!(git(repo, &["show", &format!("{atom}:file.txt")]), "good");
+        assert_eq!(
+            fs::read(repo.join("file.txt")).or_abort(),
+            b"bad\nstill bad\n"
+        );
+        assert_eq!(
+            read_journal(repo)
+                .pointer("/state/phase")
+                .and_then(serde_json::Value::as_str),
+            Some("replaying")
         );
     }
 
@@ -4230,59 +4487,55 @@ fi
     fn start_reports_rebase_failure_when_sequence_editor_fails() {
         let dir = init_repo();
         let repo = dir.path();
-
         commit_file(repo, "file.txt", "one\n", "chore: base");
         commit_file(repo, "file.txt", "one\ntwo\n", "feat: change");
-
-        // Copy git-factor into a new directory and provide a sibling editor that always fails.
+        let head = git(repo, &["rev-parse", "HEAD"]);
         let bin_dir = TempDir::new().or_abort();
-        let (factor, _editor_unused) = copy_bins_to(bin_dir.path());
+        let (factor, _) = copy_bins_to(bin_dir.path());
         let bad_editor = bin_dir.path().join("git-sequence-editor");
-        write_executable(&bad_editor, "#!/bin/sh\nexit 1\n");
-        let bad_editor_canonical = fs::canonicalize(&bad_editor).or_abort();
-        let head_sha = git(repo, &["rev-parse", "HEAD"]);
-        let target_sha = git(repo, &["rev-parse", "HEAD~1"]);
-        let edited_short_sha = git(repo, &["rev-parse", "--short", "HEAD~1"]);
-        let factor_str = factor.to_str().or_abort();
-        let preflight = format!(
-            "{} {} {} {}",
-            shell_quote(factor_str),
-            shell_quote("rebase-exec-preflight"),
-            shell_quote("0"),
-            shell_quote("true")
+        write_executable(
+            &bad_editor,
+            "#!/bin/sh\nprintf 'editor\\n' >> \"$(dirname \"$0\")/observed-editor\"\nprintf 'owned checkpoint editor refusal\\n' >&2\nexit 1\n",
         );
-        let begin = format!(
-            "{} {} {} {} {} {} {}",
-            shell_quote(factor_str),
-            shell_quote("rebase-exec-begin"),
-            shell_quote("0"),
-            shell_quote(head_sha.as_str()),
-            shell_quote("true"),
-            shell_quote("true"),
-            shell_quote(target_sha.as_str())
+        let canonical_bad_editor = bad_editor.canonicalize().or_abort();
+        let (wrapper_dir, wrapper_bin) = make_git_wrapper_named(
+            "git",
+            &format!(
+                "if [ \"${{1-}}\" = \"-c\" ] && [ \"${{2-}}\" = \"rebase.missingCommitsCheck=ignore\" ] && [ \"${{3-}}\" = \"rebase\" ] && [ \"${{4-}}\" = \"--interactive\" ]; then\n  printf '%s\\n' \"$@\" >> \"$(dirname \"$0\")/observed-opening\"\n  export GIT_SEQUENCE_EDITOR={}\nfi\n",
+                shell_quote(canonical_bad_editor.to_str().or_abort())
+            ),
         );
-        let sequence_editor = [
-            shell_quote(bad_editor_canonical.to_str().or_abort()),
-            shell_quote("--factor-target"),
-            shell_quote(edited_short_sha.as_str()),
-            shell_quote("--factor-preflight"),
-            shell_quote(preflight.as_str()),
-            shell_quote("--factor-begin"),
-            shell_quote(begin.as_str()),
-        ]
-        .join(" ");
-        let expected_stderr = format!(
-            "error: there was a problem with the editor '{sequence_editor}'\n\
-                 git command failed: git rebase failed (exit 1)\n"
+        let _keep_alive = wrapper_dir;
+        let observation = wrapper_bin.join("observed-opening");
+        let mut expected = GitFactorExpectation::default()
+            .code(EXIT_TEMPFAIL)
+            .stdout(expected_recovery_stdout("start"))
+            .stderr_suffix(format!(
+                "error: there was a problem with the editor '{}'\n",
+                canonical_bad_editor.display()
+            ))
+            .factor_state_exists(true)
+            .rebase_merge_exists(false);
+        expected.envs.push((
+            "PATH".into(),
+            format!("{}:{}", wrapper_bin.display(), env::var("PATH").or_abort()).into(),
+        ));
+        run_git_factor_with_bin(repo, &factor, &["--exec", "true", "HEAD~1"], expected);
+        assert_eq!(git(repo, &["rev-parse", "HEAD"]), head);
+        assert_eq!(fs::read(repo.join("file.txt")).or_abort(), b"one\ntwo\n");
+        assert_eq!(
+            read_journal(repo)
+                .pointer("/state/phase")
+                .and_then(serde_json::Value::as_str),
+            Some("opening")
         );
-
-        run_git_factor_with_bin(
-            repo,
-            factor.as_path(),
-            &["--exec", "true", "HEAD~1"],
-            GitFactorExpectation::default()
-                .code(EXIT_SOFTWARE)
-                .stderr(expected_stderr),
+        assert_eq!(
+            fs::read(bin_dir.path().join("observed-editor")).or_abort(),
+            b"editor\n"
+        );
+        assert_eq!(
+            fs::read_to_string(observation).or_abort(),
+            "-c\nrebase.missingCommitsCheck=ignore\nrebase\n--interactive\n--no-ff\n--reschedule-failed-exec\n--no-update-refs\n--no-autostash\n--no-autosquash\n--no-rebase-merges\n--empty=keep\n--keep-empty\n--root\n"
         );
     }
 
@@ -4298,7 +4551,7 @@ fi
 
         let (wrap_dir, wrap_bin) = make_git_wrapper_named(
             "git",
-            r#"if [ "${1-}" = "commit" ]; then
+            r#"if [ "${1-}" = "-c" ] && [ "${3-}" = "commit" ]; then
   exit 1
 fi
 "#,
@@ -4321,7 +4574,7 @@ fi
             &["--continue", "--message", "test: split"],
             GitFactorExpectation::default()
                 .code(EXIT_SOFTWARE)
-                .stderr("git command failed: git commit failed (exit 1)\n"),
+                .stderr("git command failed: git -c failed (exit 1)\n"),
             prefixed_path,
         );
     }
@@ -4340,16 +4593,16 @@ fi
         );
         let (wrapper, bin) = make_git_wrapper_named(
             "git",
-            "if [ \"${1-}\" = commit ]; then\n  printf 'native stdout\n'\n  printf 'native stderr\n' >&2\nfi\n",
+            "if [ \"${1-}\" = -c ] && [ \"${3-}\" = commit ]; then\n  printf 'native stdout\n'\n  printf 'native stderr\n' >&2\nfi\n",
         );
         let mut path = OsString::new();
         path.push(bin.as_os_str());
         path.push(OsStr::new(":"));
         path.push(env::var_os("PATH").or_abort());
 
-        let mut expectation = GitFactorExpectation::default().code(EXIT_SOFTWARE).stderr(
-            "native stdout\nnative stderr\ngit command failed: git commit failed (exit 1)\n",
-        );
+        let mut expectation = GitFactorExpectation::default()
+            .code(EXIT_SOFTWARE)
+            .stderr("native stdout\nnative stderr\ngit command failed: git -c failed (exit 1)\n");
         expectation.stdout = Some(StreamExpectation::new_exact(String::new()));
         run_git_factor_with_prefixed_path(
             repo,
@@ -4374,8 +4627,8 @@ fi
         run_git_factor_with_env(
             repo,
             &["--exec", "true", "HEAD"],
-            GitFactorExpectation::default().code(EXIT_DATAERR).stderr(
-                "failed to determine git directory: No such file or directory (os error 2)\n",
+            GitFactorExpectation::default().code(EXIT_SOFTWARE).stderr(
+                "git command failed: git version: No such file or directory (os error 2)\n",
             ),
             "PATH",
             "",
@@ -4405,7 +4658,7 @@ fi
             &["--exec", "true", "HEAD"],
             GitFactorExpectation::default()
                 .code(EXIT_SOFTWARE)
-                .stderr("git command failed: fatal: short lookup failed\n"),
+                .stderr_suffix("git command failed: fatal: short lookup failed\n"),
             "PATH",
             wrapped_path,
         );
@@ -4431,7 +4684,7 @@ fi
             &["--exec", "true", "HEAD"],
             GitFactorExpectation::default()
                 .code(EXIT_SOFTWARE)
-                .stderr("git command failed: exit status: 42\n"),
+                .stderr_suffix("git command failed: exit status: 42\n"),
             "PATH",
             wrapped_path,
         );
@@ -4457,7 +4710,7 @@ fi
             &["--exec", "true", "HEAD"],
             GitFactorExpectation::default()
                 .code(EXIT_SOFTWARE)
-                .stderr("git command failed: signal: 9 (SIGKILL)\n"),
+                .stderr_suffix("git command failed: signal: 9 (SIGKILL)\n"),
             "PATH",
             wrapped_path,
         );
@@ -4481,12 +4734,21 @@ fi
         write_file(repo, "conflict/nested.txt", "ours\n");
         git(repo, &["add", "--all"]);
 
+        let before = snapshot_selection(repo);
         run_git_factor(
             repo,
             &["--continue", "--message", "test: dir conflict"],
-            GitFactorExpectation::default()
-                .git_output(&["ls-files", "--others", "--exclude-standard"], "conflict"),
+            GitFactorExpectation::default().code(EXIT_SOFTWARE).stderr(
+                "git command failed: staged paths must belong to the remaining selected change\n",
+            ),
         );
+        assert_eq!(snapshot_selection(repo), before);
+        assert!(repo.join("conflict").is_dir());
+        assert_eq!(
+            fs::read(repo.join("conflict/nested.txt")).or_abort(),
+            b"ours\n"
+        );
+        assert_eq!(fs::read(repo.join("file.txt")).or_abort(), b"base\n");
     }
 
     #[test]
@@ -4496,7 +4758,6 @@ fi
 
         commit_file(repo, "file.txt", "base\n", "chore: base");
         commit_file(repo, "conflict", "theirs\n", "feat: add conflict file");
-        let commit_short_sha = git(repo, &["rev-parse", "--short", "HEAD"]);
 
         // Start session, then force exec failure so rehydrate runs.
         start_session(repo);
@@ -4507,15 +4768,21 @@ fi
         write_file(repo, "conflict/nested.txt", "ours\n");
         git(repo, &["add", "--all"]);
 
+        let before = snapshot_selection(repo);
         run_git_factor(
             repo,
             &["--continue", "--message", "test: slice"],
-            GitFactorExpectation::default()
-                .code(EXIT_SOFTWARE)
-                .stderr_suffix(format!(
-                    "git command failed: rehydrate cherry-pick left conflicts:\nconflict~{commit_short_sha} (feat: add conflict file)\n"
-                )),
+            GitFactorExpectation::default().code(EXIT_SOFTWARE).stderr(
+                "git command failed: staged paths must belong to the remaining selected change\n",
+            ),
         );
+        assert_eq!(snapshot_selection(repo), before);
+        assert!(repo.join("conflict").is_dir());
+        assert_eq!(
+            fs::read(repo.join("conflict/nested.txt")).or_abort(),
+            b"ours\n"
+        );
+        assert_eq!(fs::read(repo.join("file.txt")).or_abort(), b"base\n");
     }
 
     #[test]
@@ -4530,6 +4797,7 @@ fi
         let (wrap_dir, wrap_bin) = make_git_wrapper_named(
             "git",
             r#"if [ "${1-}" = "cherry-pick" ] && [ "${2-}" = "--quit" ]; then
+  : > .git/unexpected-cherry-pick
   exit 1
 fi
 "#,
@@ -4549,58 +4817,86 @@ fi
         // Stage a slice so --continue proceeds into rehydrate.
         write_file(repo, "file.txt", "base\nslice\n");
         git(repo, &["add", "file.txt"]);
+        write_file(repo, "file.txt", "base\nchange\n");
+        let before = snapshot_selection(repo);
 
         run_git_factor_with_env(
             repo,
             &["--continue", "--message", "test: slice"],
             GitFactorExpectation::default()
-                .code(EXIT_SOFTWARE)
-                .stderr_suffix("git command failed: git cherry-pick --quit failed (exit 1)\n"),
+                .code(EXIT_TEMPFAIL)
+                .stderr_suffix("exec gate failed: false (exit code 1)\n"),
             "PATH",
             wrapped_path,
         );
+        assert_eq!(snapshot_selection(repo), before);
+        assert_eq!(
+            fs::read(repo.join("file.txt")).or_abort(),
+            b"base\nchange\n"
+        );
+        assert!(!git_dir(repo).join("unexpected-cherry-pick").exists());
     }
 
     #[test]
-    fn continue_reports_rehydrate_read_tree_failure() {
+    fn continue_reports_remaining_selection_read_tree_failure() {
         let dir = init_repo();
         let repo = dir.path();
 
         commit_file(repo, "file.txt", "base\n", "chore: base");
         commit_file(repo, "file.txt", "base\nchange\n", "feat: change");
 
-        // Wrapper that fails only for `git read-tree`.
+        // Refuse only the private remaining-selection observation, before gates or replay.
         let (wrap_dir, wrap_bin) = make_git_wrapper_named(
             "git",
-            r#"if [ "${1-}" = "read-tree" ]; then
-  exit 1
+            r#"if [ "$#" -eq 8 ] && [ "${1-}" = "-c" ] && [ "${2-}" = "core.ignorestat=false" ] && [ "${3-}" = "-c" ] && [ "${4-}" = "core.splitIndex=false" ] && [ "${5-}" = "-c" ] && [ "${6-}" = "core.sparseCheckout=false" ] && [ "${7-}" = "read-tree" ]; then
+  case "${GIT_INDEX_FILE-}" in
+    */selection-index)
+      printf '%s\n' "$@" 'selection-index' >> "$(dirname "$0")/observed-selection"
+      exit 1
+      ;;
+  esac
 fi
 "#,
         );
         let _keep_alive = wrap_dir;
+        let observation = wrap_bin.join("observed-selection");
 
         let wrapped_path = format!("{}:{}", wrap_bin.display(), env::var("PATH").or_abort());
-        run_git_factor_with_env(
-            repo,
-            &["--exec", "true", "HEAD"],
-            GitFactorExpectation::default(),
-            "PATH",
-            wrapped_path.clone(),
-        );
-        overwrite_session_exec(repo, "false");
+        start_session(repo);
+        let source = read_journal(repo)
+            .pointer("/state/source")
+            .and_then(serde_json::Value::as_str)
+            .or_abort()
+            .to_owned();
 
-        // Stage a slice so --continue proceeds into rehydrate.
+        // Stage a slice while leaving the complete original source in the worktree.
         write_file(repo, "file.txt", "base\nslice\n");
         git(repo, &["add", "file.txt"]);
+        write_file(repo, "file.txt", "base\nchange\n");
+        let before = snapshot_selection(repo);
+
+        let mut expectation = GitFactorExpectation::default()
+            .code(EXIT_SOFTWARE)
+            .stderr("git command failed: cannot observe the remaining selection without changing its index\n");
+        expectation.stdout = Some(StreamExpectation::new_exact(String::new()));
 
         run_git_factor_with_env(
             repo,
             &["--continue", "--message", "test: slice"],
-            GitFactorExpectation::default().code(EXIT_SOFTWARE).stderr(
-                "Auto-merging file.txt\ngit command failed: git read-tree failed (exit 1)\n",
-            ),
+            expectation,
             "PATH",
             wrapped_path,
+        );
+        assert_eq!(
+            fs::read_to_string(observation).or_abort(),
+            format!(
+                "-c\ncore.ignorestat=false\n-c\ncore.splitIndex=false\n-c\ncore.sparseCheckout=false\nread-tree\n{source}\nselection-index\n"
+            )
+        );
+        assert_eq!(snapshot_selection(repo), before);
+        assert_eq!(
+            fs::read(repo.join("file.txt")).or_abort(),
+            b"base\nchange\n"
         );
     }
 
@@ -4618,11 +4914,14 @@ fi
         // Stage a slice so --continue proceeds into rehydrate.
         write_file(repo, "file.txt", "base\nslice\n");
         git(repo, &["add", "file.txt"]);
+        write_file(repo, "file.txt", "base\nchange\n");
+        let before = snapshot_selection(repo);
 
         // Wrapper: make `git cherry-pick --no-commit` fail, but report no unmerged files.
         let (wrap_dir, wrap_bin) = make_git_wrapper_named(
             "git",
             r#"if [ "${1-}" = "cherry-pick" ] && [ "${2-}" = "--no-commit" ]; then
+  : > .git/unexpected-cherry-pick
   exit 1
 fi
 if [ "${1-}" = "diff" ] && [ "${2-}" = "--name-only" ] && [ "${3-}" = "--diff-filter=U" ]; then
@@ -4635,10 +4934,18 @@ fi
         run_git_factor_with_env(
             repo,
             &["--continue", "--message", "test: slice"],
-            GitFactorExpectation::default().code(EXIT_SOFTWARE),
+            GitFactorExpectation::default()
+                .code(EXIT_TEMPFAIL)
+                .stderr_suffix("exec gate failed: false (exit code 1)\n"),
             "PATH",
             format!("{}:{}", wrap_bin.display(), env::var("PATH").or_abort()),
         );
+        assert_eq!(snapshot_selection(repo), before);
+        assert_eq!(
+            fs::read(repo.join("file.txt")).or_abort(),
+            b"base\nchange\n"
+        );
+        assert!(!git_dir(repo).join("unexpected-cherry-pick").exists());
     }
 
     #[test]
@@ -4651,28 +4958,42 @@ fi
 
         start_session(repo);
 
-        // Wrapper: fail `git restore` so finish surfaces a restore failure.
+        // Refuse the real index priming step only after private selection admission succeeds.
         let (wrap_dir, wrap_bin) = make_git_wrapper_named(
             "git",
-            r#"if [ "${1-}" = "restore" ] && [ "${2-}" = "--source" ]; then
+            r#"if [ "$#" -eq 2 ] && [ "${1-}" = "read-tree" ] && [ -z "${GIT_INDEX_FILE-}" ]; then
+  printf '%s\n' "$@" 'real-index' >> "$(dirname "$0")/observed-restore"
   exit 1
-fi
-if [ "${1-}" = "cherry-pick" ] && [ "${2-}" = "--quit" ]; then
-  exit 0
 fi
 "#,
         );
         let _keep_alive = wrap_dir;
+        let observation = wrap_bin.join("observed-restore");
+        let source = read_journal(repo)
+            .pointer("/state/source")
+            .and_then(serde_json::Value::as_str)
+            .or_abort()
+            .to_owned();
+
+        let before = snapshot_selection(repo);
+        let mut expectation = GitFactorExpectation::default()
+            .code(EXIT_SOFTWARE)
+            .stderr("git command failed: git read-tree failed (exit 1)\n");
+        expectation.stdout = Some(StreamExpectation::new_exact(String::new()));
 
         run_git_factor_with_env(
             repo,
             &["--finish", "--message", "test: finish"],
-            GitFactorExpectation::default()
-                .code(EXIT_SOFTWARE)
-                .stderr("git command failed: git restore failed (exit 1)\n"),
+            expectation,
             "PATH",
             format!("{}:{}", wrap_bin.display(), env::var("PATH").or_abort()),
         );
+        assert_eq!(
+            fs::read_to_string(observation).or_abort(),
+            format!("read-tree\n{source}\nreal-index\n")
+        );
+        assert_eq!(snapshot_selection(repo), before);
+        assert_eq!(fs::read(repo.join("file.txt")).or_abort(), b"one\ntwo\n");
     }
 
     #[test]
@@ -4703,10 +5024,7 @@ fi
     fn finish_reports_restore_failure_before_message_resolution() {
         let dir = init_repo();
         let repo = dir.path();
-
         commit_file(repo, "file.txt", "one\n", "chore: base");
-
-        // Create an "empty message" commit we can later finish.
         git(
             repo,
             &[
@@ -4717,67 +5035,76 @@ fi
                 "",
             ],
         );
-
-        // Wrapper: force restore to fail so finish exits before message lookup.
+        let head = git(repo, &["rev-parse", "HEAD"]);
+        let refs = git(repo, &["show-ref"]);
+        let index = fs::read(git_dir(repo).join("index")).or_abort();
         let (wrap_dir, wrap_bin) = make_git_wrapper_named(
             "git",
             r#"if [ "${1-}" = "restore" ] && [ "${2-}" = "--source" ]; then
+  : > .git/unexpected-restore
   exit 1
 fi
 "#,
         );
         let _keep_alive = wrap_dir;
-
-        let wrapped_path = format!("{}:{}", wrap_bin.display(), env::var("PATH").or_abort());
-        run_git_factor_with_env(
-            repo,
-            &["--exec", "true", "HEAD"],
-            GitFactorExpectation::default(),
-            "PATH",
-            wrapped_path.clone(),
-        );
-
-        // Finish with the wrapper-enabled PATH so restore failure triggers.
+        let path = format!("{}:{}", wrap_bin.display(), env::var("PATH").or_abort());
+        run_git_factor_with_env(repo, &["--exec", "true", "HEAD"], GitFactorExpectation::default().code(EXIT_DATAERR).stdout("{\"operation\":\"start\",\"reason\":\"empty_change\",\"result\":\"refused\"}\n").factor_state_exists(false).rebase_merge_exists(false), "PATH", path.clone());
         run_git_factor_with_env(
             repo,
             &["--finish"],
             GitFactorExpectation::default()
-                .code(EXIT_SOFTWARE)
-                .stderr("git command failed: git restore failed (exit 1)\n"),
+                .code(EXIT_USAGE)
+                .stderr("no active factor session\n"),
             "PATH",
-            wrapped_path,
+            path,
         );
+        assert_eq!(git(repo, &["rev-parse", "HEAD"]), head);
+        assert_eq!(git(repo, &["show-ref"]), refs);
+        assert_eq!(fs::read(git_dir(repo).join("index")).or_abort(), index);
+        assert_eq!(fs::read(repo.join("file.txt")).or_abort(), b"one\n");
+        assert_eq!(
+            git(repo, &["show", "--format=%B", "--no-patch", "HEAD"]),
+            ""
+        );
+        assert!(!git_dir(repo).join("unexpected-restore").exists());
     }
 
     #[test]
-    fn finish_rejects_empty_original_message_when_no_message_provided() {
+    fn start_rejects_empty_original_message_before_session_publication() {
         let dir = init_repo();
         let repo = dir.path();
-
         commit_file(repo, "file.txt", "one\n", "chore: base");
-        git(
-            repo,
-            &[
-                "commit",
-                "--allow-empty",
-                "--allow-empty-message",
-                "--message",
-                "",
-            ],
-        );
+        write_file(repo, "file.txt", "one\ntwo\n");
+        git(repo, &["add", "file.txt"]);
+        git(repo, &["commit", "--allow-empty-message", "--message", ""]);
+        write_file(repo, "unrelated.txt", "preserve user bytes\n");
+        let head = git(repo, &["rev-parse", "HEAD"]);
+        let index = fs::read(git_dir(repo).join("index")).or_abort();
+        let refs = git(repo, &["show-ref"]);
 
-        start_session(repo);
+        let mut expectation = GitFactorExpectation::default()
+            .code(EXIT_SOFTWARE)
+            .stderr("git command failed: empty candidate source message: value must not be empty\n")
+            .factor_state_exists(false)
+            .rebase_merge_exists(false)
+            .rebase_apply_exists(false);
+        expectation.stdout = Some(StreamExpectation::new_exact(String::new()));
 
-        // Stage everything and attempt to finish with no message; tool should
-        // refuse to reuse an empty original message.
-        git(repo, &["add", "--all"]);
-        run_git_factor(
-            repo,
-            &["--finish"],
-            GitFactorExpectation::default()
-                .code(EXIT_SOFTWARE)
-                .stderr("git command failed: original commit has empty message\n"),
+        run_git_factor(repo, &["--exec", "true", "HEAD"], expectation);
+
+        assert_eq!(git(repo, &["rev-parse", "HEAD"]), head);
+        assert_eq!(fs::read(git_dir(repo).join("index")).or_abort(), index);
+        assert_eq!(git(repo, &["show-ref"]), refs);
+        assert_eq!(
+            git(repo, &["show", "--format=%B", "--no-patch", "HEAD"]),
+            ""
         );
+        assert_eq!(fs::read(repo.join("file.txt")).or_abort(), b"one\ntwo\n");
+        assert_eq!(
+            fs::read(repo.join("unrelated.txt")).or_abort(),
+            b"preserve user bytes\n"
+        );
+        assert!(!git_dir(repo).join("factor").exists());
     }
 
     #[test]
@@ -4788,44 +5115,61 @@ fi
         commit_file(repo, "file.txt", "one\n", "chore: base");
         commit_file(repo, "file.txt", "one\ntwo\n", "feat: change");
 
-        // Wrapper: force `git write-tree` (used for actual tree) to return a bogus value.
-        let (wrap_dir, wrap_bin) = make_git_wrapper_named(
-            "git",
-            r#"if [ "${1-}" = "write-tree" ]; then
-  echo "0000000000000000000000000000000000000000"
-  exit 0
-fi
-"#,
-        );
-        let _keep_alive = wrap_dir;
-
-        let wrapped_path = format!("{}:{}", wrap_bin.display(), env::var("PATH").or_abort());
-        run_git_factor_with_env(
-            repo,
-            &["--exec", "true", "HEAD"],
-            GitFactorExpectation::default(),
-            "PATH",
-            wrapped_path.clone(),
-        );
-        let original_commit = fs::read_to_string(git_dir(repo).join("factor/commits"))
-            .or_abort()
-            .lines()
-            .next()
+        let actual_tree = git(repo, &["rev-parse", "HEAD~1^{tree}"]);
+        start_session(repo);
+        let expected_tree = read_journal(repo)
+            .get("final_tree")
+            .and_then(serde_json::Value::as_str)
             .or_abort()
             .to_owned();
-        let expected_tree = git(repo, &["rev-parse", &format!("{original_commit}^{{tree}}")]);
-        let actual_tree = "0000000000000000000000000000000000000000";
+        assert_ne!(expected_tree, actual_tree);
+        git(repo, &["read-tree", expected_tree.as_str()]);
+        // Falsify only the remaining selection's private observed tree with a real base tree.
+        let (wrap_dir, wrap_bin) = make_git_wrapper_named(
+            "git",
+            &format!(
+                r#"if [ "$#" -eq 3 ] && [ "${{1-}}" = "-c" ] && [ "${{2-}}" = "core.splitIndex=false" ] && [ "${{3-}}" = "write-tree" ]; then
+  case "${{GIT_INDEX_FILE-}}" in
+    */selection-index)
+      printf '%s\n' "$@" 'selection-index' >> "$(dirname "$0")/observed-tree"
+      printf '%s\n' '{actual_tree}'
+      exit 0
+      ;;
+  esac
+fi
+"#
+            ),
+        );
+        let _keep_alive = wrap_dir;
+        let observation = wrap_bin.join("observed-tree");
+        let wrapped_path = format!("{}:{}", wrap_bin.display(), env::var("PATH").or_abort());
+        let diagnostic =
+            format!("tree hash mismatch: expected {expected_tree}, got {actual_tree}\n");
+        let before = snapshot_selection(repo);
+
+        let mut expectation = GitFactorExpectation::default()
+            .code(EXIT_TEMPFAIL)
+            .stderr(diagnostic);
+        expectation.stdout = Some(StreamExpectation::new_exact(String::new()));
 
         run_git_factor_with_env(
             repo,
             &["--finish", "--message", "test: finish"],
-            GitFactorExpectation::default()
-                .code(EXIT_TEMPFAIL)
-                .stderr(format!(
-                    "tree hash mismatch: expected {expected_tree}, got {actual_tree}\n"
-                )),
+            expectation,
             "PATH",
             wrapped_path,
+        );
+        assert_eq!(
+            fs::read_to_string(observation).or_abort(),
+            "-c\ncore.splitIndex=false\nwrite-tree\nselection-index\n"
+        );
+        assert_eq!(snapshot_selection(repo), before);
+        assert_eq!(fs::read(repo.join("file.txt")).or_abort(), b"one\ntwo\n");
+        assert_eq!(
+            read_journal(repo)
+                .get("final_tree")
+                .and_then(serde_json::Value::as_str),
+            Some(expected_tree.as_str())
         );
     }
 
@@ -4896,7 +5240,9 @@ fi
         run_git_factor_with_env(
             repo,
             &["--continue", "--message", "test: slice"],
-            GitFactorExpectation::default(),
+            GitFactorExpectation::default()
+                .code(EXIT_SOFTWARE)
+                .stderr("git command failed: fatal: unexpected original tree lookup\n"),
             "PATH",
             format!("{}:{}", wrap_bin.display(), env::var("PATH").or_abort()),
         );
@@ -4913,6 +5259,7 @@ fi
         start_session(repo);
         write_file(repo, "file.txt", "base\nslice\n");
         git(repo, &["add", "file.txt"]);
+        write_file(repo, "file.txt", "base\nchange\n");
 
         let (wrap_dir, wrap_bin) = make_git_wrapper_named(
             "git",
@@ -4936,43 +5283,74 @@ fi
     }
 
     #[test]
-    fn continue_reports_tree_hash_mismatch_after_restore() {
+    fn continue_reports_remaining_selection_tree_hash_mismatch() {
         let dir = init_repo();
         let repo = dir.path();
 
         commit_file(repo, "file.txt", "base\n", "chore: base");
         commit_file(repo, "file.txt", "base\nchange\n", "feat: change");
 
+        let actual_tree = git(repo, &["rev-parse", "HEAD~1^{tree}"]);
         start_session(repo);
         write_file(repo, "file.txt", "base\nslice\n");
         git(repo, &["add", "file.txt"]);
+        write_file(repo, "file.txt", "base\nchange\n");
 
+        let expected_tree = read_journal(repo)
+            .get("final_tree")
+            .and_then(serde_json::Value::as_str)
+            .or_abort()
+            .to_owned();
+        assert_ne!(expected_tree, actual_tree);
+        // Falsify only the remaining selection's private observed tree with a real base tree.
         let (wrap_dir, wrap_bin) = make_git_wrapper_named(
             "git",
-            r#"if [ "${1-}" = "write-tree" ]; then
-  echo "0000000000000000000000000000000000000000"
-  exit 0
+            &format!(
+                r#"if [ "$#" -eq 3 ] && [ "${{1-}}" = "-c" ] && [ "${{2-}}" = "core.splitIndex=false" ] && [ "${{3-}}" = "write-tree" ]; then
+  case "${{GIT_INDEX_FILE-}}" in
+    */selection-index)
+      printf '%s\n' "$@" 'selection-index' >> "$(dirname "$0")/observed-tree"
+      printf '%s\n' '{actual_tree}'
+      exit 0
+      ;;
+  esac
 fi
-"#,
+"#
+            ),
         );
         let _keep_alive = wrap_dir;
+        let observation = wrap_bin.join("observed-tree");
+        let wrapped_path = format!("{}:{}", wrap_bin.display(), env::var("PATH").or_abort());
+        let diagnostic =
+            format!("tree hash mismatch: expected {expected_tree}, got {actual_tree}\n");
+        let before = snapshot_selection(repo);
 
-        let expected_tree = fs::read_to_string(git_dir(repo).join("factor/expected_tree"))
-            .or_abort()
-            .trim()
-            .to_owned();
-        let actual_tree = "0000000000000000000000000000000000000000";
+        let mut expectation = GitFactorExpectation::default()
+            .code(EXIT_TEMPFAIL)
+            .stderr(diagnostic);
+        expectation.stdout = Some(StreamExpectation::new_exact(String::new()));
 
         run_git_factor_with_env(
             repo,
             &["--continue", "--message", "test: partial split"],
-            GitFactorExpectation::default()
-                .code(EXIT_TEMPFAIL)
-                .stderr(format!(
-                    "tree hash mismatch: expected {expected_tree}, got {actual_tree}\n"
-                )),
+            expectation,
             "PATH",
-            format!("{}:{}", wrap_bin.display(), env::var("PATH").or_abort()),
+            wrapped_path,
+        );
+        assert_eq!(
+            fs::read_to_string(observation).or_abort(),
+            "-c\ncore.splitIndex=false\nwrite-tree\nselection-index\n"
+        );
+        assert_eq!(snapshot_selection(repo), before);
+        assert_eq!(
+            fs::read(repo.join("file.txt")).or_abort(),
+            b"base\nchange\n"
+        );
+        assert_eq!(
+            read_journal(repo)
+                .get("final_tree")
+                .and_then(serde_json::Value::as_str),
+            Some(expected_tree.as_str())
         );
     }
 
@@ -4985,7 +5363,6 @@ fi
         commit_file(repo, "file.txt", "one\ntwo\n", "feat: change");
 
         start_session(repo);
-        fs::remove_file(git_dir(repo).join("factor/expected_tree")).or_abort();
 
         let (wrap_dir, wrap_bin) = make_git_wrapper_named(
             "git",
@@ -5016,31 +5393,51 @@ fi
     fn abort_does_not_attempt_git_rebase_abort_for_external_rebase() {
         let dir = init_repo();
         let repo = dir.path();
-
         commit_file(repo, "file.txt", "one\n", "chore: base");
-        start_session(repo);
-        fs::create_dir_all(git_dir(repo).join("rebase-merge")).or_abort();
-
-        // If git-factor calls `git rebase --abort`, this wrapper forces a failure.
+        let paused = Command::new(native_git_bin())
+            .args(["rebase", "--root", "--exec", "false"])
+            .current_dir(repo)
+            .output()
+            .or_abort();
+        assert!(!paused.status.success());
+        let head = git(repo, &["rev-parse", "HEAD"]);
+        let refs = git(repo, &["show-ref"]);
+        let index = fs::read(git_dir(repo).join("index")).or_abort();
+        let native = legacy_inventory(&git_dir(repo).join("rebase-merge"));
+        fs::write(repo.join("unrelated.txt"), "preserve external work\n").or_abort();
         let (wrap_dir, wrap_bin) = make_git_wrapper_named(
             "git",
             r#"if [ "${1-}" = "rebase" ] && [ "${2-}" = "--abort" ]; then
+  : > .git/unexpected-factor-abort
   exit 1
 fi
 "#,
         );
         let _keep_alive = wrap_dir;
-
         run_git_factor_with_env(
             repo,
             &["--abort"],
             GitFactorExpectation::default()
-                .stdout("{\"operation\":\"abort\",\"rebase\":{\"in_progress\":true},\"actions\":{\"abort_rebase\":[\"git\",\"rebase\",\"--abort\"]}}\n")
+                .code(EXIT_USAGE)
+                .stderr("no active factor session\n")
                 .rebase_merge_exists(true)
                 .factor_state_exists(false),
             "PATH",
             format!("{}:{}", wrap_bin.display(), env::var("PATH").or_abort()),
         );
+        assert_eq!(git(repo, &["rev-parse", "HEAD"]), head);
+        assert_eq!(git(repo, &["show-ref"]), refs);
+        assert_eq!(fs::read(git_dir(repo).join("index")).or_abort(), index);
+        assert_eq!(
+            legacy_inventory(&git_dir(repo).join("rebase-merge")),
+            native
+        );
+        assert_eq!(fs::read(repo.join("file.txt")).or_abort(), b"one\n");
+        assert_eq!(
+            fs::read(repo.join("unrelated.txt")).or_abort(),
+            b"preserve external work\n"
+        );
+        assert!(!git_dir(repo).join("unexpected-factor-abort").exists());
     }
 
     #[test]
@@ -5055,48 +5452,48 @@ fi
             repo,
             &["--exec", "true"],
             GitFactorExpectation::default().code(EXIT_SOFTWARE).stderr(
-                "git command failed: working tree must be clean before starting; stash, commit, or remove local changes\nSTATUS:\n M file.txt\n",
+                "git command failed: tracked working tree and staged tree must match HEAD\n",
             ),
         );
     }
 
     #[test]
+    #[expect(
+        clippy::create_dir,
+        reason = "Owned legacy fixture paths must be fresh; an existing path is a setup error"
+    )]
     fn abort_falls_back_to_current_commit_when_start_head_state_is_missing() {
-        let dir = init_repo();
-        let repo = dir.path();
-
+        let directory = init_repo();
+        let repo = directory.path();
         commit_file(repo, "file.txt", "one\n", "chore: base");
-        commit_file(repo, "file.txt", "one\ntwo\n", "feat: change");
-
-        start_session(repo);
-        fs::remove_file(git_dir(repo).join("factor/start_head")).or_abort();
-
-        run_git_factor(
-            repo,
-            &["--abort"],
-            GitFactorExpectation::default()
-                .stdout(
-                    "{\"operation\":\"abort\",\"rebase\":{\"in_progress\":false},\"actions\":{}}\n",
-                )
-                .factor_state_exists(false),
-        );
+        let state = git_dir(repo).join("factor");
+        fs::create_dir(&state).or_abort();
+        fs::write(
+            state.join("commits"),
+            format!("{}\n", git(repo, &["rev-parse", "HEAD"])),
+        )
+        .or_abort();
+        fs::write(state.join("current_index"), b"0\n").or_abort();
+        fs::write(state.join("exec"), b"true\n").or_abort();
+        fs::write(state.join("split_count"), b"0\n").or_abort();
+        fs::write(state.join("requires_rebase"), b"false\n").or_abort();
+        verify_legacy_session_refusal(repo, &["--abort"]);
     }
 
     #[test]
-    fn continue_reports_truncated_commit_metadata_from_git_show() {
+    fn continue_reports_truncated_commit_metadata_from_raw_commit() {
         let dir = init_repo();
         let repo = dir.path();
 
         commit_file(repo, "file.txt", "one\n", "chore: base");
         commit_file(repo, "file.txt", "one\ntwo\n", "feat: change");
-        let original_commit = git(repo, &["rev-parse", "HEAD"]);
 
         start_session(repo);
         git(repo, &["add", "--all"]);
 
         let (wrap_dir, wrap_bin) = make_git_wrapper_named(
             "git",
-            r#"if [ "${1-}" = "show" ] && [ "${2-}" = "--format=%an%x00%ae%x00%aI%x00%cn%x00%ce%x00%cI" ] && [ "${3-}" = "--no-patch" ]; then
+            r#"if [ "${1-}" = "cat-file" ] && [ "${2-}" = "commit" ]; then
   printf "only-one-field\n"
   exit 0
 fi
@@ -5107,44 +5504,80 @@ fi
         run_git_factor_with_env(
             repo,
             &["--continue", "--message", "test: split"],
-            GitFactorExpectation::default().code(EXIT_SOFTWARE).stderr(format!(
-                "git command failed: truncated commit metadata: expected 6 fields, got 1 for {original_commit}\n"
-            )),
+            GitFactorExpectation::default()
+                .code(EXIT_SOFTWARE)
+                .stderr("git command failed: truncated candidate author metadata\n"),
             "PATH",
             format!("{}:{}", wrap_bin.display(), env::var("PATH").or_abort()),
         );
     }
 
     #[test]
-    fn start_removes_state_path_when_rebase_failure_rewrites_state_dir_as_file() {
+    fn start_preserves_foreign_scratch_file_when_rebase_launch_fails() {
         let dir = init_repo();
         let repo = dir.path();
 
         commit_file(repo, "file.txt", "one\n", "chore: base");
         commit_file(repo, "file.txt", "one\ntwo\n", "feat: change");
 
+        write_file(repo, "unrelated.txt", "preserve opening user bytes\n");
+        let before_head = git(repo, &["rev-parse", "HEAD"]);
+        let before_index = fs::read(git_dir(repo).join("index")).or_abort();
+        let before_refs = git(repo, &["show-ref", "--heads", "--tags"]);
+        let before_file = fs::read(repo.join("file.txt")).or_abort();
         let (wrap_dir, wrap_bin) = make_git_wrapper_named(
             "git",
-            r#"if [ "${1-}" = "rebase" ]; then
+            r#"if [ "$#" -eq 13 ] && [ "${1-}" = "-c" ] && [ "${2-}" = "rebase.missingCommitsCheck=ignore" ] && [ "${3-}" = "rebase" ] && [ "${4-}" = "--interactive" ]; then
+  printf '%s\n' "$@" >> "$(dirname "$0")/observed-opening"
   rm -rf .git/factor
   : > .git/factor
   exit 1
 fi
 "#,
         );
+        let expected_base = "--root".to_owned();
         let _keep_alive = wrap_dir;
+        let observation = wrap_bin.join("observed-opening");
 
         run_git_factor_with_env(
             repo,
             &["--exec", "true", "HEAD~1"],
             GitFactorExpectation::default()
-                .code(EXIT_SOFTWARE)
-                .stderr_suffix("git command failed: git rebase failed (exit 1)\n")
-                .factor_state_exists(false)
-                .path_exists(".git/factor", false),
+                .code(EXIT_TEMPFAIL)
+                .stdout(expected_recovery_stdout("start"))
+                .factor_state_exists(true)
+                .path_exists(".git/factor", true),
             "PATH",
             format!("{}:{}", wrap_bin.display(), env::var("PATH").or_abort()),
         );
+        assert!(git_dir(repo).join("factor").is_file());
+        assert_eq!(fs::read(git_dir(repo).join("factor")).or_abort(), b"");
+        assert!(checkpoint_journal(repo).is_file());
+        assert_eq!(
+            fs::read_to_string(observation).or_abort(),
+            format!(
+                "-c\nrebase.missingCommitsCheck=ignore\nrebase\n--interactive\n--no-ff\n--reschedule-failed-exec\n--no-update-refs\n--no-autostash\n--no-autosquash\n--no-rebase-merges\n--empty=keep\n--keep-empty\n{expected_base}\n"
+            )
+        );
+        assert_eq!(git(repo, &["rev-parse", "HEAD"]), before_head);
+        assert_eq!(
+            fs::read(git_dir(repo).join("index")).or_abort(),
+            before_index
+        );
+        assert_eq!(git(repo, &["show-ref", "--heads", "--tags"]), before_refs);
+        assert_eq!(fs::read(repo.join("file.txt")).or_abort(), before_file);
+        assert_eq!(
+            fs::read(repo.join("unrelated.txt")).or_abort(),
+            b"preserve opening user bytes\n"
+        );
+        assert_eq!(
+            read_journal(repo)
+                .pointer("/state/phase")
+                .and_then(serde_json::Value::as_str),
+            Some("opening")
+        );
+        assert!(!git_dir(repo).join("rebase-merge").exists());
+        assert!(!git_dir(repo).join("rebase-apply").exists());
     }
 
     #[test]
@@ -5155,12 +5588,24 @@ fi
         commit_file(repo, "file.txt", "one\n", "chore: base");
         commit_file(repo, "file.txt", "one\ntwo\n", "feat: change");
         start_session(repo);
+        let checkpoint = read_journal(repo)
+            .get("checkpoint")
+            .and_then(serde_json::Value::as_str)
+            .or_abort()
+            .to_owned();
+        let original_tree = git(repo, &["rev-parse", &format!("{checkpoint}^{{tree}}")]);
+        fs::write(repo.join("unrelated.txt"), "preserve abort scratch\n").or_abort();
 
         let (wrap_dir, wrap_bin) = make_git_wrapper_named(
             "git",
             r#"if [ "${1-}" = "clean" ]; then
+  : > .git/unexpected-clean
   rm -rf .git/factor
   : > .git/factor
+fi
+if [ "${1-}" = "reset" ] && [ "${2-}" = "--hard" ]; then
+  : > .git/unexpected-manual-reset
+  exit 1
 fi
 "#,
         );
@@ -5178,6 +5623,15 @@ fi
             "PATH",
             format!("{}:{}", wrap_bin.display(), env::var("PATH").or_abort()),
         );
+        assert_eq!(git(repo, &["rev-parse", "HEAD"]), checkpoint);
+        assert_eq!(git(repo, &["rev-parse", "HEAD^{tree}"]), original_tree);
+        assert_eq!(fs::read(repo.join("file.txt")).or_abort(), b"one\ntwo\n");
+        assert_eq!(
+            fs::read(repo.join("unrelated.txt")).or_abort(),
+            b"preserve abort scratch\n"
+        );
+        assert!(!git_dir(repo).join("unexpected-clean").exists());
+        assert!(!git_dir(repo).join("unexpected-manual-reset").exists());
     }
 
     #[test]
@@ -5246,12 +5700,16 @@ fi
             repo,
             &["--continue", "--message", "test: first"],
             GitFactorExpectation::default()
-                .stdout_suffix(expected_completion_stdout_suffix("continue", 1))
-                .factor_state_exists(false)
-                .path_exists(".git/factor", false),
+                .code(EXIT_TEMPFAIL)
+                .stdout(expected_recovery_stdout("continue"))
+                .factor_state_exists(true)
+                .path_exists(".git/factor", true),
             "PATH",
             format!("{}:{}", wrap_bin.display(), env::var("PATH").or_abort()),
         );
+        assert!(git_dir(repo).join("factor").is_file());
+        assert_eq!(fs::read(git_dir(repo).join("factor")).or_abort(), b"");
+        assert!(checkpoint_journal(repo).is_file());
     }
 
     #[test]
@@ -5273,6 +5731,7 @@ fi
         let (wrap_dir, wrap_bin) = make_git_wrapper_named(
             "git",
             r#"if [ "${1-}" = "rebase" ] && [ "${2-}" = "--continue" ]; then
+  echo 'owned native replay failure' >&2
   exit 1
 fi
 "#,
@@ -5283,9 +5742,12 @@ fi
         run_git_factor_with_env(
             repo,
             &["--continue", "--message", "test: first"],
-            GitFactorExpectation::default().code(EXIT_SOFTWARE).stderr(
-                "git command failed: git command failed: git rebase failed (exit 1)\n\nResolve the rebase issue, then rerun 'git rebase --continue'.\nTo abandon the factor session, run 'git factor --abort'\n",
-            ),
+            GitFactorExpectation::default()
+                .code(EXIT_TEMPFAIL)
+                .stderr_suffix("owned native replay failure\n")
+                .stdout(expected_recovery_stdout("continue"))
+                .factor_state_exists(true)
+                .rebase_merge_exists(true),
             "PATH",
             format!("{}:{}", wrap_bin.display(), env::var("PATH").or_abort()),
         );
@@ -5322,7 +5784,7 @@ fi
     }
 
     #[test]
-    fn continue_cleans_untracked_files_before_the_gate() {
+    fn continue_materializes_deleted_paths_reported_by_git_diff() {
         let dir = init_repo();
         let repo = dir.path();
 
@@ -5333,39 +5795,12 @@ fi
         git(repo, &["add", "--all"]);
         write_file(repo, "deleted-path.txt", "ephemeral\n");
 
-        run_git_factor(
-            repo,
-            &[
-                "--continue",
-                "--message",
-                "test: split after untracked cleanup",
-            ],
-            GitFactorExpectation::default(),
-        );
-
-        assert!(
-            !repo.join("deleted-path.txt").exists(),
-            "native cleanup should remove unrelated untracked files"
-        );
-    }
-
-    #[test]
-    fn abort_skips_rebase_abort_when_started_rebase_is_true_without_mid_rebase() {
-        let dir = init_repo();
-        let repo = dir.path();
-
-        commit_file(repo, "file.txt", "one\n", "chore: base");
-        commit_file(repo, "file.txt", "one\ntwo\n", "feat: change");
-        start_session(repo);
-
-        let state_dir = git_dir(repo).join("factor");
-        fs::write(state_dir.join("started_rebase"), "true\n").or_abort();
-        fs::write(state_dir.join("requires_rebase"), "true\n").or_abort();
-
         let (wrap_dir, wrap_bin) = make_git_wrapper_named(
             "git",
-            r#"if [ "${1-}" = "rebase" ] && [ "${2-}" = "--abort" ]; then
-  exit 1
+            r#"if [ "${1-}" = "diff" ] && [ "${2-}" = "--diff-filter=D" ] && [ "${3-}" = "--name-only" ] && [ "${4-}" = "--staged" ]; then
+  : > .git/unexpected-deletion-query
+  printf "deleted-path.txt\n \n"
+  exit 0
 fi
 "#,
         );
@@ -5373,15 +5808,50 @@ fi
 
         run_git_factor_with_env(
             repo,
-            &["--abort"],
-            GitFactorExpectation::default()
-                .stdout(
-                    "{\"operation\":\"abort\",\"rebase\":{\"in_progress\":false},\"actions\":{}}\n",
-                )
-                .factor_state_exists(false),
+            &[
+                "--continue",
+                "--message",
+                "test: split with forced delete list",
+            ],
+            GitFactorExpectation::default(),
             "PATH",
             format!("{}:{}", wrap_bin.display(), env::var("PATH").or_abort()),
         );
+
+        assert!(
+            repo.join("deleted-path.txt").exists(),
+            "unrelated deletion-list bytes must remain outside selection ownership"
+        );
+        assert_eq!(
+            fs::read(repo.join("deleted-path.txt")).or_abort(),
+            b"ephemeral\n"
+        );
+        assert!(!git_dir(repo).join("unexpected-deletion-query").exists());
+    }
+
+    #[test]
+    #[expect(
+        clippy::create_dir,
+        reason = "Owned legacy fixture paths must be fresh; an existing path is a setup error"
+    )]
+    fn abort_skips_rebase_abort_when_started_rebase_is_true_without_mid_rebase() {
+        let directory = init_repo();
+        let repo = directory.path();
+        commit_file(repo, "file.txt", "one\n", "chore: base");
+        let state = git_dir(repo).join("factor");
+        fs::create_dir(&state).or_abort();
+        fs::write(
+            state.join("commits"),
+            format!("{}\n", git(repo, &["rev-parse", "HEAD"])),
+        )
+        .or_abort();
+        fs::write(state.join("current_index"), b"0\n").or_abort();
+        fs::write(state.join("exec"), b"true\n").or_abort();
+        fs::write(state.join("split_count"), b"0\n").or_abort();
+        fs::write(state.join("requires_rebase"), b"false\n").or_abort();
+        fs::write(state.join("started_rebase"), b"true\n").or_abort();
+        fs::write(state.join("requires_rebase"), b"true\n").or_abort();
+        verify_legacy_session_refusal(repo, &["--abort"]);
     }
 
     #[test]
@@ -5469,69 +5939,76 @@ fi
     }
 
     #[test]
+    #[expect(
+        clippy::create_dir,
+        reason = "Owned legacy fixture paths must be fresh; an existing path is a setup error"
+    )]
     fn abort_reports_unreadable_requires_rebase_state() {
-        let dir = init_repo();
-        let repo = dir.path();
-
+        let directory = init_repo();
+        let repo = directory.path();
         commit_file(repo, "file.txt", "one\n", "chore: base");
-        commit_file(repo, "file.txt", "one\ntwo\n", "feat: change");
-        start_session(repo);
-
-        let unreadable_path = git_dir(repo).join("factor/requires_rebase");
-        fs::remove_file(&unreadable_path).or_abort();
-        fs::create_dir_all(&unreadable_path).or_abort();
-
-        run_git_factor(
-            repo,
-            &["--abort"],
-            GitFactorExpectation::default()
-                .code(EXIT_SOFTWARE)
-                .stderr("failed to read state: Is a directory (os error 21)\n"),
-        );
+        let state = git_dir(repo).join("factor");
+        fs::create_dir(&state).or_abort();
+        fs::write(
+            state.join("commits"),
+            format!("{}\n", git(repo, &["rev-parse", "HEAD"])),
+        )
+        .or_abort();
+        fs::write(state.join("current_index"), b"0\n").or_abort();
+        fs::write(state.join("exec"), b"true\n").or_abort();
+        fs::write(state.join("split_count"), b"0\n").or_abort();
+        fs::write(state.join("requires_rebase"), b"false\n").or_abort();
+        fs::remove_file(state.join("requires_rebase")).or_abort();
+        fs::create_dir(state.join("requires_rebase")).or_abort();
+        verify_legacy_session_refusal(repo, &["--abort"]);
     }
 
     #[test]
+    #[expect(
+        clippy::create_dir,
+        reason = "Owned legacy fixture paths must be fresh; an existing path is a setup error"
+    )]
     fn abort_reports_unreadable_started_rebase_state() {
-        let dir = init_repo();
-        let repo = dir.path();
-
+        let directory = init_repo();
+        let repo = directory.path();
         commit_file(repo, "file.txt", "one\n", "chore: base");
-        commit_file(repo, "file.txt", "one\ntwo\n", "feat: change");
-        start_session(repo);
-
-        let unreadable_path = git_dir(repo).join("factor/started_rebase");
-        fs::remove_file(&unreadable_path).or_abort();
-        fs::create_dir_all(&unreadable_path).or_abort();
-
-        run_git_factor(
-            repo,
-            &["--abort"],
-            GitFactorExpectation::default()
-                .code(EXIT_SOFTWARE)
-                .stderr("failed to read state: Is a directory (os error 21)\n"),
-        );
+        let state = git_dir(repo).join("factor");
+        fs::create_dir(&state).or_abort();
+        fs::write(
+            state.join("commits"),
+            format!("{}\n", git(repo, &["rev-parse", "HEAD"])),
+        )
+        .or_abort();
+        fs::write(state.join("current_index"), b"0\n").or_abort();
+        fs::write(state.join("exec"), b"true\n").or_abort();
+        fs::write(state.join("split_count"), b"0\n").or_abort();
+        fs::write(state.join("requires_rebase"), b"false\n").or_abort();
+        fs::create_dir(state.join("started_rebase")).or_abort();
+        verify_legacy_session_refusal(repo, &["--abort"]);
     }
 
     #[test]
+    #[expect(
+        clippy::create_dir,
+        reason = "Owned legacy fixture paths must be fresh; an existing path is a setup error"
+    )]
     fn abort_reports_missing_current_commit_when_start_head_is_missing() {
-        let dir = init_repo();
-        let repo = dir.path();
-
+        let directory = init_repo();
+        let repo = directory.path();
         commit_file(repo, "file.txt", "one\n", "chore: base");
-        commit_file(repo, "file.txt", "one\ntwo\n", "feat: change");
-        start_session(repo);
-
-        let state_dir = git_dir(repo).join("factor");
-        fs::remove_file(state_dir.join("start_head")).or_abort();
-        fs::remove_file(state_dir.join("commits")).or_abort();
-
-        run_git_factor(
-            repo,
-            &["--abort"],
-            GitFactorExpectation::default()
-                .code(EXIT_SOFTWARE)
-                .stderr("failed to read state: No such file or directory (os error 2)\n"),
-        );
+        let state = git_dir(repo).join("factor");
+        fs::create_dir(&state).or_abort();
+        fs::write(
+            state.join("commits"),
+            format!("{}\n", git(repo, &["rev-parse", "HEAD"])),
+        )
+        .or_abort();
+        fs::write(state.join("current_index"), b"0\n").or_abort();
+        fs::write(state.join("exec"), b"true\n").or_abort();
+        fs::write(state.join("split_count"), b"0\n").or_abort();
+        fs::write(state.join("requires_rebase"), b"false\n").or_abort();
+        fs::remove_file(state.join("commits")).or_abort();
+        verify_legacy_session_refusal(repo, &["--abort"]);
     }
 
     #[test]
@@ -5542,10 +6019,22 @@ fi
         commit_file(repo, "file.txt", "one\n", "chore: base");
         commit_file(repo, "file.txt", "one\ntwo\n", "feat: change");
         start_session(repo);
+        let checkpoint = read_journal(repo)
+            .get("checkpoint")
+            .and_then(serde_json::Value::as_str)
+            .or_abort()
+            .to_owned();
+        let original_tree = git(repo, &["rev-parse", &format!("{checkpoint}^{{tree}}")]);
+        fs::write(repo.join("unrelated.txt"), "preserve abort scratch\n").or_abort();
 
         let (wrap_dir, wrap_bin) = make_git_wrapper_named(
             "git",
             r#"if [ "${1-}" = "reset" ] && [ "${2-}" = "--hard" ]; then
+  : > .git/unexpected-manual-reset
+  exit 1
+fi
+if [ "${1-}" = "clean" ]; then
+  : > .git/unexpected-clean
   exit 1
 fi
 "#,
@@ -5555,12 +6044,21 @@ fi
         run_git_factor_with_env(
             repo,
             &["--abort"],
-            GitFactorExpectation::default()
-                .code(EXIT_SOFTWARE)
-                .stderr("git command failed: git reset failed (exit 1)\n"),
+            GitFactorExpectation::default().stdout(
+                "{\"operation\":\"abort\",\"rebase\":{\"in_progress\":false},\"actions\":{}}\n",
+            ),
             "PATH",
             format!("{}:{}", wrap_bin.display(), env::var("PATH").or_abort()),
         );
+        assert_eq!(git(repo, &["rev-parse", "HEAD"]), checkpoint);
+        assert_eq!(git(repo, &["rev-parse", "HEAD^{tree}"]), original_tree);
+        assert_eq!(fs::read(repo.join("file.txt")).or_abort(), b"one\ntwo\n");
+        assert_eq!(
+            fs::read(repo.join("unrelated.txt")).or_abort(),
+            b"preserve abort scratch\n"
+        );
+        assert!(!git_dir(repo).join("unexpected-clean").exists());
+        assert!(!git_dir(repo).join("unexpected-manual-reset").exists());
     }
 
     #[test]
@@ -5571,10 +6069,22 @@ fi
         commit_file(repo, "file.txt", "one\n", "chore: base");
         commit_file(repo, "file.txt", "one\ntwo\n", "feat: change");
         start_session(repo);
+        let checkpoint = read_journal(repo)
+            .get("checkpoint")
+            .and_then(serde_json::Value::as_str)
+            .or_abort()
+            .to_owned();
+        let original_tree = git(repo, &["rev-parse", &format!("{checkpoint}^{{tree}}")]);
+        fs::write(repo.join("unrelated.txt"), "preserve abort scratch\n").or_abort();
 
         let (wrap_dir, wrap_bin) = make_git_wrapper_named(
             "git",
             r#"if [ "${1-}" = "clean" ] && [ "${2-}" = "--force" ]; then
+  : > .git/unexpected-clean
+  exit 1
+fi
+if [ "${1-}" = "reset" ] && [ "${2-}" = "--hard" ]; then
+  : > .git/unexpected-manual-reset
   exit 1
 fi
 "#,
@@ -5584,12 +6094,21 @@ fi
         run_git_factor_with_env(
             repo,
             &["--abort"],
-            GitFactorExpectation::default()
-                .code(EXIT_SOFTWARE)
-                .stderr("git command failed: git clean failed (exit 1)\n"),
+            GitFactorExpectation::default().stdout(
+                "{\"operation\":\"abort\",\"rebase\":{\"in_progress\":false},\"actions\":{}}\n",
+            ),
             "PATH",
             format!("{}:{}", wrap_bin.display(), env::var("PATH").or_abort()),
         );
+        assert_eq!(git(repo, &["rev-parse", "HEAD"]), checkpoint);
+        assert_eq!(git(repo, &["rev-parse", "HEAD^{tree}"]), original_tree);
+        assert_eq!(fs::read(repo.join("file.txt")).or_abort(), b"one\ntwo\n");
+        assert_eq!(
+            fs::read(repo.join("unrelated.txt")).or_abort(),
+            b"preserve abort scratch\n"
+        );
+        assert!(!git_dir(repo).join("unexpected-clean").exists());
+        assert!(!git_dir(repo).join("unexpected-manual-reset").exists());
     }
 
     #[test]
@@ -5606,6 +6125,557 @@ fi
             &["--unknown-flag"],
             GitFactorExpectation::default().code(EXIT_USAGE),
         );
+    }
+    #[test]
+    fn message_only_requires_an_active_session() {
+        let dir = init_repo();
+        let repo = dir.path();
+
+        commit_file(repo, "file.txt", "one\n", "chore: base");
+
+        run_git_factor(
+            repo,
+            &["--message", "test: msg"],
+            GitFactorExpectation::default()
+                .code(EXIT_USAGE)
+                .stderr("no active factor session\n"),
+        );
+    }
+
+    #[test]
+    fn finish_preserves_unrelated_branch_during_descendant_replay() {
+        let dir = init_repo();
+        let repo = dir.path();
+        commit_file(repo, "base.txt", "base\n", "Add base");
+        write_file(repo, "first.txt", "first\n");
+        write_file(repo, "second.txt", "second\n");
+        git(repo, &["add", "first.txt", "second.txt"]);
+        git(repo, &["commit", "--message", "Add selected changes"]);
+        let selected = git(repo, &["rev-parse", "HEAD"]);
+        git(repo, &["branch", "other", selected.as_str()]);
+        commit_file(repo, "later.txt", "later\n", "Add descendant");
+        let original_tree = git(repo, &["rev-parse", "HEAD^{tree}"]);
+        let original_branch = git(repo, &["symbolic-ref", "HEAD"]);
+        git(repo, &["config", "rebase.updateRefs", "true"]);
+
+        // Arrange a partially split session with a descendant still awaiting replay.
+        let started = Command::new(git_factor_bin())
+            .current_dir(repo)
+            .args(["--exec", "true", selected.as_str()])
+            .output()
+            .or_abort();
+        assert_eq!(started.status.code(), Some(EXIT_OK));
+        git(repo, &["add", "first.txt"]);
+        let submitted = Command::new(git_factor_bin())
+            .current_dir(repo)
+            .args(["--continue", "--message", "Add first change"])
+            .output()
+            .or_abort();
+        assert_eq!(submitted.status.code(), Some(EXIT_OK));
+        assert!(git_dir(repo).join("rebase-merge").exists());
+        assert_eq!(git(repo, &["rev-parse", "refs/heads/other"]), selected);
+
+        let finished = Command::new(git_factor_bin())
+            .current_dir(repo)
+            .args(["--finish"])
+            .output()
+            .or_abort();
+
+        assert_eq!(finished.status.code(), Some(EXIT_OK));
+        assert_eq!(
+            finished.stdout,
+            b"{\"operation\":\"finish\",\"result\":\"complete\",\"split_count\":2}\n",
+        );
+        assert!(
+            String::from_utf8_lossy(&finished.stderr).contains("Successfully rebased and updated")
+        );
+        assert_eq!(git(repo, &["rev-parse", "refs/heads/other"]), selected);
+        assert_eq!(git(repo, &["rev-parse", "HEAD^{tree}"]), original_tree);
+        assert_eq!(git(repo, &["write-tree"]), original_tree);
+        assert_eq!(git(repo, &["symbolic-ref", "HEAD"]), original_branch);
+        assert_eq!(git(repo, &["status", "--porcelain"]), "");
+        assert_eq!(git(repo, &["rev-list", "--count", "HEAD"]), "4");
+        assert_eq!(git(repo, &["log", "-1", "--format=%s"]), "Add descendant");
+        assert!(!git_dir(repo).join("factor").exists());
+        assert!(!git_dir(repo).join("rebase-merge").exists());
+        assert!(!git_dir(repo).join("rebase-apply").exists());
+    }
+
+    #[test]
+    fn finish_preserves_branch_created_before_empty_root_cleanup() {
+        let dir = init_repo();
+        let repo = dir.path();
+        write_file(repo, "first.txt", "first\n");
+        write_file(repo, "second.txt", "second\n");
+        git(repo, &["add", "first.txt", "second.txt"]);
+        git(repo, &["commit", "--message", "Add root changes"]);
+        let original_tree = git(repo, &["rev-parse", "HEAD^{tree}"]);
+        let original_branch = git(repo, &["symbolic-ref", "HEAD"]);
+        git(repo, &["config", "rebase.updateRefs", "true"]);
+
+        // A completed root atom is parentless; the remainder opens a fresh native round.
+        start_session(repo);
+        git(repo, &["add", "first.txt"]);
+        let submitted = Command::new(git_factor_bin())
+            .current_dir(repo)
+            .args(["--continue", "--message", "Add first change"])
+            .output()
+            .or_abort();
+        assert_eq!(submitted.status.code(), Some(EXIT_OK));
+        let accepted = git(repo, &["rev-parse", "HEAD"]);
+        git(repo, &["branch", "other", accepted.as_str()]);
+        assert!(git_dir(repo).join("rebase-merge").exists());
+        let first_atom = git(repo, &["rev-list", "--max-parents=0", "HEAD"]);
+        assert_eq!(
+            git(repo, &["ls-tree", "--name-only", first_atom.as_str()]),
+            "first.txt"
+        );
+
+        let finished = Command::new(git_factor_bin())
+            .current_dir(repo)
+            .args(["--finish"])
+            .output()
+            .or_abort();
+
+        assert_eq!(finished.status.code(), Some(EXIT_OK));
+        assert_eq!(
+            finished.stdout,
+            b"{\"operation\":\"finish\",\"result\":\"complete\",\"split_count\":2}\n",
+        );
+        assert!(
+            String::from_utf8_lossy(&finished.stderr).contains("Successfully rebased and updated")
+        );
+        assert_eq!(git(repo, &["rev-parse", "refs/heads/other"]), accepted);
+        assert_eq!(git(repo, &["rev-parse", "HEAD^{tree}"]), original_tree);
+        assert_eq!(git(repo, &["write-tree"]), original_tree);
+        assert_eq!(git(repo, &["symbolic-ref", "HEAD"]), original_branch);
+        assert_eq!(git(repo, &["status", "--porcelain"]), "");
+        assert_eq!(git(repo, &["rev-list", "--count", "HEAD"]), "2");
+        assert_eq!(git(repo, &["log", "-1", "--format=%s"]), "Add root changes");
+        assert!(!git_dir(repo).join("factor").exists());
+        assert!(!git_dir(repo).join("rebase-merge").exists());
+        assert!(!git_dir(repo).join("rebase-apply").exists());
+    }
+
+    #[test]
+    fn finish_preserves_fixup_descendant_during_empty_root_cleanup() {
+        let dir = init_repo();
+        let repo = dir.path();
+        write_file(repo, "first.txt", "first\n");
+        write_file(repo, "second.txt", "second\n");
+        git(repo, &["add", "first.txt", "second.txt"]);
+        git(repo, &["commit", "--message", "Add root changes"]);
+        let selected = git(repo, &["rev-parse", "HEAD"]);
+        commit_file(repo, "later.txt", "later\n", "fixup! Add first change");
+        let original_tree = git(repo, &["rev-parse", "HEAD^{tree}"]);
+        let original_branch = git(repo, &["symbolic-ref", "HEAD"]);
+        git(repo, &["config", "rebase.autoSquash", "true"]);
+        let started = Command::new(git_factor_bin())
+            .current_dir(repo)
+            .args(["--exec", "true", selected.as_str()])
+            .output()
+            .or_abort();
+        assert_eq!(started.status.code(), Some(EXIT_OK));
+        git(repo, &["add", "first.txt"]);
+        let submitted = Command::new(git_factor_bin())
+            .current_dir(repo)
+            .args(["--continue", "--message", "Add first change"])
+            .output()
+            .or_abort();
+        assert_eq!(submitted.status.code(), Some(EXIT_OK));
+        let first_atom = git(repo, &["rev-list", "--max-parents=0", "HEAD"]);
+        assert_eq!(
+            git(repo, &["ls-tree", "--name-only", first_atom.as_str()]),
+            "first.txt"
+        );
+
+        let finished = Command::new(git_factor_bin())
+            .current_dir(repo)
+            .args(["--finish"])
+            .output()
+            .or_abort();
+
+        assert_eq!(finished.status.code(), Some(EXIT_OK));
+        assert_eq!(
+            finished.stdout,
+            b"{\"operation\":\"finish\",\"result\":\"complete\",\"split_count\":2}\n"
+        );
+        assert!(
+            String::from_utf8_lossy(&finished.stderr).contains("Successfully rebased and updated")
+        );
+        assert_eq!(git(repo, &["rev-parse", "HEAD^{tree}"]), original_tree);
+        assert_eq!(git(repo, &["write-tree"]), original_tree);
+        assert_eq!(git(repo, &["symbolic-ref", "HEAD"]), original_branch);
+        assert_eq!(git(repo, &["status", "--porcelain"]), "");
+        assert_eq!(fs::read(repo.join("first.txt")).or_abort(), b"first\n");
+        assert_eq!(fs::read(repo.join("second.txt")).or_abort(), b"second\n");
+        assert_eq!(fs::read(repo.join("later.txt")).or_abort(), b"later\n");
+        assert!(!git_dir(repo).join("factor").exists());
+        assert!(!git_dir(repo).join("rebase-merge").exists());
+        assert!(!git_dir(repo).join("rebase-apply").exists());
+        assert_eq!(
+            git(repo, &["log", "--reverse", "--format=%s"]),
+            "Add first change\nAdd root changes\nfixup! Add first change"
+        );
+        assert_eq!(git(repo, &["rev-list", "--count", "HEAD"]), "3");
+    }
+
+    #[test]
+    fn terminal_continue_emits_only_json_with_native_gate_output_on_stderr() {
+        let directory = init_repo();
+        let repo = directory.path();
+        commit_file(repo, "file.txt", "base\n", "Base");
+        commit_file(repo, "file.txt", "base\nselected\n", "Selected source");
+        let original_tree = git(repo, &["rev-parse", "HEAD^{tree}"]);
+        git(repo, &["branch", "unrelated", "HEAD~1"]);
+        let unrelated = git(repo, &["rev-parse", "refs/heads/unrelated"]);
+        let gate_directory = TempDir::new().or_abort();
+        let gate_counter = gate_directory.path().join("gate-count");
+        let command = format!(
+            "printf 'completion gate output\\n'; printf 'pass\\n' >> {}",
+            shell_quote(gate_counter.to_str().or_abort())
+        );
+        let command_file = gate_directory.path().join("command");
+        fs::write(&command_file, command.as_bytes()).or_abort();
+        let command_hash = git(repo, &["hash-object", command_file.to_str().or_abort()]);
+        let started = Command::new(git_factor_bin())
+            .current_dir(repo)
+            .env_remove("CLAUDECODE")
+            .args(["--exec", command.as_str(), "HEAD"])
+            .output()
+            .or_abort();
+        assert!(
+            started.status.success(),
+            "{}",
+            String::from_utf8_lossy(&started.stderr)
+        );
+        assert!(String::from_utf8_lossy(&started.stderr).contains("completion gate output\n"));
+        let selection: serde_json::Value = serde_json::from_slice(&started.stdout).or_abort();
+        assert_eq!(
+            selection.get("operation"),
+            Some(&serde_json::Value::String("start".to_owned()))
+        );
+        assert_eq!(fs::read(&gate_counter).or_abort(), b"pass\n");
+        git(repo, &["add", "file.txt"]);
+
+        run_git_factor(
+            repo,
+            &["--continue", "--message", "Complete selected source"],
+            GitFactorExpectation::default()
+                .stdout("{\"operation\":\"continue\",\"result\":\"complete\",\"split_count\":1}\n")
+                .stderr_suffix(format!(
+                    "Successfully rebased and updated {}.\n",
+                    read_journal(repo)
+                        .get("branch")
+                        .and_then(serde_json::Value::as_str)
+                        .or_abort()
+                ))
+                .factor_state_exists(false)
+                .rebase_merge_exists(false)
+                .rebase_apply_exists(false)
+                .git_status_porcelain(""),
+        );
+
+        assert_eq!(git(repo, &["rev-parse", "HEAD^{tree}"]), original_tree);
+        assert_eq!(git(repo, &["write-tree"]), original_tree);
+        assert_eq!(
+            fs::read(repo.join("file.txt")).or_abort(),
+            b"base\nselected\n"
+        );
+        assert_eq!(git(repo, &["rev-parse", "refs/heads/unrelated"]), unrelated);
+        assert_eq!(
+            git(repo, &["show", "--format=%B", "--no-patch", "HEAD"]),
+            format!(
+                "Complete selected source\n\nGate-exec-{command_hash}:\n {command_hash}\n {original_tree}"
+            )
+        );
+        assert_eq!(fs::read(&gate_counter).or_abort(), b"pass\n");
+    }
+
+    #[test]
+    #[expect(
+        clippy::literal_string_with_formatting_args,
+        reason = "HEAD^{tree} is native Git revision syntax, not a Rust formatting placeholder"
+    )]
+    fn json_abort_retains_existing_reset_and_cleanup_contract() {
+        let directory = init_repo();
+        let repo = directory.path();
+        commit_file(repo, "base", "base\n", "Base");
+        commit_file(repo, "atom", "atom\n", "Selected source");
+        let head = git(repo, &["rev-parse", "HEAD"]);
+        let tree = git(repo, &["rev-parse", "HEAD^{tree}"]);
+        let refs = git(repo, &["show-ref"]);
+        run_git_factor(
+            repo,
+            &["--exec", "true", "HEAD"],
+            GitFactorExpectation::default(),
+        );
+        write_file(repo, "base", "attempt bytes\n");
+        git(repo, &["add", "base"]);
+        write_file(repo, "scratch", "attempt scratch\n");
+        let selecting_head = git(repo, &["rev-parse", "HEAD"]);
+        let selecting_refs = git(repo, &["show-ref"]);
+        let index = fs::read(repo.join(".git/index")).or_abort();
+        let journal = fs::read(checkpoint_journal(repo)).or_abort();
+        run_git_factor(
+            repo,
+            &["--abort"],
+            GitFactorExpectation::default()
+                .code(EXIT_SOFTWARE)
+                .stderr("git command failed: staged paths must belong to the remaining selected change\n")
+                .factor_state_exists(true),
+        );
+        assert_eq!(git(repo, &["rev-parse", "HEAD"]), selecting_head);
+        assert_eq!(git(repo, &["show-ref"]), selecting_refs);
+        assert_eq!(fs::read(repo.join(".git/index")).or_abort(), index);
+        assert_eq!(fs::read(checkpoint_journal(repo)).or_abort(), journal);
+        assert_eq!(fs::read(repo.join("base")).or_abort(), b"attempt bytes\n");
+        assert_eq!(
+            fs::read(repo.join("scratch")).or_abort(),
+            b"attempt scratch\n"
+        );
+        // Restore only fixture-owned foreign staging, then request the real abort.
+        git(
+            repo,
+            &["restore", "--source=HEAD", "--staged", "--worktree", "base"],
+        );
+        run_git_factor(
+            repo,
+            &["--abort"],
+            GitFactorExpectation::default()
+                .stdout(
+                    "{\"operation\":\"abort\",\"rebase\":{\"in_progress\":false},\"actions\":{}}\n",
+                )
+                .factor_state_exists(false)
+                .rebase_merge_exists(false)
+                .rebase_apply_exists(false)
+                .git_status_porcelain("?? scratch")
+                .path_exists("scratch", true),
+        );
+        assert_eq!(git(repo, &["rev-parse", "HEAD"]), head);
+        assert_eq!(git(repo, &["rev-parse", "HEAD^{tree}"]), tree);
+        assert_eq!(git(repo, &["write-tree"]), tree);
+        assert_original_refs_and_true_proof(repo, &refs, &tree);
+        assert_eq!(fs::read(repo.join("base")).or_abort(), b"base\n");
+        assert_eq!(fs::read(repo.join("atom")).or_abort(), b"atom\n");
+        assert_eq!(
+            fs::read(repo.join("scratch")).or_abort(),
+            b"attempt scratch\n"
+        );
+    }
+
+    #[test]
+    fn json_status_preserves_native_tip_session() {
+        verify_json_status_preservation(false, false);
+    }
+
+    #[test]
+    fn json_status_preserves_native_root_session() {
+        verify_json_status_preservation(true, false);
+    }
+
+    #[test]
+    fn json_status_preserves_native_pending_start_session() {
+        verify_json_status_preservation(false, true);
+    }
+
+    fn verify_json_status_preservation(root: bool, pending: bool) {
+        let directory = init_repo();
+        let repo = directory.path();
+        if !root {
+            commit_file(repo, "base", "base\n", "Base");
+        }
+        commit_file(repo, "atom", "atom\n", "Selected source");
+        let selected = git(repo, &["rev-parse", "HEAD"]);
+        let selected_tree = git(repo, &["rev-parse", "HEAD^{tree}"]);
+        let parent = (!root).then(|| git(repo, &["rev-parse", "HEAD^"]));
+        if pending {
+            commit_file(repo, "descendant", "descendant\n", "Later history");
+        }
+        let checkpoint = git(repo, &["rev-parse", "HEAD"]);
+        if pending {
+            let reset_parent = parent.as_ref().or_abort();
+            let (wrapper, bin) = make_git_wrapper_named(
+                "git",
+                &format!(
+                    "if [ \"$#\" -eq 4 ] && [ \"$1\" = reset ] && [ \"$2\" = --mixed ] && [ \"$3\" = --quiet ] && [ \"$4\" = '{reset_parent}' ]; then\n  exit 1\nfi\n"
+                ),
+            );
+            let mut path = OsString::from(bin.as_os_str());
+            path.push(OsStr::new(":"));
+            path.push(env::var_os("PATH").or_abort());
+            run_git_factor_with_prefixed_path(
+                repo,
+                &["--exec", "true", "HEAD~1"],
+                GitFactorExpectation::default()
+                    .code(EXIT_SOFTWARE)
+                    .stderr_suffix("git command failed: git reset failed (exit 1)\n")
+                    .factor_state_exists(true),
+                path,
+            );
+            assert!(
+                wrapper.path().exists(),
+                "native reset wrapper retained during start"
+            );
+            assert_eq!(git(repo, &["rev-parse", "HEAD^{tree}"]), selected_tree);
+            assert_eq!(
+                git(repo, &["show", "-s", "--format=%P", "HEAD"]),
+                *reset_parent
+            );
+            assert_eq!(
+                read_journal(repo)
+                    .pointer("/state/phase")
+                    .and_then(serde_json::Value::as_str),
+                Some("opening")
+            );
+        } else {
+            run_git_factor(
+                repo,
+                &["--exec", "true", "HEAD"],
+                GitFactorExpectation::default(),
+            );
+        }
+        let head = git(repo, &["rev-parse", "HEAD"]);
+        let refs = git(repo, &["show-ref"]);
+        let index = fs::read(repo.join(".git/index")).or_abort();
+        let journal = fs::read(checkpoint_journal(repo)).or_abort();
+        let native = git_dir(repo).join("rebase-merge");
+        let done = fs::read(native.join("done")).or_abort();
+        let todo = fs::read(native.join("git-rebase-todo")).or_abort();
+        write_file(repo, "unrelated", "user bytes\n");
+        let phase = if pending { "opening" } else { "selecting" };
+        let expected = format!(
+            "{{\"operation\":\"status\",\"session\":{{\"checkpoint\":\"{checkpoint}\",\"phase\":\"{phase}\",\"rebase\":{{\"in_progress\":true,\"required\":true}},\"split_count\":0,\"target\":{{\"commit\":\"{selected}\",\"commit_count\":1,\"span_starts_at_root\":{root}}}}}}}\n"
+        );
+        run_git_factor(
+            repo,
+            &["--status"],
+            GitFactorExpectation::default().stdout(expected),
+        );
+        assert_eq!(git(repo, &["rev-parse", "HEAD"]), head);
+        assert_eq!(git(repo, &["show-ref"]), refs);
+        assert_eq!(fs::read(repo.join(".git/index")).or_abort(), index);
+        assert_eq!(fs::read(checkpoint_journal(repo)).or_abort(), journal);
+        assert_eq!(fs::read(native.join("done")).or_abort(), done);
+        assert_eq!(fs::read(native.join("git-rebase-todo")).or_abort(), todo);
+        assert_eq!(fs::read(repo.join("atom")).or_abort(), b"atom\n");
+        assert_eq!(fs::read(repo.join("unrelated")).or_abort(), b"user bytes\n");
+        if !root {
+            assert_eq!(fs::read(repo.join("base")).or_abort(), b"base\n");
+        }
+    }
+
+    #[test]
+    fn message_only_submission_and_explicit_continue_preserve_paragraphs_and_final_tree() {
+        for explicit in [false, true] {
+            let directory = init_repo();
+            let repo = directory.path();
+            commit_file(repo, "base", "base\n", "Base");
+            write_file(repo, "left", "left\n");
+            write_file(repo, "right", "right\n");
+            git(repo, &["add", "left", "right"]);
+            git(repo, &["commit", "-m", "Selected source"]);
+            let original_tree = git(repo, &["rev-parse", "HEAD^{tree}"]);
+            run_git_factor(
+                repo,
+                &["--exec", "true", "HEAD"],
+                GitFactorExpectation::default(),
+            );
+            git(repo, &["add", "left"]);
+            let first_tree = git(repo, &["write-tree"]);
+            run_git_factor(
+                repo,
+                &["--message", "First atom", "--message", "First rationale"],
+                GitFactorExpectation::default().factor_state_exists(true),
+            );
+            assert_true_gate_message(repo, "HEAD", "First atom\n\nFirst rationale", &first_tree);
+            assert_eq!(git(repo, &["show", "HEAD:left"]), "left");
+            assert_eq!(fs::read(repo.join("right")).or_abort(), b"right\n");
+            git(repo, &["add", "right"]);
+            let mut final_arguments =
+                vec!["--message", "Second atom", "--message", "Second rationale"];
+            if explicit {
+                final_arguments.insert(0, "--continue");
+            }
+            run_git_factor(
+                repo,
+                &final_arguments,
+                GitFactorExpectation::default()
+                    .stdout(
+                        "{\"operation\":\"continue\",\"result\":\"complete\",\"split_count\":2}\n",
+                    )
+                    .factor_state_exists(false),
+            );
+            assert_true_gate_message(
+                repo,
+                "HEAD",
+                "Second atom\n\nSecond rationale",
+                &original_tree,
+            );
+            assert_true_gate_message(repo, "HEAD~1", "First atom\n\nFirst rationale", &first_tree);
+            assert_eq!(git(repo, &["rev-parse", "HEAD^{tree}"]), original_tree);
+            assert_eq!(git(repo, &["status", "--porcelain=v1"]), "");
+        }
+    }
+
+    #[test]
+    fn message_only_without_session_preserves_native_state() {
+        let directory = init_repo();
+        let repo = directory.path();
+        commit_file(repo, "base", "base\n", "Base");
+        write_file(repo, "unrelated", "user bytes\n");
+        let head = git(repo, &["rev-parse", "HEAD"]);
+        let index = fs::read(repo.join(".git/index")).or_abort();
+        let mut expectation = GitFactorExpectation::default()
+            .code(EXIT_USAGE)
+            .stderr("no active factor session\n")
+            .factor_state_exists(false);
+        expectation.stdout = Some(StreamExpectation::new_exact(String::new()));
+        run_git_factor(repo, &["--message", "Selected atom"], expectation);
+        assert_eq!(git(repo, &["rev-parse", "HEAD"]), head);
+        assert_eq!(fs::read(repo.join(".git/index")).or_abort(), index);
+        assert_eq!(fs::read(repo.join("base")).or_abort(), b"base\n");
+        assert_eq!(fs::read(repo.join("unrelated")).or_abort(), b"user bytes\n");
+    }
+
+    #[test]
+    fn message_only_without_staging_preserves_native_session() {
+        let directory = init_repo();
+        let repo = directory.path();
+        commit_file(repo, "base", "base\n", "Base");
+        commit_file(repo, "atom", "atom\n", "Selected source");
+        run_git_factor(
+            repo,
+            &["--exec", "true", "HEAD"],
+            GitFactorExpectation::default(),
+        );
+        let head = git(repo, &["rev-parse", "HEAD"]);
+        let index = fs::read(repo.join(".git/index")).or_abort();
+        let journal = fs::read(checkpoint_journal(repo)).or_abort();
+        let status = Command::new(git_factor_bin())
+            .current_dir(repo)
+            .arg("--status")
+            .output()
+            .or_abort();
+        assert_eq!(status.status.code(), Some(EXIT_OK));
+        let mut expectation = GitFactorExpectation::default()
+            .code(EXIT_USAGE)
+            .stderr("no staged changes to commit\nNEXT: stage exactly one atomic change, then rerun:\n  git factor --continue --message \"type: description\"\n")
+            .factor_state_exists(true);
+        expectation.stdout = Some(StreamExpectation::new_exact(String::new()));
+        run_git_factor(repo, &["--message", "Selected atom"], expectation);
+        assert_eq!(git(repo, &["rev-parse", "HEAD"]), head);
+        assert_eq!(fs::read(repo.join(".git/index")).or_abort(), index);
+        assert_eq!(fs::read(checkpoint_journal(repo)).or_abort(), journal);
+        let observed = Command::new(git_factor_bin())
+            .current_dir(repo)
+            .arg("--status")
+            .output()
+            .or_abort();
+        assert_eq!(observed.status.code(), Some(EXIT_OK));
+        assert_eq!(observed.stdout, status.stdout);
+        assert_eq!(fs::read(repo.join("base")).or_abort(), b"base\n");
+        assert_eq!(fs::read(repo.join("atom")).or_abort(), b"atom\n");
     }
     #[test]
     fn continue_from_child_preserves_same_named_tracked_file() {
@@ -5646,9 +6716,21 @@ fi
         assert_eq!(output.status.code(), Some(EXIT_OK));
         assert_eq!(
             output.stdout,
-            b"{\"operation\":\"continue\",\"split_count\":1}\n"
+            b"{\"operation\":\"continue\",\"result\":\"complete\",\"split_count\":1}\n"
         );
-        assert_eq!(output.stderr, b"");
+        let short_head = git(repo, &["rev-parse", "--short", "HEAD"]);
+        let executable = fs::canonicalize(git_factor_bin()).or_abort();
+        let expected_stderr = format!(
+            concat!(
+                "HEAD is now at {short_head} Remove root file\n",
+                "Rebasing (3/4)\rExecuting: '{executable}' checkpoint-gate-remainder\n",
+                "Rebasing (4/4)\rExecuting: '{executable}' checkpoint-terminal\n",
+                "Successfully rebased and updated refs/heads/main.\n"
+            ),
+            executable = executable.display(),
+            short_head = short_head
+        );
+        assert_eq!(output.stderr, expected_stderr.as_bytes());
         assert_eq!(fs::read(repo.join("sub/victim")).or_abort(), bytes);
         assert!(!repo.join("victim").exists());
         assert_eq!(git(repo, &["rev-parse", "HEAD^{tree}"]), expected_tree);
@@ -5660,185 +6742,16 @@ fi
     }
 
     #[test]
-    #[expect(
-        clippy::literal_string_with_formatting_args,
-        reason = "HEAD^{tree} is native Git revision syntax, not a Rust formatting placeholder"
-    )]
-    fn json_abort_retains_existing_reset_and_cleanup_contract() {
-        let directory = init_repo();
-        let repo = directory.path();
-        commit_file(repo, "base", "base\n", "Base");
-        commit_file(repo, "atom", "atom\n", "Selected source");
-        let head = git(repo, &["rev-parse", "HEAD"]);
-        let tree = git(repo, &["rev-parse", "HEAD^{tree}"]);
-        let refs = git(repo, &["show-ref"]);
-        run_git_factor(
-            repo,
-            &["--exec", "true", "HEAD"],
-            GitFactorExpectation::default(),
-        );
-        write_file(repo, "base", "attempt bytes\n");
-        git(repo, &["add", "base"]);
-        write_file(repo, "scratch", "attempt scratch\n");
-        run_git_factor(
-            repo,
-            &["--abort"],
-            GitFactorExpectation::default()
-                .stdout(
-                    "{\"operation\":\"abort\",\"rebase\":{\"in_progress\":false},\"actions\":{}}\n",
-                )
-                .factor_state_exists(false)
-                .rebase_merge_exists(false)
-                .rebase_apply_exists(false)
-                .git_status_porcelain("")
-                .path_exists("scratch", false),
-        );
-        assert_eq!(git(repo, &["rev-parse", "HEAD"]), head);
-        assert_eq!(git(repo, &["rev-parse", "HEAD^{tree}"]), tree);
-        assert_eq!(git(repo, &["write-tree"]), tree);
-        assert_eq!(git(repo, &["show-ref"]), refs);
-        assert_eq!(fs::read(repo.join("base")).or_abort(), b"base\n");
-        assert_eq!(fs::read(repo.join("atom")).or_abort(), b"atom\n");
-    }
-
-    #[test]
-    fn json_status_preserves_native_tip_session() {
-        verify_json_status_preservation(false, false);
-    }
-
-    #[test]
-    fn json_status_preserves_native_root_session() {
-        verify_json_status_preservation(true, false);
-    }
-
-    #[test]
-    fn json_status_preserves_native_pending_start_session() {
-        verify_json_status_preservation(false, true);
-    }
-
-    fn verify_json_status_preservation(root: bool, pending: bool) {
-        let directory = init_repo();
-        let repo = directory.path();
-        if !root {
-            commit_file(repo, "base", "base\n", "Base");
-        }
-        commit_file(repo, "atom", "atom\n", "Selected source");
-        let selected = git(repo, &["rev-parse", "HEAD"]);
-        let selected_tree = git(repo, &["rev-parse", "HEAD^{tree}"]);
-        if pending {
-            commit_file(repo, "descendant", "descendant\n", "Later history");
-        }
-        if pending {
-            let (wrapper, bin) = make_git_wrapper_named(
-                "git",
-                &format!(
-                    "if [ \"$#\" -eq 3 ] && [ \"$1\" = reset ] && [ \"$2\" = --quiet ] && [ \"$3\" = '{selected}^' ]; then\n  exit 1\nfi\n"
-                ),
-            );
-            let mut path = OsString::from(bin.as_os_str());
-            path.push(OsStr::new(":"));
-            path.push(env::var_os("PATH").or_abort());
-            run_git_factor_with_prefixed_path(
-                repo,
-                &["--exec", "true", "HEAD~1"],
-                GitFactorExpectation::default()
-                    .code(EXIT_SOFTWARE)
-                    .stderr_suffix("git command failed: git reset failed (exit 1)\n")
-                    .factor_state_exists(true),
-                path,
-            );
-            assert!(
-                wrapper.path().exists(),
-                "native reset wrapper retained during start"
-            );
-            assert_eq!(git(repo, &["rev-parse", "HEAD"]), selected);
-            assert_eq!(git(repo, &["rev-parse", "HEAD^{tree}"]), selected_tree);
-            assert_eq!(
-                fs::read(repo.join(".git/factor/phase")).or_abort(),
-                b"pending_start\n"
-            );
-        } else {
-            run_git_factor(
-                repo,
-                &["--exec", "true", "HEAD"],
-                GitFactorExpectation::default(),
-            );
-        }
-        let head = git(repo, &["rev-parse", "HEAD"]);
-        let refs = git(repo, &["show-ref"]);
-        let index = fs::read(repo.join(".git/index")).or_abort();
-        let state = repo.join(".git/factor");
-        let mut facts = fs::read_dir(&state)
-            .or_abort()
-            .map(|candidate| {
-                let entry = candidate.or_abort();
-                (entry.file_name(), fs::read(entry.path()).or_abort())
-            })
-            .collect::<Vec<_>>();
-        facts.sort_by(|left, right| left.0.cmp(&right.0));
-        let native = repo.join(".git/rebase-merge");
-        let transcript = pending.then(|| {
-            (
-                fs::read(native.join("done")).or_abort(),
-                fs::read(native.join("git-rebase-todo")).or_abort(),
-            )
-        });
-        write_file(repo, "unrelated", "user bytes\n");
-        let phase = if pending {
-            "pending_start"
-        } else {
-            "splitting"
-        };
-        let expected = format!(
-            "{{\"operation\":\"status\",\"session\":{{\"phase\":\"{phase}\",\"rebase\":{{\"in_progress\":{pending},\"required\":{pending}}},\"split_count\":0,\"target\":{{\"commit\":\"{selected}\",\"index\":0,\"span_starts_at_root\":{root}}}}}}}\n",
-        );
-        run_git_factor(
-            repo,
-            &["--status"],
-            GitFactorExpectation::default().stdout(expected),
-        );
-        assert_eq!(git(repo, &["rev-parse", "HEAD"]), head);
-        assert_eq!(git(repo, &["show-ref"]), refs);
-        assert_eq!(fs::read(repo.join(".git/index")).or_abort(), index);
-        let mut observed = fs::read_dir(&state)
-            .or_abort()
-            .map(|candidate| {
-                let entry = candidate.or_abort();
-                (entry.file_name(), fs::read(entry.path()).or_abort())
-            })
-            .collect::<Vec<_>>();
-        observed.sort_by(|left, right| left.0.cmp(&right.0));
-        assert_eq!(observed, facts);
-        if let Some((done, todo)) = transcript {
-            assert_eq!(fs::read(native.join("done")).or_abort(), done);
-            assert_eq!(fs::read(native.join("git-rebase-todo")).or_abort(), todo);
-        }
-        assert_eq!(fs::read(repo.join("atom")).or_abort(), b"atom\n");
-        assert_eq!(fs::read(repo.join("unrelated")).or_abort(), b"user bytes\n");
-    }
-
-    #[test]
     fn abort_message_preserves_active_native_session_before_mutation() {
         let directory = init_repo();
         let repo = directory.path();
-        commit_file(repo, "base", "base\n", "Base");
-        commit_file(repo, "selected", "selected\n", "Selected source");
+        commit_file(repo, "base", "base\n", "Add base");
+        commit_file(repo, "selected", "selected\n", "Add selected file");
         start_session(repo);
         write_file(repo, "selected", "staged user bytes\n");
         git(repo, &["add", "selected"]);
         write_file(repo, "unrelated", "untracked user bytes\n");
-        let head = git(repo, &["rev-parse", "HEAD"]);
-        let refs = git(repo, &["show-ref"]);
-        let index = fs::read(repo.join(".git/index")).or_abort();
-        let state = repo.join(".git/factor");
-        let mut saved = fs::read_dir(&state)
-            .or_abort()
-            .map(|candidate| {
-                let entry = candidate.or_abort();
-                (entry.file_name(), fs::read(entry.path()).or_abort())
-            })
-            .collect::<Vec<_>>();
-        saved.sort_by(|left, right| left.0.cmp(&right.0));
+        let before = snapshot_selection(repo);
 
         run_git_factor(
             repo,
@@ -5853,18 +6766,9 @@ fi
             },
         );
 
-        assert_eq!(fs::read(repo.join(".git/index")).or_abort(), index);
-        assert_eq!(git(repo, &["rev-parse", "HEAD"]), head);
-        assert_eq!(git(repo, &["show-ref"]), refs);
-        let mut observed = fs::read_dir(&state)
-            .or_abort()
-            .map(|candidate| {
-                let entry = candidate.or_abort();
-                (entry.file_name(), fs::read(entry.path()).or_abort())
-            })
-            .collect::<Vec<_>>();
-        observed.sort_by(|left, right| left.0.cmp(&right.0));
-        assert_eq!(observed, saved);
+        let immediate_index = fs::read(repo.join(".git/index")).or_abort();
+        assert_eq!(immediate_index, before.index);
+        assert_eq!(snapshot_selection(repo), before);
         assert_eq!(
             fs::read(repo.join("selected")).or_abort(),
             b"staged user bytes\n"
@@ -5873,105 +6777,269 @@ fi
             fs::read(repo.join("unrelated")).or_abort(),
             b"untracked user bytes\n"
         );
-        assert!(!repo.join(".git/rebase-merge").exists());
+        assert!(repo.join(".git/rebase-merge").is_dir());
         assert!(!repo.join(".git/rebase-apply").exists());
     }
 
     #[test]
-    fn message_only_submission_and_explicit_continue_preserve_paragraphs_and_final_tree() {
-        for explicit in [false, true] {
-            let directory = init_repo();
-            let repo = directory.path();
-            commit_file(repo, "base", "base\n", "Base");
-            write_file(repo, "left", "left\n");
-            write_file(repo, "right", "right\n");
-            git(repo, &["add", "left", "right"]);
-            git(repo, &["commit", "-m", "Selected source"]);
-            let original_tree = git(repo, &["rev-parse", "HEAD^{tree}"]);
-            run_git_factor(
-                repo,
-                &["--exec", "true", "HEAD"],
-                GitFactorExpectation::default(),
-            );
-            git(repo, &["add", "left"]);
-            let mut intermediate = GitFactorExpectation::default().factor_state_exists(true);
-            intermediate.stderr = Some(StreamExpectation::new_exact(String::new()));
-            run_git_factor(
-                repo,
-                &["--message", "First atom", "--message", "First rationale"],
-                intermediate,
-            );
-            assert_eq!(
-                git(repo, &["show", "--format=%B", "--no-patch", "HEAD"]),
-                "First atom\n\nFirst rationale"
-            );
-            assert_eq!(git(repo, &["show", "HEAD:left"]), "left");
-            assert_eq!(fs::read(repo.join("right")).or_abort(), b"right\n");
-            git(repo, &["add", "right"]);
-            let mut final_arguments =
-                vec!["--message", "Second atom", "--message", "Second rationale"];
-            if explicit {
-                final_arguments.insert(0, "--continue");
-            }
-            let mut terminal = GitFactorExpectation::default()
-                .stdout("{\"operation\":\"continue\",\"split_count\":2}\n")
-                .factor_state_exists(false);
-            terminal.stderr = Some(StreamExpectation::new_exact(String::new()));
-            run_git_factor(repo, &final_arguments, terminal);
-            assert_eq!(
-                git(repo, &["show", "--format=%B", "--no-patch", "HEAD"]),
-                "Second atom\n\nSecond rationale"
-            );
-            assert_eq!(
-                git(repo, &["show", "--format=%B", "--no-patch", "HEAD~1"]),
-                "First atom\n\nFirst rationale"
-            );
-            assert_eq!(git(repo, &["rev-parse", "HEAD^{tree}"]), original_tree);
-            assert_eq!(git(repo, &["status", "--porcelain=v1"]), "");
+    fn continue_preserves_untracked_files_while_isolating_the_gate() {
+        let directory = init_repo();
+        let repo = directory.path();
+        commit_file(repo, "file.txt", "one\n", "Add base");
+        commit_file(repo, "file.txt", "one\ntwo\n", "Add second line");
+        run_git_factor(
+            repo,
+            &["--exec", "test ! -e deleted-path.txt", "HEAD"],
+            GitFactorExpectation::default(),
+        );
+        git(repo, &["add", "--all"]);
+        write_file(repo, "deleted-path.txt", "unrelated user bytes\n");
+
+        run_git_factor(
+            repo,
+            &["--continue", "--message", "Add second line"],
+            GitFactorExpectation::default()
+                .stdout("{\"operation\":\"continue\",\"result\":\"complete\",\"split_count\":1}\n"),
+        );
+
+        assert_eq!(
+            fs::read(repo.join("deleted-path.txt")).or_abort(),
+            b"unrelated user bytes\n"
+        );
+        assert_eq!(git_status_porcelain(repo), "?? deleted-path.txt");
+        assert!(!checkpoint_journal(repo).exists());
+    }
+
+    fn arrange_native_original_pool() -> NativeOriginalPool {
+        let directory = init_repo();
+        let repo = directory.path();
+        write_file(repo, "keep", "unchanged anchor\n");
+        git(repo, &["add", "keep"]);
+        commit_file(repo, "victim", "original file\n", "Add original file");
+        let base = git(repo, &["rev-parse", "HEAD"]);
+        git(repo, &["branch", "foreign", &base]);
+        git(repo, &["tag", "foreign", &base]);
+        let foreign_refs = git(
+            repo,
+            &[
+                "show-ref",
+                "--verify",
+                "refs/heads/foreign",
+                "refs/tags/foreign",
+            ],
+        );
+        fs::remove_file(repo.join("victim")).or_abort();
+        fs::create_dir_all(repo.join("victim")).or_abort();
+        write_file(repo, "victim/x", "saved remainder\n");
+        git(repo, &["add", "--all"]);
+        git(
+            repo,
+            &[
+                "commit",
+                "--quiet",
+                "--message",
+                "Replace file with directory",
+            ],
+        );
+        let final_tree = git(repo, &["rev-parse", "HEAD^{tree}"]);
+        start_session(repo);
+        git(repo, &["add", "--update", "--", "victim"]);
+        let deletion_tree = git(repo, &["write-tree"]);
+        assert_eq!(
+            git(repo, &["ls-tree", "--name-only", &deletion_tree]),
+            "keep"
+        );
+        NativeOriginalPool {
+            base,
+            deletion_tree,
+            directory,
+            final_tree,
+            foreign_refs,
         }
     }
 
     #[test]
-    fn message_only_without_staging_preserves_native_session() {
-        let directory = init_repo();
-        let repo = directory.path();
-        commit_file(repo, "base", "base\n", "Base");
-        commit_file(repo, "atom", "atom\n", "Selected source");
+    fn original_pool_directory_is_captured_and_reopened() {
+        let fixture = arrange_native_original_pool();
+        let repo = fixture.directory.path();
+
         run_git_factor(
             repo,
-            &["--exec", "true", "HEAD"],
-            GitFactorExpectation::default(),
+            &["--message", "Remove original file"],
+            GitFactorExpectation::default()
+                .stdout(expected_remaining_stdout("[]", "[\"victim/x\"]")),
+        );
+
+        let journal = read_journal(repo);
+        assert_eq!(
+            journal
+                .pointer("/state/phase")
+                .and_then(serde_json::Value::as_str),
+            Some("selecting")
         );
         let head = git(repo, &["rev-parse", "HEAD"]);
-        let index = fs::read(repo.join(".git/index")).or_abort();
-        let saved = [
-            "commits",
-            "current_index",
-            "exec",
-            "expected_tree",
-            "is_root",
-            "phase",
-            "requires_rebase",
-            "split_count",
-            "start_head",
-            "started_rebase",
-        ]
-        .map(|key| (key, fs::read(repo.join(".git/factor").join(key)).or_abort()));
-        let mut expectation = GitFactorExpectation::default()
-            .code(EXIT_USAGE)
-            .stderr("no staged changes to commit\nNEXT: stage exactly one atomic change, then rerun:\n  git factor --continue --message \"type: description\"\n")
-            .factor_state_exists(true);
-        expectation.stdout = Some(StreamExpectation::new_exact(String::new()));
-        run_git_factor(repo, &["--message", "Selected atom"], expectation);
-        assert_eq!(git(repo, &["rev-parse", "HEAD"]), head);
-        assert_eq!(fs::read(repo.join(".git/index")).or_abort(), index);
-        for (key, bytes) in saved {
-            assert_eq!(
-                fs::read(repo.join(".git/factor").join(key)).or_abort(),
-                bytes
-            );
+        assert_eq!(
+            journal
+                .pointer("/state/head")
+                .and_then(serde_json::Value::as_str),
+            Some(head.as_str())
+        );
+        assert_eq!(
+            journal
+                .pointer("/state/base")
+                .and_then(serde_json::Value::as_str),
+            Some(head.as_str())
+        );
+        assert_eq!(git(repo, &["rev-parse", "HEAD^"]), fixture.base);
+        assert_eq!(
+            git(repo, &["rev-parse", "HEAD^{tree}"]),
+            fixture.deletion_tree
+        );
+        assert_eq!(git(repo, &["write-tree"]), fixture.deletion_tree);
+        assert_eq!(
+            git(repo, &["rev-parse", "refs/heads/main^{tree}"]),
+            fixture.final_tree
+        );
+        assert_eq!(
+            journal
+                .get("checkpoint")
+                .and_then(serde_json::Value::as_str),
+            Some(git(repo, &["rev-parse", "refs/heads/main"]).as_str())
+        );
+        assert_eq!(
+            git(
+                repo,
+                &[
+                    "show-ref",
+                    "--verify",
+                    "refs/heads/foreign",
+                    "refs/tags/foreign"
+                ]
+            ),
+            fixture.foreign_refs
+        );
+        assert_eq!(git_status_porcelain(repo), "?? victim/");
+        assert_eq!(
+            fs::read(repo.join("keep")).or_abort(),
+            b"unchanged anchor\n"
+        );
+        assert_eq!(
+            fs::read(repo.join("victim/x")).or_abort(),
+            b"saved remainder\n"
+        );
+    }
+
+    #[test]
+    fn changed_pool_directory_is_refused_without_mutating_selection() {
+        let fixture = arrange_native_original_pool();
+        let repo = fixture.directory.path();
+        write_file(repo, "victim/x", "saved remainder\nchanged user bytes\n");
+        let expected_index_directory = TempDir::new().or_abort();
+        let expected_index = expected_index_directory.path().join("index");
+        for args in [vec!["read-tree", "refs/heads/main"], vec!["add", "--all"]] {
+            let result = Command::new("git")
+                .args(args)
+                .env("GIT_INDEX_FILE", &expected_index)
+                .current_dir(repo)
+                .output()
+                .or_abort();
+            assert!(result.status.success());
         }
-        assert_eq!(fs::read(repo.join("base")).or_abort(), b"base\n");
-        assert_eq!(fs::read(repo.join("atom")).or_abort(), b"atom\n");
+        let result = Command::new("git")
+            .args(["write-tree"])
+            .env("GIT_INDEX_FILE", &expected_index)
+            .current_dir(repo)
+            .output()
+            .or_abort();
+        assert!(result.status.success());
+        let actual_tree = String::from_utf8(result.stdout).or_abort();
+        let diagnostic = format!(
+            "tree hash mismatch: expected {}, got {}\n",
+            fixture.final_tree,
+            actual_tree.trim_end()
+        );
+        let before = snapshot_selection(repo);
+
+        run_git_factor(
+            repo,
+            &["--message", "Remove original file"],
+            GitFactorExpectation {
+                code: EXIT_TEMPFAIL,
+                stdout: Some(StreamExpectation::new_exact(String::new())),
+                stderr: Some(StreamExpectation::new_exact(diagnostic)),
+                ..GitFactorExpectation::default()
+            },
+        );
+
+        let immediate_index = fs::read(repo.join(".git/index")).or_abort();
+        assert_eq!(immediate_index, before.index);
+        assert_eq!(snapshot_selection(repo), before);
+        assert_eq!(git(repo, &["write-tree"]), fixture.deletion_tree);
+        assert_eq!(
+            git(
+                repo,
+                &[
+                    "show-ref",
+                    "--verify",
+                    "refs/heads/foreign",
+                    "refs/tags/foreign"
+                ]
+            ),
+            fixture.foreign_refs
+        );
+        assert_eq!(
+            fs::read(repo.join("keep")).or_abort(),
+            b"unchanged anchor\n"
+        );
+        assert_eq!(
+            fs::read(repo.join("victim/x")).or_abort(),
+            b"saved remainder\nchanged user bytes\n"
+        );
+    }
+
+    #[test]
+    fn actor_routing_to_main_refuses_before_materializing_partial_candidate() {
+        let directory = init_repo();
+        let repo = directory.path();
+        commit_file(repo, "keep", "unchanged anchor\n", "Add base");
+        commit_file(
+            repo,
+            "atom",
+            "selected atom\nsaved same-file remainder\n",
+            "Add two lines",
+        );
+        start_session(repo);
+        write_file(repo, "atom", "selected atom\n");
+        git(repo, &["add", "atom"]);
+        write_file(repo, "atom", "selected atom\nsaved same-file remainder\n");
+        write_file(repo, "user", "unrelated user bytes\0\n");
+        git(repo, &["config", "extensions.worktreeConfig", "true"]);
+        let root = fs::canonicalize(repo).or_abort();
+        git(repo, &["config", "core.worktree", root.to_str().or_abort()]);
+        let before = snapshot_selection(repo);
+        let config = fs::read(repo.join(".git/config")).or_abort();
+        let anchor = fs::read(repo.join("keep")).or_abort();
+        let contents = fs::read(repo.join("atom")).or_abort();
+        let user = fs::read(repo.join("user")).or_abort();
+
+        let output = Command::new(git_factor_bin())
+            .current_dir(repo)
+            .args(["--message", "Add selected atom"])
+            .output()
+            .or_abort();
+
+        let immediate_index = fs::read(repo.join(".git/index")).or_abort();
+        assert_eq!(fs::read(repo.join("atom")).or_abort(), contents);
+        assert_eq!(immediate_index, before.index);
+        assert_eq!(snapshot_selection(repo), before);
+        assert_eq!(fs::read(repo.join(".git/config")).or_abort(), config);
+        assert_eq!(fs::read(repo.join("keep")).or_abort(), anchor);
+        assert_eq!(fs::read(repo.join("user")).or_abort(), user);
+        assert_eq!(output.status.code(), Some(EXIT_SOFTWARE));
+        assert_eq!(output.stdout, b"");
+        assert_eq!(
+            output.stderr,
+            b"git command failed: candidate Git working directory belongs to another worktree\n"
+        );
     }
 }

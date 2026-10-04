@@ -58,87 +58,30 @@ pub(in crate::git_factor) fn base_parent_in(
     }
 }
 
-/// Removes the empty root commit created during a root-commit factor session.
-///
-/// After a root-commit factor session completes, the history contains an empty
-/// commit at the root. This function rebases `--root --interactive` with a
-/// sequence editor that drops the empty commit by SHA.
+/// Compares the selected tip tree with the parent boundary before any mutation.
 #[cfg_attr(
     not(test),
     expect(
         clippy::single_call_fn,
-        reason = "root-commit cleanup is extracted for clarity and targeted tests"
+        reason = "net selected-tree admission retains its semantic boundary before checkpoint session mutation"
     )
 )]
-pub(in crate::git_factor) fn remove_empty_root_in(ctx: &Ctx<'_>) -> Result<(), FactorError> {
-    let roots = git_output(ctx, &["rev-list", "--max-parents=0", "HEAD"])?;
-    let root_lines: Vec<&str> = roots
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .collect();
-    let root = match *root_lines.as_slice() {
-        [] => {
-            return Err(FactorError::GitCommand(non_empty_msg(
-                "no root commit found for empty-root cleanup".to_owned(),
-            )));
-        }
-        [root] => root,
-        [..] => {
-            return Err(FactorError::GitCommand(non_empty_msg(
-                "multiple root commits found; empty-root cleanup requires a single-root history"
-                    .to_owned(),
-            )));
-        }
-    };
-
-    let root_tree = git_output(ctx, &["ls-tree", root])?;
-    if !root_tree.is_empty() {
-        return Ok(());
-    }
-
-    let short_root = git_output(ctx, &["rev-parse", "--short", root])?;
-    let editor = editor_path(ctx)?;
-    let Some(editor_str) = editor.to_str() else {
-        return Err(FactorError::GitCommand(non_empty_msg(
-            "editor path is not valid UTF-8".to_owned(),
-        )));
-    };
-    let seq_editor = format!(
-        "{} {} {}",
-        shell_quote(editor_str),
-        shell_quote("--drop"),
-        shell_quote(short_root.as_str())
-    );
-
-    let rebase_status = command_status_with(
+pub(in crate::git_factor) fn has_tree_change(
+    ctx: &Ctx<'_>,
+    span: &CommitSpan,
+) -> Result<bool, FactorError> {
+    let tip = TreeHash::new(&git_output(
         ctx,
-        "git",
-        &[
-            "rebase",
-            "--empty",
-            "drop",
-            "--interactive",
-            "--no-autosquash",
-            "--no-update-refs",
-            "--quiet",
-            "--root",
-        ],
-        &[
-            ("GIT_EDITOR", "false"),
-            ("GIT_SEQUENCE_EDITOR", &seq_editor),
-        ],
-        false,
-    )?;
-
-    if rebase_status.success() {
-        return Ok(());
+        &["rev-parse", &format!("{}^{{tree}}", span.tip_commit())],
+    )?)?;
+    if span.is_root() {
+        return Ok(tip.as_str() != "4b825dc642cb6eb9a060e54bf8d69288fbee4904");
     }
-
-    Err(FactorError::GitCommand(non_empty_msg(format!(
-        "rebase to remove empty root failed (exit {})",
-        status_code(rebase_status)
-    ))))
+    let base = TreeHash::new(&git_output(
+        ctx,
+        &["rev-parse", &format!("{}^^{{tree}}", span.first_commit())],
+    )?)?;
+    Ok(tip != base)
 }
 
 /// Resolves a commit reference to a full SHA.
@@ -492,3 +435,7 @@ mod proptests;
 #[cfg(test)]
 #[path = "tests/validation/tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "validation_tree_fixture.rs"]
+mod tree_fixture;

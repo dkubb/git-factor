@@ -9,6 +9,8 @@ use core::borrow::Borrow;
 use core::fmt;
 use core::ops::Deref;
 use core::str::FromStr;
+use serde::Deserializer;
+use serde::de::Error as _;
 
 /// Construction error for `NonEmptyString`.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, thiserror::Error)]
@@ -119,12 +121,63 @@ impl TryFrom<String> for NonEmptyString {
     }
 }
 
+impl serde::Serialize for NonEmptyString {
+    #[inline]
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(self.as_str())
+    }
+}
+impl<'de> serde::Deserialize<'de> for NonEmptyString {
+    #[inline]
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        match String::deserialize(deserializer) {
+            Ok(value) => Self::new(value).map_err(D::Error::custom),
+            Err(error) => Err(error),
+        }
+    }
+
+    #[inline]
+    fn deserialize_in_place<D>(deserializer: D, place: &mut Self) -> Result<(), D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        match Self::deserialize(deserializer) {
+            Ok(value) => {
+                *place = value;
+                Ok(())
+            }
+            Err(error) => Err(error),
+        }
+    }
+}
+
 #[cfg(test)]
 #[expect(
     clippy::inline_modules,
     reason = "preserve the established inline test layout"
 )]
 mod tests {
+    mod non_empty_string {
+        mod serde {
+            mod serialize {
+                #[test]
+                fn preserves_escapable_content_as_a_json_string() {
+                    use crate::test_support::OrAbort as _;
+                    let input = "quoted \"value\"\n";
+                    let value = super::super::super::super::NonEmptyString::new(input.to_owned())
+                        .or_abort("nonempty");
+                    let actual = serde_json::to_value(&value).or_abort("serialize");
+                    assert_eq!(actual, serde_json::Value::String(input.to_owned()));
+                }
+            }
+        }
+    }
     use core::borrow::Borrow;
 
     use super::{EmptyStringError, NonEmptyString};
@@ -188,3 +241,7 @@ mod tests {
         assert_eq!(value.to_string(), "iota");
     }
 }
+
+#[cfg(test)]
+#[path = "non_empty_string_properties.rs"]
+mod proptests;

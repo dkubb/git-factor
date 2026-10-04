@@ -30,6 +30,7 @@ pub(in crate::git_factor) fn error_to_exit(error: &FactorError) -> (i32, String)
         &FactorError::ExecFailed { .. } | &FactorError::TreeHashMismatch { .. } => EXIT_TEMPFAIL,
 
         &FactorError::GitCommand(_)
+        | &FactorError::PrerequisiteObservation(_)
         | &FactorError::StateRead(_)
         | &FactorError::StateWrite(_)
         | &FactorError::Io(_) => EXIT_SOFTWARE,
@@ -55,39 +56,6 @@ pub(in crate::git_factor) fn shell_quote(arg: &str) -> String {
     out
 }
 
-/// Returns the absolute path to `git-sequence-editor`, resolved as a sibling
-/// of the current executable.
-pub(in crate::git_factor) fn editor_path(ctx: &Ctx<'_>) -> Result<PathBuf, FactorError> {
-    let exe = match ctx.env.current_exe() {
-        Ok(exe) => exe,
-        Err(err) => {
-            return Err(FactorError::GitCommand(non_empty_msg(format!(
-                "cannot resolve current exe: {err}"
-            ))));
-        }
-    };
-    let script_path = match ctx.fs.canonicalize(&exe) {
-        Ok(script_path) => script_path,
-        Err(err) => {
-            return Err(FactorError::GitCommand(non_empty_msg(format!(
-                "cannot canonicalize exe: {err}"
-            ))));
-        }
-    };
-    let Some(dir) = script_path.parent() else {
-        return Err(FactorError::GitCommand(non_empty_msg(
-            "executable has no parent directory".to_owned(),
-        )));
-    };
-
-    Ok(dir.join("git-sequence-editor"))
-}
-
-/// Returns the path to the factor state directory.
-pub(in crate::git_factor) fn factor_dir_in(ctx: &Ctx<'_>) -> Result<StateDir, FactorError> {
-    Ok(StateDir::new(git_dir_in(ctx)?.join("factor")))
-}
-
 /// Extracts exit code from process status.
 pub(in crate::git_factor) fn status_code(status: ExitStatus) -> i32 {
     status.code().unwrap_or(EXIT_SOFTWARE)
@@ -95,6 +63,42 @@ pub(in crate::git_factor) fn status_code(status: ExitStatus) -> i32 {
 
 #[cfg(test)]
 mod tests {
+
+    mod status_code {
+        use crate::test_support::OrAbort as _;
+        use std::os::unix::process::ExitStatusExt as _;
+        use std::process::ExitStatus;
+        #[test]
+        fn maps_a_signal_to_the_operational_fallback() {
+            let signal: i32 = 15;
+            let actual = super::super::status_code(ExitStatus::from_raw(signal));
+            assert_eq!(actual, super::super::EXIT_SOFTWARE);
+        }
+        #[test]
+        fn preserves_a_native_nonzero_exit() {
+            let code: u8 = 42;
+            let raw = i32::from(code)
+                .checked_shl(8)
+                .or_abort("native wait-status shift count is below i32 width");
+            let actual = super::super::status_code(ExitStatus::from_raw(raw));
+            assert_eq!(actual, i32::from(code));
+        }
+    }
+    mod error_to_exit {
+        #[test]
+        fn prerequisite_observation_retains_operational_exit_and_primary_diagnostic() {
+            let error = super::super::FactorError::PrerequisiteObservation(
+                super::super::non_empty_msg("owned spawn failure".to_owned()),
+            );
+            assert_eq!(
+                super::super::error_to_exit(&error),
+                (
+                    super::super::EXIT_SOFTWARE,
+                    "git command failed: owned spawn failure".to_owned()
+                )
+            );
+        }
+    }
     use super::*;
 
     #[test]
@@ -141,6 +145,40 @@ mod tests {
 
 #[cfg(test)]
 mod proptests {
+
+    mod status_code {
+        use crate::test_support::OrAbort as _;
+        use proptest::prelude::*;
+        use std::os::unix::process::ExitStatusExt as _;
+        use std::process::ExitStatus;
+        const SIGNAL_FIRST: i32 = 1;
+        const SIGNAL_LAST: i32 = 31;
+        proptest! {
+            #[test]
+            fn preserves_generated_native_exits(code in any::<u8>()) {
+                let raw = i32::from(code).checked_shl(8).or_abort("native wait-status shift count is below i32 width");
+                let actual = super::super::status_code(ExitStatus::from_raw(raw));
+                prop_assert_eq!(actual, i32::from(code));
+            }
+            #[test]
+            fn maps_generated_native_signals_to_operational_fallback(signal in SIGNAL_FIRST..=SIGNAL_LAST) {
+                let actual = super::super::status_code(ExitStatus::from_raw(signal));
+                prop_assert_eq!(actual, super::super::EXIT_SOFTWARE);
+            }
+        }
+    }
+    mod error_to_exit {
+        proptest::proptest! {
+            #[test]
+            fn preserves_generated_prerequisite_exit_and_diagnostic(diagnostic in ".{1,40}") {
+                let error = super::super::FactorError::PrerequisiteObservation(
+                    super::super::non_empty_msg(diagnostic.clone()),
+                );
+                proptest::prop_assert_eq!(super::super::error_to_exit(&error),
+                    (super::super::EXIT_SOFTWARE, format!("git command failed: {diagnostic}")));
+            }
+        }
+    }
     use proptest::prelude::*;
 
     use super::*;
