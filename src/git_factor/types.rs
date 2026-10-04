@@ -232,6 +232,20 @@ impl StateDir {
 
 #[cfg(test)]
 mod tests {
+    mod state_dir {
+        mod new {
+            #[test]
+            fn preserves_relative_space_bearing_path() {
+                use std::path::PathBuf;
+                let input = PathBuf::from("relative/state ");
+
+                let actual = super::super::super::StateDir::new(input.clone());
+
+                assert_eq!(actual.as_path().as_os_str(), input.as_os_str());
+            }
+        }
+    }
+
     use super::{
         BaseParent, COMMIT_SHA_HEX_LEN, CommitSha, CommitSpan, Commits, FactorError, Sha, TreeHash,
     };
@@ -424,6 +438,35 @@ mod tests {
             prop_assert!(result.is_ok());
             if let Ok(value) = result {
                 prop_assert_eq!(value.as_str(), sha);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod proptests {
+    mod state_dir {
+        mod new {
+            use super::super::super::StateDir;
+            use proptest::prelude::*;
+            use std::path::PathBuf;
+
+            proptest! {
+                #[test]
+                fn preserves_generated_path_components(
+                    component in "[A-Za-z0-9 _.-]{1,32}",
+                    absolute in any::<bool>(),
+                ) {
+                    let input = if absolute {
+                        PathBuf::from("/").join(component)
+                    } else {
+                        PathBuf::from(component)
+                    };
+
+                    let actual = StateDir::new(input.clone());
+
+                    prop_assert_eq!(actual.as_path().as_os_str(), input.as_os_str());
+                }
             }
         }
     }
