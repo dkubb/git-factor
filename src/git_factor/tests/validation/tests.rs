@@ -1,3 +1,96 @@
+mod has_tree_change {
+    use super::super::{
+        BaseParent, CommitSha, CommitSpan, NonEmpty, has_tree_change, tree_fixture::Fixture,
+    };
+    use crate::test_support::OrAbort as _;
+    use std::fs;
+    #[test]
+    fn admits_an_actual_root_binary_change_without_mutation() {
+        let root = true;
+        let content: Option<Vec<u8>> = Some(vec![0, 255, 1]);
+        let fixture = Fixture::new(root, content.as_deref());
+        let index = fs::read(fixture.directory().join(".git/index")).ok();
+        let head = fixture.git(&["rev-parse", "HEAD"]);
+        let refs = fixture.git(&["for-each-ref", "--format=%(refname) %(objectname)"]);
+        let actual = has_tree_change(&fixture.context(), fixture.span());
+        assert_eq!(actual.or_abort("tree comparison"), content.is_some());
+        assert_eq!(fs::read(fixture.directory().join(".git/index")).ok(), index);
+        assert_eq!(fixture.git(&["rev-parse", "HEAD"]), head);
+        assert_eq!(
+            fixture.git(&["for-each-ref", "--format=%(refname) %(objectname)"]),
+            refs
+        );
+        assert_eq!(
+            fs::read(fixture.directory().join("user")).or_abort("protected bytes"),
+            b"unrelated user bytes".to_vec()
+        );
+        assert!(!fixture.directory().join(".git/factor").exists());
+    }
+    #[test]
+    fn refuses_an_unchanged_actual_nonempty_parent_boundary() {
+        let fixture = Fixture::new(false, None);
+        let index = fs::read(fixture.directory().join(".git/index")).or_abort("index");
+        let head = fixture.git(&["rev-parse", "HEAD"]);
+        let refs = fixture.git(&["for-each-ref", "--format=%(refname) %(objectname)"]);
+        let actual = has_tree_change(&fixture.context(), fixture.span());
+        assert!(!actual.or_abort("tree comparison"));
+        assert_eq!(
+            fs::read(fixture.directory().join(".git/index")).or_abort("index retained"),
+            index
+        );
+        assert_eq!(fixture.git(&["rev-parse", "HEAD"]), head);
+        assert_eq!(
+            fixture.git(&["for-each-ref", "--format=%(refname) %(objectname)"]),
+            refs
+        );
+        assert_eq!(
+            fs::read(fixture.directory().join("retained anchor")).or_abort("parent bytes retained"),
+            b"nonempty parent\0\n"
+        );
+        assert_eq!(
+            fs::read(fixture.directory().join("user")).or_abort("user bytes retained"),
+            b"unrelated user bytes"
+        );
+        assert!(!fixture.directory().join(".git/factor").exists());
+    }
+    #[test]
+    fn refuses_a_cancelling_range_relative_to_its_first_commit_parent() {
+        let fixture = Fixture::new(false, Some(b"temporary range change\0\n"));
+        let first = fixture.span().first_commit().clone();
+        fixture.git(&["rm", "--", "selected binary"]);
+        fixture.git(&["commit", "--quiet", "-m", "Remove temporary range change"]);
+        let tip = CommitSha::new(fixture.git(&["rev-parse", "HEAD"])).or_abort("range tip");
+        let span = CommitSpan::new(
+            NonEmpty::from_vec(vec![first, tip]).or_abort("two-commit span"),
+            BaseParent::Commit,
+        );
+        let index = fs::read(fixture.directory().join(".git/index")).or_abort("index");
+        let head = fixture.git(&["rev-parse", "HEAD"]);
+        let refs = fixture.git(&["for-each-ref", "--format=%(refname) %(objectname)"]);
+        let actual = has_tree_change(&fixture.context(), &span);
+        assert!(!actual.or_abort("combined range tree comparison"));
+        assert_eq!(
+            fs::read(fixture.directory().join(".git/index")).or_abort("index retained"),
+            index
+        );
+        assert_eq!(fixture.git(&["rev-parse", "HEAD"]), head);
+        assert_eq!(
+            fixture.git(&["for-each-ref", "--format=%(refname) %(objectname)"]),
+            refs
+        );
+        assert_eq!(
+            fs::read(fixture.directory().join("retained anchor")).or_abort("parent bytes retained"),
+            b"nonempty parent\0\n"
+        );
+        assert_eq!(
+            fs::read(fixture.directory().join("user")).or_abort("user bytes retained"),
+            b"unrelated user bytes"
+        );
+        assert!(!fixture.directory().join("selected binary").exists());
+        assert!(!fixture.directory().join(".git/factor").exists());
+    }
+}
+
 mod validate_exec_syntax {
     use super::*;
 
@@ -67,7 +160,13 @@ mod validate_exec_syntax {
         struct ExecSyntaxIoErrorRunner;
 
         impl Runner for ExecSyntaxIoErrorRunner {
-            fn output(&self, _bin: &str, _args: &[&str], _cwd: &Path) -> io::Result<Output> {
+            fn output(
+                &self,
+                _bin: &str,
+                _args: &[&str],
+                _envs: &[(&str, Option<&str>)],
+                _cwd: &Path,
+            ) -> io::Result<Output> {
                 Err(io::Error::other("output should not be called"))
             }
 
@@ -75,7 +174,7 @@ mod validate_exec_syntax {
                 &self,
                 _bin: &str,
                 _args: &[&str],
-                _envs: &[(&str, &str)],
+                _envs: &[(&str, Option<&str>)],
                 _quiet: bool,
                 _cwd: &Path,
             ) -> io::Result<ExitStatus> {
@@ -96,7 +195,7 @@ mod validate_exec_syntax {
             fs: &REAL_FS,
         };
         let output_err = runner
-            .output("git", &["status"], dir.path())
+            .output("git", &["status"], &[], dir.path())
             .err_or_abort("output method should fail");
         assert!(
             output_err
@@ -402,7 +501,7 @@ mod resolve_commit {
         assert_eq!(
             *calls.borrow(),
             vec![
-                r#"output git ["rev-parse", "--verify", "topic~2"] cwd="/contract/repository""#
+                r#"output git ["rev-parse", "--verify", "topic~2"] envs=[] cwd="/contract/repository""#
                     .to_owned(),
             ]
         );
@@ -432,7 +531,7 @@ mod resolve_commit {
         assert_eq!(
             *calls.borrow(),
             vec![
-                r#"output git ["rev-parse", "--verify", "topic~2"] cwd="/contract/repository""#
+                r#"output git ["rev-parse", "--verify", "topic~2"] envs=[] cwd="/contract/repository""#
                     .to_owned(),
             ]
         );
@@ -458,7 +557,7 @@ mod resolve_commit {
             vec![
                 concat!(
                     r#"output git ["rev-parse", "--verify", "topic~2"]"#,
-                    r#" cwd="/contract/repository""#,
+                    r#" envs=[] cwd="/contract/repository""#,
                 )
                 .to_owned(),
             ]
@@ -489,7 +588,7 @@ mod resolve_commit {
         assert_eq!(
             *calls.borrow(),
             vec![
-                r#"output git ["rev-parse", "--verify", "topic~2"] cwd="/contract/repository""#
+                r#"output git ["rev-parse", "--verify", "topic~2"] envs=[] cwd="/contract/repository""#
                     .to_owned(),
             ]
         );
@@ -521,7 +620,7 @@ mod resolve_commit {
         assert_eq!(
             *calls.borrow(),
             vec![
-                r#"output git ["rev-parse", "--verify", "topic~2"] cwd="/contract/repository""#
+                r#"output git ["rev-parse", "--verify", "topic~2"] envs=[] cwd="/contract/repository""#
                     .to_owned(),
             ]
         );
@@ -553,7 +652,7 @@ mod resolve_commit {
         assert_eq!(
             *calls.borrow(),
             vec![
-                r#"output git ["rev-parse", "--verify", "topic~2"] cwd="/contract/repository""#
+                r#"output git ["rev-parse", "--verify", "topic~2"] envs=[] cwd="/contract/repository""#
                     .to_owned(),
             ]
         );
@@ -585,7 +684,7 @@ mod resolve_commit {
         assert_eq!(
             *calls.borrow(),
             vec![
-                r#"output git ["rev-parse", "--verify", "topic~2"] cwd="/contract/repository""#
+                r#"output git ["rev-parse", "--verify", "topic~2"] envs=[] cwd="/contract/repository""#
                     .to_owned(),
             ]
         );
@@ -615,396 +714,10 @@ mod resolve_commit {
         assert_eq!(
             *calls.borrow(),
             vec![
-                r#"output git ["rev-parse", "--verify", "topic~2"] cwd="/contract/repository""#
+                r#"output git ["rev-parse", "--verify", "topic~2"] envs=[] cwd="/contract/repository""#
                     .to_owned(),
             ]
         );
-    }
-}
-
-mod remove_empty_root_in {
-    use super::*;
-
-    #[test]
-    fn remove_empty_root_in_reports_git_output_and_editor_path_failures() {
-        let dir = TempDir::new().or_abort("tempdir");
-        let env = TestEnv {
-            cwd: dir.path().to_path_buf(),
-        };
-
-        for (failure, expected) in [
-            (RootFailure::RevList, "forced rev-list failure"),
-            (RootFailure::LsTree, "forced ls-tree failure"),
-            (RootFailure::ShortRoot, "forced short-root failure"),
-        ] {
-            let runner = RootRunner {
-                fail_on: Some(failure),
-            };
-            let ctx = Ctx {
-                runner: &runner,
-                cwd: dir.path().to_path_buf(),
-                io: &REAL_IO,
-                env: &env,
-                fs: &REAL_FS,
-            };
-            let err = remove_empty_root_in(&ctx).err_or_abort("remove_empty_root_in should fail");
-            let message = git_command_message(&err).or_abort("expected GitCommand");
-            assert!(message.contains(expected), "unexpected error: {err:?}");
-        }
-
-        let runner = RootRunner { fail_on: None };
-        let failing_env = FailingExeEnv {
-            cwd: dir.path().to_path_buf(),
-        };
-        assert_eq!(
-            failing_env.current_dir().or_abort("cwd"),
-            dir.path().to_path_buf()
-        );
-        assert!(failing_env.var_os("TRACE").is_none());
-        let editor_ctx = Ctx {
-            runner: &runner,
-            cwd: dir.path().to_path_buf(),
-            io: &REAL_IO,
-            env: &failing_env,
-            fs: &REAL_FS,
-        };
-        let editor_err =
-            remove_empty_root_in(&editor_ctx).err_or_abort("editor path resolution should fail");
-        let editor_message = git_command_message(&editor_err).or_abort("expected GitCommand");
-        assert!(
-            editor_message.contains("forced current_exe failure"),
-            "unexpected error: {editor_err:?}"
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn remove_empty_root_in_reports_non_utf8_editor_path() {
-        let dir = TempDir::new().or_abort("tempdir");
-        let runner = RootRunner { fail_on: None };
-        let env = TestEnv {
-            cwd: dir.path().to_path_buf(),
-        };
-        let fs = NonUtf8Fs;
-        let ctx = Ctx {
-            runner: &runner,
-            cwd: dir.path().to_path_buf(),
-            io: &REAL_IO,
-            env: &env,
-            fs: &fs,
-        };
-
-        let err =
-            remove_empty_root_in(&ctx).err_or_abort("non-utf8 editor path should fail cleanup");
-        let message = git_command_message(&err).or_abort("expected GitCommand");
-        assert_eq!(message, "editor path is not valid UTF-8");
-    }
-
-    #[test]
-    fn remove_empty_root_in_returns_early_when_root_has_content() {
-        let dir = TempDir::new().or_abort("tempdir");
-        init_git_repo(dir.path());
-        let ctx = ctx_for(dir.path());
-
-        remove_empty_root_in(&ctx).or_abort("remove_empty_root_in should return early");
-    }
-
-    #[test]
-    fn remove_empty_root_in_reports_rebase_failure_for_empty_root() {
-        let dir = TempDir::new().or_abort("tempdir");
-        init_empty_root_repo(dir.path());
-        let ctx = ctx_for(dir.path());
-
-        let err =
-            remove_empty_root_in(&ctx).err_or_abort("rebase should fail without sequence editor");
-        let message = git_command_message(&err).or_abort("expected GitCommand");
-        assert!(
-            message.contains("rebase to remove empty root failed"),
-            "unexpected error: {err:?}"
-        );
-    }
-
-    #[test]
-    fn remove_empty_root_in_reports_missing_root_commit() {
-        struct NoRootRunner;
-
-        impl Runner for NoRootRunner {
-            fn output(&self, _bin: &str, args: &[&str], _cwd: &Path) -> io::Result<Output> {
-                if args != ["rev-list", "--max-parents=0", "HEAD"] {
-                    return Err(io::Error::other("unexpected args"));
-                }
-                Ok(Output {
-                    status: ExitStatus::from_raw(0),
-                    stdout: b"\n".to_vec(),
-                    stderr: Vec::new(),
-                })
-            }
-
-            fn status(
-                &self,
-                _bin: &str,
-                _args: &[&str],
-                _envs: &[(&str, &str)],
-                _quiet: bool,
-                _cwd: &Path,
-            ) -> io::Result<ExitStatus> {
-                Ok(ExitStatus::from_raw(0))
-            }
-        }
-
-        let dir = TempDir::new().or_abort("tempdir");
-        let env = TestEnv {
-            cwd: dir.path().to_path_buf(),
-        };
-        let runner = NoRootRunner;
-        let status = runner
-            .status("git", &["status"], &[], false, dir.path())
-            .or_abort("status should succeed");
-        assert_eq!(status.code(), Some(i32::default()));
-        let output = runner
-            .output("git", &["rev-list", "--max-parents=0", "HEAD"], dir.path())
-            .or_abort("output should succeed");
-        assert!(output.stderr.is_empty(), "stderr should be empty");
-        let output_err = runner
-            .output("git", &["unexpected"], dir.path())
-            .err_or_abort("unexpected args should fail");
-        assert_eq!(output_err.to_string(), "unexpected args");
-        let ctx = Ctx {
-            runner: &runner,
-            cwd: dir.path().to_path_buf(),
-            io: &REAL_IO,
-            env: &env,
-            fs: &REAL_FS,
-        };
-
-        let err = remove_empty_root_in(&ctx).err_or_abort("missing root should fail");
-        let message = git_command_message(&err).or_abort("expected GitCommand");
-        assert!(
-            message.contains("no root commit found"),
-            "unexpected error: {err:?}"
-        );
-    }
-
-    #[test]
-    fn remove_empty_root_in_propagates_rebase_status_io_error() {
-        struct RebaseStatusIoErrorRunner;
-
-        impl Runner for RebaseStatusIoErrorRunner {
-            fn output(&self, _bin: &str, args: &[&str], _cwd: &Path) -> io::Result<Output> {
-                let stdout = match *args {
-                    ["rev-list", "--max-parents=0", "HEAD"] => {
-                        format!("{}\n", "a".repeat(COMMIT_SHA_HEX_LEN)).into_bytes()
-                    }
-                    ["ls-tree", _] => Vec::new(),
-                    ["rev-parse", "--short", _] => b"aaaaaaa\n".to_vec(),
-                    _ => {
-                        return Err(io::Error::other(format!(
-                            "unexpected args: {}",
-                            args.join(" ")
-                        )));
-                    }
-                };
-
-                Ok(Output {
-                    status: ExitStatus::from_raw(0),
-                    stdout,
-                    stderr: Vec::new(),
-                })
-            }
-
-            fn status(
-                &self,
-                _bin: &str,
-                args: &[&str],
-                _envs: &[(&str, &str)],
-                _quiet: bool,
-                _cwd: &Path,
-            ) -> io::Result<ExitStatus> {
-                if args
-                    != [
-                        "rebase",
-                        "--empty",
-                        "drop",
-                        "--interactive",
-                        "--no-autosquash",
-                        "--no-update-refs",
-                        "--quiet",
-                        "--root",
-                    ]
-                {
-                    return Err(io::Error::other("unexpected status args"));
-                }
-                Err(io::Error::other("rebase status io fail"))
-            }
-        }
-
-        let dir = TempDir::new().or_abort("tempdir");
-        fs::write(dir.path().join("git-factor"), "").or_abort("create git-factor");
-        let env = TestEnv {
-            cwd: dir.path().to_path_buf(),
-        };
-        let runner = RebaseStatusIoErrorRunner;
-        let unexpected_output_err = runner
-            .output("git", &["unexpected"], dir.path())
-            .err_or_abort("unexpected args should fail");
-        assert!(
-            unexpected_output_err
-                .to_string()
-                .contains("unexpected args"),
-            "unexpected error: {unexpected_output_err}"
-        );
-        let status_err = runner
-            .status("git", &["status"], &[], false, dir.path())
-            .err_or_abort("unexpected status args should fail");
-        assert_eq!(status_err.to_string(), "unexpected status args");
-        let ctx = Ctx {
-            runner: &runner,
-            cwd: dir.path().to_path_buf(),
-            io: &REAL_IO,
-            env: &env,
-            fs: &REAL_FS,
-        };
-
-        let err =
-            remove_empty_root_in(&ctx).err_or_abort("rebase status io failure should propagate");
-        let message = git_command_message(&err).or_abort("expected GitCommand");
-        assert!(
-            message.contains("rebase status io fail"),
-            "unexpected error: {err:?}"
-        );
-    }
-
-    #[test]
-    fn remove_empty_root_in_rejects_multiple_root_commits() {
-        struct MultiRootRunner;
-
-        impl Runner for MultiRootRunner {
-            fn output(&self, _bin: &str, args: &[&str], _cwd: &Path) -> io::Result<Output> {
-                if args != ["rev-list", "--max-parents=0", "HEAD"] {
-                    return Err(io::Error::other("unexpected args"));
-                }
-                let stdout = format!(
-                    "{}\n{}\n",
-                    "a".repeat(COMMIT_SHA_HEX_LEN),
-                    "b".repeat(COMMIT_SHA_HEX_LEN)
-                )
-                .into_bytes();
-                Ok(Output {
-                    status: ExitStatus::from_raw(0),
-                    stdout,
-                    stderr: Vec::new(),
-                })
-            }
-
-            fn status(
-                &self,
-                _bin: &str,
-                _args: &[&str],
-                _envs: &[(&str, &str)],
-                _quiet: bool,
-                _cwd: &Path,
-            ) -> io::Result<ExitStatus> {
-                Ok(ExitStatus::from_raw(0))
-            }
-        }
-
-        let dir = TempDir::new().or_abort("tempdir");
-        let env = TestEnv {
-            cwd: dir.path().to_path_buf(),
-        };
-        let runner = MultiRootRunner;
-        let status = runner
-            .status("git", &["status"], &[], false, dir.path())
-            .or_abort("status should succeed");
-        assert_eq!(status.code(), Some(i32::default()));
-        let output_err = runner
-            .output("git", &["unexpected"], dir.path())
-            .err_or_abort("unexpected args should fail");
-        assert_eq!(output_err.to_string(), "unexpected args");
-        let ctx = Ctx {
-            runner: &runner,
-            cwd: dir.path().to_path_buf(),
-            io: &REAL_IO,
-            env: &env,
-            fs: &REAL_FS,
-        };
-
-        let err = remove_empty_root_in(&ctx).err_or_abort("multiple roots should fail");
-        let message = git_command_message(&err).or_abort("expected GitCommand");
-        assert!(
-            message.contains("multiple root commits found"),
-            "unexpected error: {err:?}"
-        );
-    }
-
-    #[test]
-    fn remove_empty_root_in_passes_empty_drop_to_rebase() {
-        let dir = TempDir::new().or_abort("tempdir");
-        let env = TestEnv {
-            cwd: dir.path().to_path_buf(),
-        };
-        let runner = RebaseArgsRunner;
-        let unexpected = runner
-            .output("git", &["unexpected"], dir.path())
-            .err_or_abort("unexpected args should error");
-        assert!(
-            unexpected.to_string().contains("unexpected args"),
-            "err was: {unexpected}"
-        );
-        let expected_rebase_args = [
-            "rebase",
-            "--empty",
-            "drop",
-            "--interactive",
-            "--no-autosquash",
-            "--no-update-refs",
-            "--quiet",
-            "--root",
-        ];
-        let unexpected_status_args_err = runner
-            .status("git", &["status"], &[], false, dir.path())
-            .err_or_abort("unexpected status args should fail");
-        assert_eq!(
-            unexpected_status_args_err.to_string(),
-            "unexpected status args"
-        );
-        let missing_editor_env_err = runner
-            .status(
-                "git",
-                &expected_rebase_args,
-                &[("GIT_SEQUENCE_EDITOR", "git-factor --drop")],
-                false,
-                dir.path(),
-            )
-            .err_or_abort("missing GIT_EDITOR should fail");
-        assert_eq!(
-            missing_editor_env_err.to_string(),
-            "missing GIT_EDITOR=false env var"
-        );
-        let missing_sequence_editor_env_err = runner
-            .status(
-                "git",
-                &expected_rebase_args,
-                &[("GIT_EDITOR", "false")],
-                false,
-                dir.path(),
-            )
-            .err_or_abort("missing GIT_SEQUENCE_EDITOR should fail");
-        assert_eq!(
-            missing_sequence_editor_env_err.to_string(),
-            "missing GIT_SEQUENCE_EDITOR with --drop"
-        );
-
-        let ctx = Ctx {
-            runner: &runner,
-            cwd: dir.path().to_path_buf(),
-            io: &REAL_IO,
-            env: &env,
-            fs: &REAL_FS,
-        };
-
-        remove_empty_root_in(&ctx)
-            .or_abort("remove_empty_root_in should pass expected rebase args");
     }
 }
 
@@ -1086,12 +799,20 @@ impl Fs for NonUtf8Fs {
         REAL_FS.read_to_string(path)
     }
 
+    fn remove_atomic_file(&self, path: &Path) -> io::Result<()> {
+        REAL_FS.remove_atomic_file(path)
+    }
+
     fn remove_dir_all(&self, path: &Path) -> io::Result<()> {
         REAL_FS.remove_dir_all(path)
     }
 
-    fn remove_file(&self, path: &Path) -> io::Result<()> {
-        REAL_FS.remove_file(path)
+    fn symlink_metadata(&self, path: &Path) -> io::Result<fs::Metadata> {
+        REAL_FS.symlink_metadata(path)
+    }
+
+    fn write_atomic_string(&self, path: &Path, content: &str) -> io::Result<()> {
+        REAL_FS.write_atomic_string(path, content)
     }
 
     fn write_string(&self, path: &Path, content: &str) -> io::Result<()> {
@@ -1099,130 +820,16 @@ impl Fs for NonUtf8Fs {
     }
 }
 
-#[derive(Copy, Clone, Eq, PartialEq)]
-enum RootFailure {
-    LsTree,
-    RevList,
-    ShortRoot,
-}
-
-struct RootRunner {
-    fail_on: Option<RootFailure>,
-}
-
-impl Runner for RootRunner {
-    fn output(&self, _bin: &str, args: &[&str], _cwd: &Path) -> io::Result<Output> {
-        let stdout = match *args {
-            ["rev-list", "--max-parents=0", "HEAD"] => {
-                if self.fail_on == Some(RootFailure::RevList) {
-                    return Err(io::Error::other("forced rev-list failure"));
-                }
-                "a".repeat(COMMIT_SHA_HEX_LEN).into_bytes()
-            }
-            ["ls-tree", _] => {
-                if self.fail_on == Some(RootFailure::LsTree) {
-                    return Err(io::Error::other("forced ls-tree failure"));
-                }
-                Vec::new()
-            }
-            ["rev-parse", "--short", _] => {
-                if self.fail_on == Some(RootFailure::ShortRoot) {
-                    return Err(io::Error::other("forced short-root failure"));
-                }
-                b"aaaaaaa\n".to_vec()
-            }
-            _ => {
-                return Err(io::Error::other(format!(
-                    "unexpected args: {}",
-                    args.join(" ")
-                )));
-            }
-        };
-
-        Ok(Output {
-            status: ExitStatus::from_raw(0),
-            stdout,
-            stderr: Vec::new(),
-        })
-    }
-
-    fn status(
-        &self,
-        _bin: &str,
-        _args: &[&str],
-        _envs: &[(&str, &str)],
-        _quiet: bool,
-        _cwd: &Path,
-    ) -> io::Result<ExitStatus> {
-        Ok(ExitStatus::from_raw(0))
-    }
-}
-
-struct RebaseArgsRunner;
-
-impl Runner for RebaseArgsRunner {
-    fn output(&self, _bin: &str, args: &[&str], _cwd: &Path) -> io::Result<Output> {
-        let stdout = match *args {
-            ["rev-list", "--max-parents=0", "HEAD"] => {
-                format!("{}\n", "a".repeat(COMMIT_SHA_HEX_LEN)).into_bytes()
-            }
-            ["ls-tree", _] => Vec::new(),
-            ["rev-parse", "--short", _] => b"aaaaaaa\n".to_vec(),
-            _ => {
-                return Err(io::Error::other(format!(
-                    "unexpected args: {}",
-                    args.join(" ")
-                )));
-            }
-        };
-
-        Ok(Output {
-            status: ExitStatus::from_raw(0),
-            stdout,
-            stderr: Vec::new(),
-        })
-    }
-
-    fn status(
-        &self,
-        _bin: &str,
-        args: &[&str],
-        envs: &[(&str, &str)],
-        _quiet: bool,
-        _cwd: &Path,
-    ) -> io::Result<ExitStatus> {
-        if args
-            != [
-                "rebase",
-                "--empty",
-                "drop",
-                "--interactive",
-                "--no-autosquash",
-                "--no-update-refs",
-                "--quiet",
-                "--root",
-            ]
-        {
-            return Err(io::Error::other("unexpected status args"));
-        }
-        if !envs.contains(&("GIT_EDITOR", "false")) {
-            return Err(io::Error::other("missing GIT_EDITOR=false env var"));
-        }
-        if !envs
-            .iter()
-            .any(|&(key, value)| key == "GIT_SEQUENCE_EDITOR" && value.contains("--drop"))
-        {
-            return Err(io::Error::other("missing GIT_SEQUENCE_EDITOR with --drop"));
-        }
-
-        Ok(ExitStatus::from_raw(0))
-    }
-}
-
 struct RangeLookupRunner;
 
 impl Runner for RangeLookupRunner {
-    fn output(&self, _bin: &str, args: &[&str], _cwd: &Path) -> io::Result<Output> {
+    fn output(
+        &self,
+        _bin: &str,
+        args: &[&str],
+        _envs: &[(&str, Option<&str>)],
+        _cwd: &Path,
+    ) -> io::Result<Output> {
         let expected_range = format!("{SPAN_START_SHA}..{SPAN_END_SHA}");
         let (status, stdout, stderr) = if args == ["rev-parse", "--verify", "start"] {
             (
@@ -1267,27 +874,58 @@ impl Runner for RangeLookupRunner {
         &self,
         _bin: &str,
         args: &[&str],
-        _envs: &[(&str, &str)],
+        _envs: &[(&str, Option<&str>)],
         _quiet: bool,
         _cwd: &Path,
     ) -> io::Result<ExitStatus> {
-        Err(io::Error::other(format!(
-            "unexpected status args: {}",
-            args.join(" ")
-        )))
+        let start_merge_ref = format!("{SPAN_START_SHA}^2");
+        let end_merge_ref = format!("{SPAN_END_SHA}^2");
+        if args == ["rev-parse", "--quiet", "--verify", start_merge_ref.as_str()]
+            || args == ["rev-parse", "--quiet", "--verify", end_merge_ref.as_str()]
+        {
+            Ok(ExitStatus::from_raw(256))
+        } else {
+            Err(io::Error::other(format!(
+                "unexpected status args: {}",
+                args.join(" ")
+            )))
+        }
     }
 }
 
 struct ParentLookupRunner;
 
 impl Runner for ParentLookupRunner {
-    fn output(&self, _bin: &str, args: &[&str], _cwd: &Path) -> io::Result<Output> {
-        if matches!(args, ["cat-file", "commit", SPAN_START_SHA | SPAN_END_SHA]) {
+    fn output(
+        &self,
+        _bin: &str,
+        args: &[&str],
+        _envs: &[(&str, Option<&str>)],
+        _cwd: &Path,
+    ) -> io::Result<Output> {
+        if args == ["cat-file", "commit", SPAN_START_SHA] {
+            return Ok(Output {
+                status: ExitStatus::from_raw(0),
+                stdout: concat!(
+                    "tree cccccccccccccccccccccccccccccccccccccccc\n",
+                    "author Example <example@example.com> 1 +0000\n",
+                    "committer Example <example@example.com> 1 +0000\n\nstart\n"
+                )
+                .as_bytes()
+                .to_vec(),
+                stderr: Vec::new(),
+            });
+        }
+        if args == ["cat-file", "commit", SPAN_END_SHA] {
             return Ok(Output {
                 status: ExitStatus::from_raw(0),
                 stdout: format!(
-                    "tree {}\nauthor Example <example@example.com> 1 +0000\n\nsubject\n",
-                    "c".repeat(COMMIT_SHA_HEX_LEN)
+                    concat!(
+                        "tree cccccccccccccccccccccccccccccccccccccccc\nparent {}\n",
+                        "author Example <example@example.com> 1 +0000\n",
+                        "committer Example <example@example.com> 1 +0000\n\nend\n"
+                    ),
+                    SPAN_START_SHA
                 )
                 .into_bytes(),
                 stderr: Vec::new(),
@@ -1312,27 +950,58 @@ impl Runner for ParentLookupRunner {
         &self,
         _bin: &str,
         args: &[&str],
-        _envs: &[(&str, &str)],
+        _envs: &[(&str, Option<&str>)],
         _quiet: bool,
         _cwd: &Path,
     ) -> io::Result<ExitStatus> {
-        Err(io::Error::other(format!(
-            "unexpected status args: {}",
-            args.join(" ")
-        )))
+        let start_merge_ref = format!("{SPAN_START_SHA}^2");
+        let end_merge_ref = format!("{SPAN_END_SHA}^2");
+        if args == ["rev-parse", "--quiet", "--verify", start_merge_ref.as_str()]
+            || args == ["rev-parse", "--quiet", "--verify", end_merge_ref.as_str()]
+        {
+            Ok(ExitStatus::from_raw(256))
+        } else {
+            Err(io::Error::other(format!(
+                "unexpected status args: {}",
+                args.join(" ")
+            )))
+        }
     }
 }
 
 struct ParentParseRunner;
 
 impl Runner for ParentParseRunner {
-    fn output(&self, _bin: &str, args: &[&str], _cwd: &Path) -> io::Result<Output> {
-        if matches!(args, ["cat-file", "commit", SPAN_START_SHA | SPAN_END_SHA]) {
+    fn output(
+        &self,
+        _bin: &str,
+        args: &[&str],
+        _envs: &[(&str, Option<&str>)],
+        _cwd: &Path,
+    ) -> io::Result<Output> {
+        if args == ["cat-file", "commit", SPAN_START_SHA] {
+            return Ok(Output {
+                status: ExitStatus::from_raw(0),
+                stdout: concat!(
+                    "tree cccccccccccccccccccccccccccccccccccccccc\n",
+                    "author Example <example@example.com> 1 +0000\n",
+                    "committer Example <example@example.com> 1 +0000\n\nstart\n"
+                )
+                .as_bytes()
+                .to_vec(),
+                stderr: Vec::new(),
+            });
+        }
+        if args == ["cat-file", "commit", SPAN_END_SHA] {
             return Ok(Output {
                 status: ExitStatus::from_raw(0),
                 stdout: format!(
-                    "tree {}\nauthor Example <example@example.com> 1 +0000\n\nsubject\n",
-                    "c".repeat(COMMIT_SHA_HEX_LEN)
+                    concat!(
+                        "tree cccccccccccccccccccccccccccccccccccccccc\nparent {}\n",
+                        "author Example <example@example.com> 1 +0000\n",
+                        "committer Example <example@example.com> 1 +0000\n\nend\n"
+                    ),
+                    SPAN_START_SHA
                 )
                 .into_bytes(),
                 stderr: Vec::new(),
@@ -1357,14 +1026,22 @@ impl Runner for ParentParseRunner {
         &self,
         _bin: &str,
         args: &[&str],
-        _envs: &[(&str, &str)],
+        _envs: &[(&str, Option<&str>)],
         _quiet: bool,
         _cwd: &Path,
     ) -> io::Result<ExitStatus> {
-        Err(io::Error::other(format!(
-            "unexpected status args: {}",
-            args.join(" ")
-        )))
+        let start_merge_ref = format!("{SPAN_START_SHA}^2");
+        let end_merge_ref = format!("{SPAN_END_SHA}^2");
+        if args == ["rev-parse", "--quiet", "--verify", start_merge_ref.as_str()]
+            || args == ["rev-parse", "--quiet", "--verify", end_merge_ref.as_str()]
+        {
+            Ok(ExitStatus::from_raw(256))
+        } else {
+            Err(io::Error::other(format!(
+                "unexpected status args: {}",
+                args.join(" ")
+            )))
+        }
     }
 }
 
@@ -1446,6 +1123,10 @@ fn init_git_repo(path: &Path) {
     assert!(commit.success(), "git commit failed");
 }
 
+#[expect(
+    clippy::single_call_fn,
+    reason = "native parentless empty-root arrangement remains separate from its decisive validation Act"
+)]
 fn init_empty_root_repo(path: &Path) {
     let init = Command::new("git")
         .args(["init", "--quiet"])
@@ -1997,26 +1678,15 @@ fn validate_not_merge_rejects_merge_commit() {
 }
 
 #[test]
-fn root_runner_helpers_cover_unexpected_and_status_paths() {
-    let runner = RootRunner { fail_on: None };
-    let status = runner
-        .status("git", &["status"], &[], false, Path::new("."))
-        .or_abort("status");
-    assert!(status.success());
-    let unexpected = runner
-        .output("git", &["status"], Path::new("."))
-        .err_or_abort("unexpected args should fail");
-    assert!(
-        unexpected.to_string().contains("unexpected args"),
-        "unexpected error: {unexpected:?}"
-    );
-}
-
-#[test]
 fn range_lookup_runner_covers_expected_and_unexpected_paths() {
     let range_runner = RangeLookupRunner;
     let start_output = range_runner
-        .output("git", &["rev-parse", "--verify", "start"], Path::new("."))
+        .output(
+            "git",
+            &["rev-parse", "--verify", "start"],
+            &[],
+            Path::new("."),
+        )
         .or_abort("resolve start ref");
     assert!(start_output.status.success());
     assert_eq!(
@@ -2026,7 +1696,12 @@ fn range_lookup_runner_covers_expected_and_unexpected_paths() {
     assert!(start_output.stderr.is_empty());
 
     let end_output = range_runner
-        .output("git", &["rev-parse", "--verify", "end"], Path::new("."))
+        .output(
+            "git",
+            &["rev-parse", "--verify", "end"],
+            &[],
+            Path::new("."),
+        )
         .or_abort("resolve end ref");
     assert!(end_output.status.success());
     assert_eq!(end_output.stdout, format!("{SPAN_END_SHA}\n").into_bytes());
@@ -2041,6 +1716,7 @@ fn range_lookup_runner_covers_expected_and_unexpected_paths() {
                 "--ancestry-path",
                 &format!("{SPAN_START_SHA}..{SPAN_END_SHA}"),
             ],
+            &[],
             Path::new("."),
         )
         .or_abort("range lookup output");
@@ -2048,8 +1724,40 @@ fn range_lookup_runner_covers_expected_and_unexpected_paths() {
     assert!(range_output.stdout.is_empty());
     assert_eq!(range_output.stderr, b"forced range lookup failure\n");
 
+    let start_merge = range_runner
+        .status(
+            "git",
+            &[
+                "rev-parse",
+                "--quiet",
+                "--verify",
+                &format!("{SPAN_START_SHA}^2"),
+            ],
+            &[],
+            false,
+            Path::new("."),
+        )
+        .or_abort("start merge check");
+    assert!(!start_merge.success());
+
+    let end_merge = range_runner
+        .status(
+            "git",
+            &[
+                "rev-parse",
+                "--quiet",
+                "--verify",
+                &format!("{SPAN_END_SHA}^2"),
+            ],
+            &[],
+            false,
+            Path::new("."),
+        )
+        .or_abort("end merge check");
+    assert!(!end_merge.success());
+
     let unexpected_range_output = range_runner
-        .output("git", &["status"], Path::new("."))
+        .output("git", &["status"], &[], Path::new("."))
         .err_or_abort("unexpected range output args should fail");
     assert!(
         unexpected_range_output
@@ -2076,6 +1784,7 @@ fn parent_lookup_runner_covers_expected_and_unexpected_paths() {
         .output(
             "git",
             &["rev-parse", "--verify", &format!("{SPAN_END_SHA}^")],
+            &[],
             Path::new("."),
         )
         .or_abort("missing parent output");
@@ -2086,8 +1795,40 @@ fn parent_lookup_runner_covers_expected_and_unexpected_paths() {
         b"forced parent lookup failure\n"
     );
 
+    let lookup_start_merge = parent_lookup_runner
+        .status(
+            "git",
+            &[
+                "rev-parse",
+                "--quiet",
+                "--verify",
+                &format!("{SPAN_START_SHA}^2"),
+            ],
+            &[],
+            false,
+            Path::new("."),
+        )
+        .or_abort("lookup start merge check");
+    assert!(!lookup_start_merge.success());
+
+    let lookup_end_merge = parent_lookup_runner
+        .status(
+            "git",
+            &[
+                "rev-parse",
+                "--quiet",
+                "--verify",
+                &format!("{SPAN_END_SHA}^2"),
+            ],
+            &[],
+            false,
+            Path::new("."),
+        )
+        .or_abort("lookup end merge check");
+    assert!(!lookup_end_merge.success());
+
     let unexpected_lookup_output = parent_lookup_runner
-        .output("git", &["status"], Path::new("."))
+        .output("git", &["status"], &[], Path::new("."))
         .err_or_abort("unexpected lookup output args should fail");
     assert!(
         unexpected_lookup_output
@@ -2114,6 +1855,7 @@ fn parent_parse_runner_covers_expected_and_unexpected_paths() {
         .output(
             "git",
             &["rev-parse", "--verify", &format!("{SPAN_END_SHA}^")],
+            &[],
             Path::new("."),
         )
         .or_abort("invalid parent output");
@@ -2121,8 +1863,40 @@ fn parent_parse_runner_covers_expected_and_unexpected_paths() {
     assert_eq!(invalid_parent_output.stdout, b"not-a-commit\n");
     assert!(invalid_parent_output.stderr.is_empty());
 
+    let parse_start_merge = parent_parse_runner
+        .status(
+            "git",
+            &[
+                "rev-parse",
+                "--quiet",
+                "--verify",
+                &format!("{SPAN_START_SHA}^2"),
+            ],
+            &[],
+            false,
+            Path::new("."),
+        )
+        .or_abort("parse start merge check");
+    assert!(!parse_start_merge.success());
+
+    let parse_end_merge = parent_parse_runner
+        .status(
+            "git",
+            &[
+                "rev-parse",
+                "--quiet",
+                "--verify",
+                &format!("{SPAN_END_SHA}^2"),
+            ],
+            &[],
+            false,
+            Path::new("."),
+        )
+        .or_abort("parse end merge check");
+    assert!(!parse_end_merge.success());
+
     let unexpected_parse_output = parent_parse_runner
-        .output("git", &["status"], Path::new("."))
+        .output("git", &["status"], &[], Path::new("."))
         .err_or_abort("unexpected parse output args should fail");
     assert!(
         unexpected_parse_output
@@ -2172,8 +1946,6 @@ fn env_and_fs_helpers_cover_delegated_paths() {
         fs.write_string(&file, "hello").or_abort("write file");
         let content = fs.read_to_string(&file).or_abort("read file");
         assert_eq!(content, "hello");
-        fs.remove_file(&file).or_abort("remove file");
-        assert!(!fs.exists(&file));
 
         let rm_dir = dir.path().join("rm-dir");
         fs.create_dir_all(&rm_dir).or_abort("create rm dir");
@@ -2276,7 +2048,13 @@ fn sort_topologically_reports_empty_sorted_output() {
     struct EmptySortRunner;
 
     impl Runner for EmptySortRunner {
-        fn output(&self, _bin: &str, args: &[&str], _cwd: &Path) -> io::Result<Output> {
+        fn output(
+            &self,
+            _bin: &str,
+            args: &[&str],
+            _envs: &[(&str, Option<&str>)],
+            _cwd: &Path,
+        ) -> io::Result<Output> {
             if !args.starts_with(&["rev-list", "--reverse", "--topo-order"]) {
                 return Err(io::Error::other("unexpected args"));
             }
@@ -2291,7 +2069,7 @@ fn sort_topologically_reports_empty_sorted_output() {
             &self,
             _bin: &str,
             _args: &[&str],
-            _envs: &[(&str, &str)],
+            _envs: &[(&str, Option<&str>)],
             _quiet: bool,
             _cwd: &Path,
         ) -> io::Result<ExitStatus> {
@@ -2319,7 +2097,7 @@ fn sort_topologically_reports_empty_sorted_output() {
         .or_abort("status should succeed");
     assert_eq!(status.code(), Some(i32::default()));
     let unexpected = runner
-        .output("git", &["unexpected"], dir.path())
+        .output("git", &["unexpected"], &[], dir.path())
         .err_or_abort("unexpected args should fail");
     assert_eq!(unexpected.to_string(), "unexpected args");
 

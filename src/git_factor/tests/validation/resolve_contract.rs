@@ -1,5 +1,6 @@
 use super::*;
-use core::cell::RefCell;
+use core::cell::{Cell, RefCell};
+use std::fs;
 use std::os::unix::process::ExitStatusExt as _;
 
 #[derive(Clone)]
@@ -10,6 +11,7 @@ pub(in crate::git_factor::validation) enum Reply {
 
 pub(in crate::git_factor::validation) struct Observation<'calls> {
     calls: &'calls RefCell<Vec<String>>,
+    consumed: Cell<bool>,
     reply: Reply,
 }
 
@@ -18,7 +20,11 @@ impl<'calls> Observation<'calls> {
         calls: &'calls RefCell<Vec<String>>,
         reply: Reply,
     ) -> Self {
-        Self { calls, reply }
+        Self {
+            calls,
+            consumed: Cell::new(false),
+            reply,
+        }
     }
 
     fn refused<T>(&self, call: String) -> io::Result<T> {
@@ -28,10 +34,19 @@ impl<'calls> Observation<'calls> {
 }
 
 impl Runner for Observation<'_> {
-    fn output(&self, bin: &str, args: &[&str], cwd: &Path) -> io::Result<Output> {
+    fn output(
+        &self,
+        bin: &str,
+        args: &[&str],
+        envs: &[(&str, Option<&str>)],
+        cwd: &Path,
+    ) -> io::Result<Output> {
         self.calls
             .borrow_mut()
-            .push(format!("output {bin} {args:?} cwd={cwd:?}"));
+            .push(format!("output {bin} {args:?} envs={envs:?} cwd={cwd:?}"));
+        if self.consumed.replace(true) {
+            return Err(io::Error::other("no snapshot reply"));
+        }
         match self.reply.clone() {
             Reply::IoFailure => Err(io::Error::other("resolution launch failed")),
             Reply::Output { exit_code, stdout } => Ok(Output {
@@ -46,7 +61,7 @@ impl Runner for Observation<'_> {
         &self,
         bin: &str,
         args: &[&str],
-        envs: &[(&str, &str)],
+        envs: &[(&str, Option<&str>)],
         quiet: bool,
         cwd: &Path,
     ) -> io::Result<ExitStatus> {
@@ -93,11 +108,17 @@ impl Fs for Observation<'_> {
     fn read_to_string(&self, path: &Path) -> io::Result<String> {
         self.refused(format!("read_to_string {path:?}"))
     }
+    fn remove_atomic_file(&self, path: &Path) -> io::Result<()> {
+        self.refused(format!("remove_atomic_file {path:?}"))
+    }
     fn remove_dir_all(&self, path: &Path) -> io::Result<()> {
         self.refused(format!("remove_dir_all {path:?}"))
     }
-    fn remove_file(&self, path: &Path) -> io::Result<()> {
-        self.refused(format!("remove_file {path:?}"))
+    fn symlink_metadata(&self, path: &Path) -> io::Result<fs::Metadata> {
+        self.refused(format!("symlink_metadata {path:?}"))
+    }
+    fn write_atomic_string(&self, path: &Path, content: &str) -> io::Result<()> {
+        self.refused(format!("write_atomic_string {path:?} {content:?}"))
     }
     fn write_string(&self, path: &Path, content: &str) -> io::Result<()> {
         self.refused(format!("write_string {path:?} {content:?}"))

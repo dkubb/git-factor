@@ -106,11 +106,17 @@ pub(in crate::git_factor) trait Fs {
     /// Reads a UTF-8 text file into a string.
     fn read_to_string(&self, path: &Path) -> io::Result<String>;
 
+    /// Unlinks the canonical journal and syncs its containing directory.
+    fn remove_atomic_file(&self, path: &Path) -> io::Result<()>;
+
     /// Removes a directory tree.
     fn remove_dir_all(&self, path: &Path) -> io::Result<()>;
 
-    /// Removes a file.
-    fn remove_file(&self, path: &Path) -> io::Result<()>;
+    /// Observes a path without following its final symbolic link.
+    fn symlink_metadata(&self, path: &Path) -> io::Result<fs::Metadata>;
+
+    /// Atomically publishes the complete journal and syncs its containing directory.
+    fn write_atomic_string(&self, path: &Path, content: &str) -> io::Result<()>;
 
     /// Writes a UTF-8 text file from a string.
     fn write_string(&self, path: &Path, content: &str) -> io::Result<()>;
@@ -140,12 +146,36 @@ impl Fs for RealFs {
         fs::read_to_string(path)
     }
 
+    fn remove_atomic_file(&self, path: &Path) -> io::Result<()> {
+        let directory = path.parent().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "journal path lacks parent")
+        })?;
+        fs::remove_file(path)?;
+        fs::File::open(directory)?.sync_all()
+    }
+
     fn remove_dir_all(&self, path: &Path) -> io::Result<()> {
         fs::remove_dir_all(path)
     }
 
-    fn remove_file(&self, path: &Path) -> io::Result<()> {
-        fs::remove_file(path)
+    fn symlink_metadata(&self, path: &Path) -> io::Result<fs::Metadata> {
+        fs::symlink_metadata(path)
+    }
+
+    fn write_atomic_string(&self, path: &Path, content: &str) -> io::Result<()> {
+        use io::Write as _;
+        let directory = path.parent().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "journal path lacks parent")
+        })?;
+        let mut temporary = tempfile::NamedTempFile::new_in(directory)?;
+        temporary.write_all(content.as_bytes())?;
+        temporary.as_file().sync_all()?;
+        temporary.persist(path).map_err(|error| error.error)?;
+        fs::File::open(directory)?.sync_all()?;
+        if let Some(parent) = directory.parent() {
+            fs::File::open(parent)?.sync_all()?;
+        }
+        Ok(())
     }
 
     fn write_string(&self, path: &Path, content: &str) -> io::Result<()> {
@@ -159,7 +189,13 @@ impl Fs for RealFs {
 /// specific internal behaviors without relying on environment variables.
 pub(in crate::git_factor) trait Runner {
     /// Runs a process and returns its captured output.
-    fn output(&self, bin: &str, args: &[&str], cwd: &Path) -> io::Result<Output>;
+    fn output(
+        &self,
+        bin: &str,
+        args: &[&str],
+        envs: &[(&str, Option<&str>)],
+        cwd: &Path,
+    ) -> io::Result<Output>;
 
     /// Runs a process and returns its exit status.
     ///
@@ -168,7 +204,7 @@ pub(in crate::git_factor) trait Runner {
         &self,
         bin: &str,
         args: &[&str],
-        envs: &[(&str, &str)],
+        envs: &[(&str, Option<&str>)],
         quiet: bool,
         cwd: &Path,
     ) -> io::Result<ExitStatus>;
@@ -178,22 +214,41 @@ pub(in crate::git_factor) trait Runner {
 pub(in crate::git_factor) struct RealRunner;
 
 impl Runner for RealRunner {
-    fn output(&self, bin: &str, args: &[&str], cwd: &Path) -> io::Result<Output> {
-        Command::new(bin).args(args).current_dir(cwd).output()
+    fn output(
+        &self,
+        bin: &str,
+        args: &[&str],
+        envs: &[(&str, Option<&str>)],
+        cwd: &Path,
+    ) -> io::Result<Output> {
+        let mut command = Command::new(bin);
+        command.args(args).current_dir(cwd);
+        for &(key, value) in envs {
+            if let Some(assigned) = value {
+                command.env(key, assigned);
+            } else {
+                command.env_remove(key);
+            }
+        }
+        command.output()
     }
 
     fn status(
         &self,
         bin: &str,
         args: &[&str],
-        envs: &[(&str, &str)],
+        envs: &[(&str, Option<&str>)],
         quiet: bool,
         cwd: &Path,
     ) -> io::Result<ExitStatus> {
         let mut command = Command::new(bin);
         command.args(args).current_dir(cwd);
         for &(key, value) in envs {
-            command.env(key, value);
+            if let Some(assigned) = value {
+                command.env(key, assigned);
+            } else {
+                command.env_remove(key);
+            }
         }
         if quiet {
             command.stdout(Stdio::null()).stderr(Stdio::null());

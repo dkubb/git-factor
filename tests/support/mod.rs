@@ -13,6 +13,7 @@
     clippy::implicit_return,
     reason = "integration support helpers are intentionally narrow scenario utilities"
 )]
+use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{self, Command};
@@ -96,9 +97,36 @@ pub fn git_factor_bin() -> PathBuf {
     assert_cmd::cargo::cargo_bin!("git-factor").to_path_buf()
 }
 
+/// Resolves the fixture's incoming Git before an owned PATH wrapper is introduced.
+#[expect(
+    clippy::panic,
+    reason = "Missing required native Git is a fixture setup failure with an explicit diagnostic"
+)]
+pub fn native_git_bin() -> PathBuf {
+    let incoming = must_some(env::var_os("PATH"));
+    for directory in env::split_paths(&incoming) {
+        let candidate = directory.join("git");
+        let Ok(metadata) = fs::metadata(&candidate) else {
+            continue;
+        };
+        if !metadata.is_file() {
+            continue;
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            if metadata.permissions().mode() & 0o111 == 0 {
+                continue;
+            }
+        }
+        return must_ok(fs::canonicalize(candidate));
+    }
+    panic!("fixture requires a native Git on its incoming PATH")
+}
+
 pub fn git(repo: &Path, args: &[&str]) -> String {
     let output = must_ok(
-        Command::new("/usr/bin/git")
+        Command::new(native_git_bin())
             .args(args)
             .current_dir(repo)
             .output(),
@@ -134,7 +162,7 @@ pub fn init_repo() -> TempDir {
     let dir = must_ok(TempDir::new());
     let repo = dir.path();
 
-    git(repo, &["init"]);
+    git(repo, &["init", "--initial-branch=main"]);
     git(repo, &["config", "user.name", "Git Factor Tests"]);
     git(
         repo,
@@ -194,7 +222,7 @@ pub fn write_executable(path: &Path, content: &str) {
 /// The wrapper:
 /// - increments `GIT_FACTOR_COUNT_FILE` each invocation
 /// - if invocation == `GIT_FACTOR_FAIL_AT`, exits 1
-/// - otherwise execs the real git at `/usr/bin/git`
+/// - otherwise execs the native Git resolved before introducing the owned wrapper
 pub fn make_fault_injecting_git_wrapper() -> (TempDir, PathBuf) {
     let dir = must_ok(TempDir::new());
     let bin = dir.path().join("bin");
@@ -226,7 +254,10 @@ fi
 
 exec /usr/bin/git "$@"
 "#;
-    write_executable(&script, content);
+    let native = native_git_bin();
+    let bound_content =
+        content.replace("/usr/bin/git", &sh_single_quote(must_some(native.to_str())));
+    write_executable(&script, &bound_content);
 
     (dir, bin)
 }
@@ -352,10 +383,15 @@ pub fn make_git_wrapper_named(name: &str, body: &str) -> (TempDir, PathBuf) {
     let bin = dir.path().join("bin");
     must_ok(fs::create_dir_all(&bin));
     let script = bin.join(name);
-    let real_binary = format!("/usr/bin/{name}");
+    let real_binary = if name == "git" {
+        native_git_bin()
+    } else {
+        PathBuf::from(format!("/usr/bin/{name}"))
+    };
+    let quoted_binary = sh_single_quote(must_some(real_binary.to_str()));
+    let bound_body = body.replace("/usr/bin/git", &quoted_binary);
     let content = format!(
-        "#!/usr/bin/env bash\nset -Eeuo pipefail\n\n{body}\n\nexec {} \"$@\"\n",
-        sh_single_quote(real_binary.as_str())
+        "#!/usr/bin/env bash\nset -Eeuo pipefail\n\n{bound_body}\n\nexec {quoted_binary} \"$@\"\n"
     );
     write_executable(&script, content.as_str());
     (dir, bin)

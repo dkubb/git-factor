@@ -111,7 +111,7 @@ impl NativeStatus {
             vec!["worktree", "add", "--quiet", "--detach", "wt\u{a0}", "HEAD"],
         ];
         for arguments in commands {
-            let output = Runner::output(&REAL_RUNNER, "git", &arguments, root)
+            let output = Runner::output(&REAL_RUNNER, "git", &arguments, &[], root)
                 .or_abort("native fixture command");
             assert!(
                 output.status.success(),
@@ -132,10 +132,10 @@ impl NativeStatus {
         };
         let io = BufferIo::default();
 
-        let head = Runner::output(&REAL_RUNNER, "git", &["rev-parse", "HEAD"], root)
+        let head = Runner::output(&REAL_RUNNER, "git", &["rev-parse", "HEAD"], &[], root)
             .or_abort("arranged HEAD");
         let refs =
-            Runner::output(&REAL_RUNNER, "git", &["show-ref"], root).or_abort("arranged refs");
+            Runner::output(&REAL_RUNNER, "git", &["show-ref"], &[], root).or_abort("arranged refs");
         assert!(head.status.success());
         assert!(refs.status.success());
         let index =

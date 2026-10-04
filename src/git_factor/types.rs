@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 
 use crate::non_empty_string::NonEmptyString;
 use nonempty::NonEmpty;
+use serde::de::Error as _;
 
 use super::{FactorError, non_empty_msg};
 
@@ -48,7 +49,10 @@ impl Sha {
 }
 
 /// A validated full-length hexadecimal commit SHA.
-#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[derive(
+    Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, serde::Serialize, serde::Deserialize,
+)]
+#[serde(transparent)]
 pub(in crate::git_factor) struct CommitSha(Sha);
 
 impl CommitSha {
@@ -73,7 +77,8 @@ impl fmt::Display for CommitSha {
 }
 
 /// A validated full-length hexadecimal tree hash.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(transparent)]
 pub(in crate::git_factor) struct TreeHash(Sha);
 
 impl TreeHash {
@@ -157,11 +162,6 @@ pub(in crate::git_factor) struct CommitSpan {
 }
 
 impl CommitSpan {
-    /// Returns the commits in oldest-first order.
-    pub(in crate::git_factor) const fn commits(&self) -> &NonEmpty<CommitSha> {
-        &self.commits
-    }
-
     /// Returns the first commit in the span.
     pub(in crate::git_factor) const fn first_commit(&self) -> &CommitSha {
         self.commits.first()
@@ -170,11 +170,6 @@ impl CommitSpan {
     /// Returns `true` when the span begins at the repository root.
     pub(in crate::git_factor) const fn is_root(&self) -> bool {
         self.base_parent.is_root()
-    }
-
-    /// Returns the number of commits in the span.
-    pub(in crate::git_factor) fn len(&self) -> usize {
-        self.commits.len()
     }
 
     /// Creates a new span from one contiguous commit list and its base parent.
@@ -218,13 +213,6 @@ impl StateDir {
     }
 
     /// Constructs a `StateDir` from a validated path.
-    #[cfg_attr(
-        not(test),
-        expect(
-            clippy::single_call_fn,
-            reason = "smart constructor keeps the path wrapper explicit at call sites"
-        )
-    )]
     pub(in crate::git_factor) const fn new(path: PathBuf) -> Self {
         Self(path)
     }
@@ -232,6 +220,7 @@ impl StateDir {
 
 #[cfg(test)]
 mod tests {
+    include!("types_units.rs");
     use super::{
         BaseParent, COMMIT_SHA_HEX_LEN, CommitSha, CommitSpan, Commits, FactorError, Sha, TreeHash,
     };
@@ -348,7 +337,6 @@ mod tests {
 
         assert_eq!(span.first_commit(), &first);
         assert_eq!(span.tip_commit(), &third);
-        assert_eq!(span.len(), 3);
     }
 
     #[test]
@@ -428,3 +416,119 @@ mod tests {
         }
     }
 }
+
+impl serde::Serialize for Sha {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(self.as_str())
+    }
+}
+impl<'de> serde::Deserialize<'de> for Sha {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = <String as serde::Deserialize>::deserialize(deserializer)?;
+        Self::parse(value)
+            .map_err(|raw| D::Error::custom(format!("invalid Git object hash: {raw}")))
+    }
+
+    fn deserialize_in_place<D>(deserializer: D, place: &mut Self) -> Result<(), D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        *place = Self::deserialize(deserializer)?;
+        Ok(())
+    }
+}
+impl fmt::Display for Sha {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl AsRef<str> for CommitSha {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+impl AsRef<str> for TreeHash {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+/// Opaque session ownership identity; never a Git commit.
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(transparent)]
+pub(in crate::git_factor) struct SessionId(Sha);
+impl SessionId {
+    /// Admits a full object-sized session ownership token.
+    pub(in crate::git_factor) fn new(raw: String) -> Result<Self, FactorError> {
+        Sha::parse(raw).map(Self).map_err(|_raw| {
+            FactorError::GitCommand(non_empty_msg("invalid session identity".to_owned()))
+        })
+    }
+}
+impl fmt::Display for SessionId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.0.as_str())
+    }
+}
+
+/// Full branch ref admitted against Git's ref-name grammar.
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
+#[serde(transparent)]
+pub(in crate::git_factor) struct BranchRef(NonEmptyString);
+impl BranchRef {
+    /// Returns the full branch reference.
+    pub(in crate::git_factor) const fn as_str(&self) -> &str {
+        self.0.as_str()
+    }
+
+    /// Admits a full branch name using Git's case-sensitive ref grammar.
+    pub(in crate::git_factor) fn new(raw: String) -> Result<Self, FactorError> {
+        if !raw.starts_with("refs/heads/")
+            || raw.ends_with('.')
+            || raw.contains("..")
+            || raw.contains("@{")
+            || raw.contains("//")
+            || raw
+                .bytes()
+                .any(|byte| byte <= 32 || byte == 127 || b"~^:?*[\\".contains(&byte))
+            || raw.split('/').any(|part| {
+                part.is_empty() || part.starts_with('.') || part.as_bytes().ends_with(b".lock")
+            })
+        {
+            return Err(FactorError::GitCommand(non_empty_msg(
+                "invalid checkpoint branch".to_owned(),
+            )));
+        }
+        Ok(Self(NonEmptyString::try_from(raw).map_err(|_raw| {
+            FactorError::GitCommand(non_empty_msg("empty checkpoint branch".to_owned()))
+        })?))
+    }
+}
+impl<'de> serde::Deserialize<'de> for BranchRef {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let raw = <String as serde::Deserialize>::deserialize(deserializer)?;
+        Self::new(raw).map_err(D::Error::custom)
+    }
+
+    fn deserialize_in_place<D>(deserializer: D, place: &mut Self) -> Result<(), D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        *place = Self::deserialize(deserializer)?;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+#[path = "types_properties.rs"]
+mod proptests;

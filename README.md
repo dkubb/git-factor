@@ -1,261 +1,162 @@
 # git-factor
 
-`git-factor` splits one Git commit, or one contiguous commit span, into smaller
-atomic commits while proving each emitted commit passes a deterministic gate.
-
-Once installed, use it as a normal Git subcommand:
-
-```bash
-git factor -h
-```
-
-Use the standalone binary for the full long help output:
-
-```bash
-git-factor --help
-```
-
-For the agent-oriented workflow and operating rules, see
-[SKILL.md](./SKILL.md).
-
-## What It Does
-
-`git factor` helps you:
-
-- prove the current target state passes a gate before splitting starts
-- stage one atomic slice at a time
-- commit each slice only after the gate passes
-- restore the remaining unstaged pool after each successful split
-- finish with a final tree that matches the original gated tip tree
-
-This makes it useful for turning a large commit, or a messy patch span, into a
-series of smaller reviewable commits.
-
-## Installation
-
-### From This Repository
+`git-factor` splits one commit or a contiguous range into independently validated
+atomic commits. Each successful split completes its rebase and records a durable
+checkpoint before automatically opening the remaining change in a fresh round.
+Later failed attempts cannot discard earlier completed splits.
 
 ```bash
 cargo install --path . --force
-```
-
-This installs both:
-
-- `git-factor`
-- `git-sequence-editor`
-
-Make sure Cargo's bin directory is on your `PATH`:
-
-```bash
-export PATH="${HOME}/.cargo/bin:${PATH}"
-```
-
-Then verify the install:
-
-```bash
 git factor -h
-git-factor --version
-git factor --version
+git-factor --help
 ```
 
-## Requirements
+The package installs `git-factor` and `git-sequence-editor`. Building needs Rust
+and Cargo. Runtime requires **released Git 2.56.0 or newer**. Version admission
+accepts numeric `major.minor.patch`.
+Unknown vendor suffixes and prerelease spellings are refused; this rule is not
+an assurance about every vendor distribution.
 
-- Git 2.38 or newer
-- Rust and Cargo
-- a fully clean repository before `git factor --exec ...`
-- a deterministic validation command for `--exec`
+The first checkpoint release supports macOS and Linux. Windows support is
+deferred.
 
-The start gate must run on a clean repository and must leave the repository
-clean. If `git status --porcelain=v1` is not empty, fix that first by
-committing, stashing, or removing local changes.
+See [SKILL.md](./SKILL.md) for the agent workflow.
 
-## Basic Workflow
+## Before starting
 
-### Split One Commit
+Start on an attached branch with tracked working bytes and index matching HEAD.
+Unrelated untracked and ignored files can remain when they do not collide with
+protected checkout paths. Intermediate range and descendant trees also matter.
+Filesystem aliases and shared physical identities such as hard links can cause
+refusal. Preserve unrelated work; do not automatically stash or delete it.
+
+Gates must be deterministic tree checks with valid Bash syntax. They must
+preserve repository bytes and commit metadata, and must not depend on commit
+metadata, history or messages. Reading candidate files through HEAD is allowed. Use native Git hooks for message policy.
+Put generated gate artifacts outside the checked tree.
+
+## Commit and range inputs
 
 ```bash
-git factor --exec 'just ci' HEAD
+git factor --gate test 'cargo test' --exec 'cargo fmt --check' HEAD
+git factor --gate check 'just ci' HEAD~2 HEAD
 ```
 
-Then:
+Named `--gate NAME COMMAND` and legacy `--exec COMMAND` checks run separately
+in supplied CLI order. Names begin with an ASCII letter and contain ASCII
+letters, digits or hyphens. Names are unique without regard to case. Legacy
+commands receive stable command-derived names; duplicate names are refused.
+
+- `<rev>` selects one commit; omitted revisions default to HEAD.
+- `<start> <end>` selects an inclusive contiguous range.
+- `<start>..<end>` excludes start; `<start>^..<end>` includes it.
+
+The selected tip must be an ancestor of the branch tip. Merge commits,
+noncontiguous ancestry and symmetric difference (`...`) are refused. A range
+replaces its internal seams with the combined tip change relative to its first
+commit's parent. Root ranges use the empty tree. Descendants after the range
+are replayed. A no-net-change selection, including cancelling changes, is
+refused before session mutation.
+
+## Capture atoms
 
 ```bash
+git add --patch -- src/parser.rs
+git factor --message 'Add parser setup'
 git add --patch
-git factor --continue --message 'feat: extract parser setup'
-git add --patch
-git factor --continue --message 'refactor: isolate validation'
-git factor --finish --message 'feat: restore remaining workflow'
+git factor --message 'Refactor validation'
+git factor --finish --message 'Fix remaining edge cases'
 ```
 
-`git factor --message '…'` also submits a staged slice; `--continue` remains
-accepted with a message. Both forms use the same validation and split workflow.
+The combined change is left unstaged. Select one atom with `git add` or
+`git add --patch`. `--message` submits directly; `--continue --message` is an
+alias. Repeated messages form separate paragraphs like Git commit messages.
 
-### Refactor a Whole Commit Span
+The candidate is an actual commit in an isolated worktree with real HEAD.
+Its gates cannot see the unstaged remainder. Native hooks validate the final
+stamped message; message rejection cannot publish the candidate. Git-factor
+replays the remainder and subsequent history using ordered exec gates and
+`--reschedule-failed-exec` and `--no-update-refs`. Unrelated branches and tags
+keep their original object IDs; only the selected branch and owned lease/proof
+refs change. It verifies the final branch tree against the
+recorded original branch-tip tree, finishes the rebase and captures progress.
 
-```bash
-git factor --exec 'just ci' HEAD~2 HEAD
+A fresh round then exposes only the remainder, excluding captured atoms. An
+empty remainder completes normally without manufacturing an empty commit.
+No single long-lived rebase spans all splits.
+
+Passing evidence has this logical, unfolded value:
+
+```text
+Gate-test: <command-hash> <tree-hash>
 ```
 
-This does **not** preserve the original seams inside the range. Instead, it:
+Managed stamp values use native continuation lines with a 72-byte folding
+target. A short named key keeps the command hash on its first line; longer
+keys put both hashes on continuations. Keys and the original message body are
+not wrapped, so native message hooks may still reject an overlong key or body.
+Read the logical pair with
+`git show -s --format='%(trailers:only,unfold=true)' HEAD`.
 
-1. proves the tip of the selected span is green
-2. records that tip tree as the target
-3. turns the whole span into one remaining pool
-4. lets you emit a new sequence of smaller commits
+Matching command/tree proofs are reused. Stale stamps are removed before
+checking and replaced only after success. Positive proof refs allow reuse
+across rounds; changing the command or tree invalidates that evidence. Native
+hooks still validate the final message when tree gates are cached.
 
-## Accepted Commit Inputs
+## Recovery and progress
 
-Documented forms:
+| Command | Effect |
+|---|---|
+| `git factor --message 'Add an atom'` | Validate staged atom and capture it |
+| `git factor --continue` | Resume replay or interrupted recovery |
+| `git factor --retry` | Unstage the current candidate in an open selection |
+| `git factor --finish` | Validate all remaining change and finish |
+| `git factor --abort` | Abandon the active attempt at the latest checkpoint |
+| `git factor --status` | Observe phase and durable progress |
 
-- `<rev>`: split one commit
-- `<start> <end>`: split one inclusive span
+Retry is available only during an open Selecting phase. During Opening or
+Replaying, use the emitted continue action or checkpoint-safe abort.
+Without a message, finish uses the original selected tip message. Retry and
+abort retain earlier completed atoms. Unsafe ref or filesystem interference is
+refused rather than overwritten, including recreated deleted paths, ignored
+files and physical aliases. Retry is not a way to discard unrelated user work.
+Abort discards unfinished replay or conflict edits on attempt-owned paths. The
+exposed selection pool and unrelated files must still pass preservation checks.
 
-Git-native forms also work:
+Resolve replay conflicts, stage the resolution, then run `git factor --continue`.
+For replay gate failures, repair the environment or current replayed commit and
+follow the reported action. Baseline failures allow same-tree environment or
+message repair followed by continue. To change the baseline tree, abort, repair
+the checkpoint and start again. Rejected staged candidates can be adjusted and
+submitted again.
 
-- `<start>..<end>`: exclusive-start range
-- `<start>^..<end>`: inclusive-start range
+The journal and owned refs retain interrupted progress. Resuming owned callbacks
+with `--continue` requires the original canonical executable path recorded in
+the native rebase. A moved executable may perform checkpoint-safe `--abort`
+after complete session and native-rebase ownership checks and protected user-work
+admission, including an unfinished terminal native interval. Abort does not
+execute changed callbacks. Do not edit callbacks, journal files or owned refs
+to bypass admission. Legacy sessions require their originating version; manual
+migration is unsupported.
+Terminal cleanup removes session metadata; positive gate proofs may remain.
 
-Examples:
+## Machine output
 
-```bash
-git factor --exec 'cargo test' HEAD
-git factor --exec 'just ci' HEAD~3 HEAD
-git factor --exec 'cargo test' HEAD~3..HEAD
-git factor --exec 'cargo test' HEAD~3^..HEAD
-```
+Successful session results, gate failures and recovery-required results are
+normalized compact JSON on stdout with a final newline. Help, version and
+other admission errors retain ordinary CLI behavior. A net-zero initial range
+is refused before session mutation with exit data error and
+`{"operation":"start","reason":"empty_change","result":"refused"}`. Gate and Git subprocess
+diagnostics go to stderr. Inactive status is
+`{"operation":"status","session":null}`. Active status reports checkpoint,
+phase, completed split count, original target and rebase facts. Terminal cleanup
+may also report its complete or aborted outcome.
+Status does not change refs, the real index, journal, actors, or recovery
+progress. Tracked-tree validation can run configured clean filters and create
+unreferenced Git objects.
 
-Restrictions:
-
-- the selected commits must resolve to one contiguous ancestry span
-- merge commits in the span are rejected
-- symmetric diff (`...`) is not supported
-
-## Session Commands
-
-Start:
-
-```bash
-git factor --exec 'just ci' HEAD
-```
-
-Commit the currently staged slice:
-
-```bash
-git factor --continue --message 'feat: add parser'
-```
-
-Discard the current split attempt and restore the remaining pool:
-
-```bash
-git factor --retry
-```
-
-Finish by committing the remaining pool:
-
-```bash
-git factor --finish
-```
-
-Abort the active session and restore the repository:
-
-```bash
-git factor --abort
-```
-
-Inspect the current session:
-
-```bash
-git factor --status
-```
-
-## How The Gate Works
-
-The `--exec` command is your quality gate.
-
-- The start gate must pass before the factor session opens.
-- The same gate runs before each `--continue` commit is created.
-- `git factor` restores the remaining unstaged pool after each successful
-  `--continue`.
-- `--finish` verifies the final tree matches the recorded gated tip tree.
-
-Use the strictest deterministic gate you have. Typical choices:
-
-```bash
-git factor --exec 'just ci' HEAD
-git factor --exec 'cargo test' HEAD
-git factor --exec 'npm test' HEAD
-```
-
-## Recovery
-
-If the start gate fails, fix the target commit first.
-
-Single-commit sessions:
-
-1. fix the files
-2. stage the intended changes
-3. amend the commit
-4. rerun `git factor --exec ...`
-
-Range sessions:
-
-1. fix the current tip commit
-2. stage the intended changes
-3. amend the commit
-4. run `git rebase --continue`
-
-If you stage the wrong slice during an active session:
-
-```bash
-git factor --retry
-```
-
-That keeps the session active and restores the remaining pool so you can try
-again.
-
-## Practical Advice
-
-- Start with the strictest passing gate.
-- Split easy leaf nodes first.
-- Prefer coarse splits before fine-grained ones.
-- Finish a session once the next split stops being trivial, then factor the new
-  top commit again if needed.
-- Keep each commit review-sized and independently valid.
-
-## Related Documentation
-
-- [SKILL.md](./SKILL.md): agent workflow and detailed operational guidance
-
-## Status Output
-
-`git factor --status` writes one JSON object followed by a newline. An inactive
-session is `{"operation":"status","session":null}`. An active session exposes
-`phase`, `split_count`, `rebase.in_progress`, `rebase.required`, and
-`target.commit`, `target.index`, `target.span_starts_at_root`.
-
-`target.index` is the zero-based position in the saved selected commit sequence;
-`target.commit` is that position's current commit. The root flag describes the
-selected span's original root boundary. Status observes the current session.
-
-## Abort Output
-
-`git factor --abort` reports the existing cleanup result as one JSON object,
-followed by a newline. `rebase.in_progress` is observed after factor state is
-removed. When true, `actions.abort_rebase` contains `["git", "rebase", "--abort"]`;
-otherwise `actions` is empty. Existing reset, cleanup and external-rebase
-behavior is unchanged.
-
-## Completion Output
-
-A successful final `git factor --continue --message '…'` or `git factor --finish`
-reports `{"operation":"continue","split_count":N}` or the
-same object with `operation` equal to `finish`, followed by a newline. `N` is the
-existing positive count of commits created for the final selected commit. The
-existing completion, cleanup and replay behavior is unchanged.
-
-Only terminal completion results use this JSON form. Non-final `--continue`
-results, start, retry, and failure output retain their existing human-readable
-text. Gate output during terminal `--continue` is forwarded to stderr.
-
-A terminal message-only submission (`git factor --message '…'`) produces the
-same completion object with `operation` equal to `continue`.
+Selection results include available actions and file changes. Text changes have
+line counts, binary changes have a binary classification, and non-UTF-8 paths
+retain their byte arrays. Gate failure and paused replay use explicit
+`gate_failed` and `recovery_required` results. Check both JSON and exit status;
+follow emitted actions rather than inferring the phase from HEAD alone.

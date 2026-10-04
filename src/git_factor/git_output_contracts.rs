@@ -33,7 +33,13 @@ impl RecordingRunner {
 }
 
 impl Runner for RecordingRunner {
-    fn output(&self, bin: &str, args: &[&str], cwd: &Path) -> io::Result<Output> {
+    fn output(
+        &self,
+        bin: &str,
+        args: &[&str],
+        _envs: &[(&str, Option<&str>)],
+        cwd: &Path,
+    ) -> io::Result<Output> {
         self.requests.borrow_mut().push((
             bin.to_owned(),
             args.iter().map(|arg| (*arg).to_owned()).collect(),
@@ -49,7 +55,7 @@ impl Runner for RecordingRunner {
         &self,
         _bin: &str,
         _args: &[&str],
-        _envs: &[(&str, &str)],
+        _envs: &[(&str, Option<&str>)],
         _quiet: bool,
         _cwd: &Path,
     ) -> io::Result<ExitStatus> {

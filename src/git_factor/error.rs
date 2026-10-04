@@ -67,6 +67,10 @@ pub(in crate::git_factor) enum FactorError {
     #[error("not a git repository")]
     NotGitRepo,
 
+    /// Native compatibility could not be observed before session authority was admitted.
+    #[error("git command failed: {0}")]
+    PrerequisiteObservation(NonEmptyString),
+
     /// Failed to read state file.
     #[error("failed to read state: {0}")]
     StateRead(#[source] io::Error),
@@ -109,6 +113,7 @@ impl FactorError {
             | &Self::NoStagedChanges
             | &Self::NotAncestor(_)
             | &Self::NotGitRepo
+            | &Self::PrerequisiteObservation(_)
             | &Self::Usage(_) => false,
         }
     }
@@ -126,6 +131,18 @@ pub(in crate::git_factor) fn non_empty_msg(msg: String) -> NonEmptyString {
 
 #[cfg(test)]
 mod tests {
+    mod factor_error {
+        mod should_persist_error_log {
+            #[test]
+            fn prerequisite_observation_preserves_primary_diagnostic_without_session_logging() {
+                let error = super::super::super::FactorError::PrerequisiteObservation(
+                    super::super::super::non_empty_msg("owned query failure".to_owned()),
+                );
+                assert!(!error.should_persist_error_log());
+                assert_eq!(error.to_string(), "git command failed: owned query failure");
+            }
+        }
+    }
     use super::*;
 
     use crate::git_factor::types::COMMIT_SHA_HEX_LEN;
@@ -163,5 +180,23 @@ mod tests {
         assert!(!FactorError::NoStagedChanges.should_persist_error_log());
         assert!(!FactorError::Usage(non_empty_msg("usage".to_owned())).should_persist_error_log());
         assert!(!FactorError::MergeCommit(sha).should_persist_error_log());
+    }
+}
+
+#[cfg(test)]
+mod proptests {
+    mod factor_error {
+        mod should_persist_error_log {
+            proptest::proptest! {
+                #[test]
+                fn preserves_generated_prerequisite_diagnostic_without_logging(diagnostic in ".{1,40}") {
+                    let error = super::super::super::FactorError::PrerequisiteObservation(
+                        super::super::super::non_empty_msg(diagnostic.clone()),
+                    );
+                    proptest::prop_assert!(!error.should_persist_error_log());
+                    proptest::prop_assert_eq!(error.to_string(), format!("git command failed: {diagnostic}"));
+                }
+            }
+        }
     }
 }
