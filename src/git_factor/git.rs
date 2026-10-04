@@ -1069,6 +1069,7 @@ mod tests {
     }
 
     use super::*;
+    use core::mem::take;
     use std::env;
     use std::ffi::OsString;
     use std::os::unix::process::ExitStatusExt as _;
@@ -1104,8 +1105,8 @@ mod tests {
     }
 
     struct ToggleTraceEnv {
-        calls: Mutex<usize>,
         cwd: PathBuf,
+        trace_available: Mutex<bool>,
         trace_path: OsString,
     }
 
@@ -1122,11 +1123,8 @@ mod tests {
             if key != TRACE_LOG_ENV {
                 return None;
             }
-            let mut calls = self.calls.lock().or_abort("toggle env lock");
-            *calls = calls
-                .checked_add(1)
-                .map_or(usize::MAX, |next_calls| next_calls);
-            (*calls == 1).then(|| self.trace_path.clone())
+            let mut available = self.trace_available.lock().or_abort("toggle env lock");
+            take(&mut *available).then(|| self.trace_path.clone())
         }
     }
 
@@ -2382,12 +2380,12 @@ mod tests {
 
         let toggle_env = ToggleTraceEnv {
             cwd: dir.path().to_path_buf(),
+            trace_available: Mutex::new(true),
             trace_path: dir
                 .path()
                 .join("trace-toggle.jsonl")
                 .as_os_str()
                 .to_os_string(),
-            calls: Mutex::new(0),
         };
         assert_eq!(
             toggle_env.current_dir().or_abort("toggle current_dir"),
