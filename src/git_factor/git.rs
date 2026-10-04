@@ -1,3 +1,8 @@
+/// Arrange-only observations for direct Git-directory contracts.
+#[cfg(test)]
+#[path = "git_directory_contracts.rs"]
+mod directory_contracts;
+
 /// Arrange-only observations for direct Git-output contracts.
 #[cfg(test)]
 #[path = "git_output_contracts.rs"]
@@ -11,6 +16,8 @@ mod output_contracts;
     )
 )]
 use super::*;
+use std::ffi::OsStr;
+use std::os::unix::ffi::OsStrExt as _;
 use std::time::Instant;
 
 /// Backend directory name for apply-based rebases.
@@ -178,8 +185,8 @@ pub(in crate::git_factor) fn git_dir_in(ctx: &Ctx<'_>) -> Result<PathBuf, Factor
         return Err(FactorError::NotGitRepo);
     }
 
-    let path = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-    let git_dir_path = PathBuf::from(path);
+    let path = output.stdout.strip_suffix(b"\n").unwrap_or(&output.stdout);
+    let git_dir_path = PathBuf::from(OsStr::from_bytes(path));
 
     // `git rev-parse --git-dir` can return a relative path (e.g. ".git"). Treat it
     // as relative to the `Ctx` working directory.
@@ -321,6 +328,202 @@ pub(in crate::git_factor) fn run_git_with(
 
 #[cfg(test)]
 mod tests {
+    mod git_dir_in {
+        use super::super::directory_contracts::{NativeStatus, Query};
+        use crate::exit_codes::EXIT_OK;
+        use crate::git_factor::{FactorError, REAL_RUNNER, Runner, main_entry_with_vec};
+        use crate::test_support::{OrAbort as _, ResultOrAbort as _};
+        use std::ffi::{OsStr, OsString};
+        use std::fs;
+        use std::io;
+        use std::os::unix::ffi::OsStrExt as _;
+        use std::os::unix::process::ExitStatusExt as _;
+        use std::path::Path;
+        use std::process::{ExitStatus, Output};
+        #[test]
+        fn preserves_relative_whitespace_and_only_removes_native_lf() {
+            let payload = b" admin\t\r\n";
+            let fixture = Query::successful(payload, true);
+            let expected = fixture.directory.path().join(OsStr::from_bytes(payload));
+
+            let actual = super::super::git_dir_in(&fixture.context())
+                .or_abort("successful native directory query");
+
+            assert_eq!(
+                actual.as_os_str().as_bytes(),
+                expected.as_os_str().as_bytes()
+            );
+            assert_eq!(
+                fixture.runner.requests(),
+                vec![(
+                    "git".to_owned(),
+                    vec!["rev-parse".to_owned(), "--git-dir".to_owned()],
+                    fixture.directory.path().to_path_buf()
+                )]
+            );
+            assert_eq!(fixture.io.stdout(), "");
+            assert_eq!(fixture.io.stderr(), "");
+            assert_eq!(
+                fs::read(fixture.directory.path().join("trace")).or_abort("trace retained"),
+                b"existing trace bytes\n"
+            );
+        }
+        #[test]
+        fn preserves_absolute_non_utf8_bytes() {
+            let payload = b"/admin/\xff\xc2\xa0";
+            let fixture = Query::successful(payload, true);
+            let expected = Path::new(OsStr::from_bytes(payload)).to_path_buf();
+
+            let actual = super::super::git_dir_in(&fixture.context())
+                .or_abort("successful native directory query");
+
+            assert_eq!(
+                actual.as_os_str().as_bytes(),
+                expected.as_os_str().as_bytes()
+            );
+            assert_eq!(
+                fixture.runner.requests(),
+                vec![(
+                    "git".to_owned(),
+                    vec!["rev-parse".to_owned(), "--git-dir".to_owned()],
+                    fixture.directory.path().to_path_buf()
+                )]
+            );
+            assert_eq!(fixture.io.stdout(), "");
+            assert_eq!(fixture.io.stderr(), "");
+            assert_eq!(
+                fs::read(fixture.directory.path().join("trace")).or_abort("trace retained"),
+                b"existing trace bytes\n"
+            );
+        }
+        #[test]
+        fn preserves_path_without_native_lf() {
+            let payload = b".git ";
+            let fixture = Query::successful(payload, false);
+            let expected = fixture.directory.path().join(OsStr::from_bytes(payload));
+
+            let actual = super::super::git_dir_in(&fixture.context())
+                .or_abort("successful native directory query");
+
+            assert_eq!(
+                actual.as_os_str().as_bytes(),
+                expected.as_os_str().as_bytes()
+            );
+            assert_eq!(
+                fixture.runner.requests(),
+                vec![(
+                    "git".to_owned(),
+                    vec!["rev-parse".to_owned(), "--git-dir".to_owned()],
+                    fixture.directory.path().to_path_buf()
+                )]
+            );
+            assert_eq!(fixture.io.stdout(), "");
+            assert_eq!(fixture.io.stderr(), "");
+            assert_eq!(
+                fs::read(fixture.directory.path().join("trace")).or_abort("trace retained"),
+                b"existing trace bytes\n"
+            );
+        }
+        #[test]
+        fn preserves_spawn_failure_mapping() {
+            let fixture = Query::new(Err(io::Error::other("directory query refused")));
+
+            let error = super::super::git_dir_in(&fixture.context())
+                .err_or_abort("directory query must refuse");
+
+            assert!(
+                matches!(error, FactorError::GitDir(message) if message.as_str() == "directory query refused")
+            );
+            assert_eq!(
+                fixture.runner.requests(),
+                vec![(
+                    "git".to_owned(),
+                    vec!["rev-parse".to_owned(), "--git-dir".to_owned()],
+                    fixture.directory.path().to_path_buf()
+                )]
+            );
+            assert_eq!(fixture.io.stdout(), "");
+            assert_eq!(fixture.io.stderr(), "");
+            assert_eq!(
+                fs::read_dir(fixture.directory.path())
+                    .or_abort("failure directory unchanged")
+                    .count(),
+                0
+            );
+        }
+        #[test]
+        fn preserves_failed_status_mapping() {
+            let code: i32 = 42;
+            let fixture = Query::new(Ok(Output {
+                status: ExitStatus::from_raw(code.checked_mul(256).or_abort("lawful wait status")),
+                stdout: b"wrong-directory\n".to_vec(),
+                stderr: b"native failure\n".to_vec(),
+            }));
+
+            let error = super::super::git_dir_in(&fixture.context())
+                .err_or_abort("directory query must refuse");
+
+            assert!(matches!(error, FactorError::NotGitRepo));
+            assert_eq!(
+                fixture.runner.requests(),
+                vec![(
+                    "git".to_owned(),
+                    vec!["rev-parse".to_owned(), "--git-dir".to_owned()],
+                    fixture.directory.path().to_path_buf()
+                )]
+            );
+            assert_eq!(fixture.io.stdout(), "");
+            assert_eq!(fixture.io.stderr(), "");
+            assert_eq!(
+                fs::read_dir(fixture.directory.path())
+                    .or_abort("failure directory unchanged")
+                    .count(),
+                0
+            );
+        }
+        #[test]
+        fn public_status_does_not_read_whitespace_sibling_session() {
+            let fixture = NativeStatus::new();
+            let root = fixture.directory.path();
+            let arguments = [OsString::from("git-factor"), OsString::from("--status")];
+
+            let code = main_entry_with_vec(&fixture.io, Ok(fixture.context()), &arguments);
+
+            assert_eq!(code, EXIT_OK, "{}", fixture.io.stderr());
+            assert_eq!(
+                fixture.io.stdout(),
+                "{\"operation\":\"status\",\"session\":null}\n"
+            );
+            assert_eq!(fixture.io.stderr(), "");
+            assert_eq!(
+                fs::read(&fixture.foreign).or_abort("foreign state retained"),
+                b"foreign state bytes\n"
+            );
+            assert!(!root.join(".git/worktrees/wt\u{a0}/factor").exists());
+            assert_eq!(
+                fs::read(&fixture.user).or_abort("unrelated work retained"),
+                b"unrelated user bytes\0\n"
+            );
+            let head = Runner::output(&REAL_RUNNER, "git", &["rev-parse", "HEAD"], root)
+                .or_abort("HEAD observer");
+            let refs =
+                Runner::output(&REAL_RUNNER, "git", &["show-ref"], root).or_abort("ref observer");
+            assert!(head.status.success());
+            assert!(refs.status.success());
+            assert_eq!(head.stdout, fixture.head);
+            assert_eq!(refs.stdout, fixture.refs);
+            assert_eq!(
+                fs::read(root.join(".git/worktrees/wt\u{a0}/index")).or_abort("raw index observer"),
+                fixture.index
+            );
+            assert_eq!(
+                fs::read(root.join(".git/worktrees/wt\u{a0}/HEAD"))
+                    .or_abort("detached HEAD observer"),
+                fixture.detached_head
+            );
+        }
+    }
+
     mod git_output {
         use super::*;
 
@@ -2420,6 +2623,153 @@ mod tests {
 
 #[cfg(test)]
 mod proptests {
+    mod git_dir_in {
+        use super::super::directory_contracts::Query;
+        use crate::git_factor::FactorError;
+        use crate::test_support::{OrAbort as _, ResultOrAbort as _};
+        use core::ops::RangeInclusive;
+        use proptest::collection::vec;
+        use proptest::prelude::*;
+        use std::ffi::OsStr;
+        use std::fs;
+        use std::io;
+        use std::os::unix::ffi::OsStrExt as _;
+        use std::os::unix::process::ExitStatusExt as _;
+        use std::path::Path;
+        use std::process::{ExitStatus, Output};
+
+        proptest! {
+            #[test]
+            fn preserves_generated_relative_native_path_bytes(
+                bytes in vec(RangeInclusive::<u8>::new(1, u8::MAX), 1..40)
+            ) {
+                let mut payload = b"admin/".to_vec();
+                payload.extend(bytes);
+                let fixture = Query::successful(&payload, true);
+                let expected = fixture.directory.path().join(OsStr::from_bytes(&payload));
+
+                let actual = super::super::git_dir_in(&fixture.context())
+                    .or_abort("successful native directory query");
+
+                prop_assert_eq!(
+                    actual.as_os_str().as_bytes(),
+                    expected.as_os_str().as_bytes()
+                );
+                prop_assert_eq!(
+                    fixture.runner.requests(),
+                    vec![(
+                        "git".to_owned(),
+                        vec!["rev-parse".to_owned(), "--git-dir".to_owned()],
+                        fixture.directory.path().to_path_buf()
+                    )]
+                );
+                prop_assert_eq!(fixture.io.stdout(), "");
+                prop_assert_eq!(fixture.io.stderr(), "");
+                prop_assert_eq!(
+                    fs::read(fixture.directory.path().join("trace"))
+                        .or_abort("trace retained"),
+                    b"existing trace bytes\n"
+                );
+            }
+            #[test]
+            fn preserves_generated_absolute_native_path_bytes(
+                bytes in vec(RangeInclusive::<u8>::new(1, u8::MAX), 1..40)
+            ) {
+                let mut payload = b"/admin/".to_vec();
+                payload.extend(bytes);
+                let fixture = Query::successful(&payload, true);
+                let expected = Path::new(OsStr::from_bytes(&payload)).to_path_buf();
+
+                let actual = super::super::git_dir_in(&fixture.context())
+                    .or_abort("successful native directory query");
+
+                prop_assert_eq!(
+                    actual.as_os_str().as_bytes(),
+                    expected.as_os_str().as_bytes()
+                );
+                prop_assert_eq!(
+                    fixture.runner.requests(),
+                    vec![(
+                        "git".to_owned(),
+                        vec!["rev-parse".to_owned(), "--git-dir".to_owned()],
+                        fixture.directory.path().to_path_buf()
+                    )]
+                );
+                prop_assert_eq!(fixture.io.stdout(), "");
+                prop_assert_eq!(fixture.io.stderr(), "");
+                prop_assert_eq!(
+                    fs::read(fixture.directory.path().join("trace"))
+                        .or_abort("trace retained"),
+                    b"existing trace bytes\n"
+                );
+            }
+            #[test]
+            fn preserves_generated_failed_status_mapping(
+                code in RangeInclusive::<u8>::new(1, u8::MAX)
+            ) {
+                let fixture = Query::new(Ok(Output {
+                    status: ExitStatus::from_raw(
+                        i32::from(code).checked_mul(256).or_abort("lawful wait status")
+                    ),
+                    stdout: b"wrong-directory\n".to_vec(),
+                    stderr: b"native failure\n".to_vec()
+                }));
+
+                let error = super::super::git_dir_in(&fixture.context())
+                    .err_or_abort("directory query must refuse");
+
+                prop_assert!(matches!(error, FactorError::NotGitRepo));
+                prop_assert_eq!(
+                    fixture.runner.requests(),
+                    vec![(
+                        "git".to_owned(),
+                        vec!["rev-parse".to_owned(), "--git-dir".to_owned()],
+                        fixture.directory.path().to_path_buf()
+                    )]
+                );
+                prop_assert_eq!(fixture.io.stdout(), "");
+                prop_assert_eq!(fixture.io.stderr(), "");
+                prop_assert_eq!(
+                    fs::read_dir(fixture.directory.path())
+                        .or_abort("failure directory unchanged")
+                        .count(),
+                    0
+                );
+            }
+            #[test]
+            fn preserves_generated_spawn_failure_mapping(
+                code in RangeInclusive::<u8>::new(1, u8::MAX)
+            ) {
+                let diagnostic = format!("directory query refused {code}");
+                let fixture = Query::new(Err(io::Error::other(diagnostic.clone())));
+
+                let error = super::super::git_dir_in(&fixture.context())
+                    .err_or_abort("directory query must refuse");
+
+                prop_assert!(matches!(
+                    error,
+                    FactorError::GitDir(message) if message.as_str() == diagnostic
+                ));
+                prop_assert_eq!(
+                    fixture.runner.requests(),
+                    vec![(
+                        "git".to_owned(),
+                        vec!["rev-parse".to_owned(), "--git-dir".to_owned()],
+                        fixture.directory.path().to_path_buf()
+                    )]
+                );
+                prop_assert_eq!(fixture.io.stdout(), "");
+                prop_assert_eq!(fixture.io.stderr(), "");
+                prop_assert_eq!(
+                    fs::read_dir(fixture.directory.path())
+                        .or_abort("failure directory unchanged")
+                        .count(),
+                    0
+                );
+            }
+        }
+    }
+
     mod git_output {
         use super::super::tests::{BufferIo, OutputOnlyRunner, TestEnv, arrange_query_context};
         use super::*;
